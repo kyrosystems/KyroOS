@@ -47,36 +47,12 @@ uint32_t tty_write(vfs_node_t *node, uint64_t offset, uint32_t size,
 }
 
 void tty_init() {
-  // Create /dev if it doesn't exist
-  vfs_node_t *dev = vfs_resolve_path(vfs_root, "/dev");
-  if (!dev) {
-    if (vfs_mkdir(vfs_root, "dev", 0) == 0) {
-      dev = vfs_resolve_path(vfs_root, "/dev");
-    }
-  }
-
-  if (dev) {
-    if (vfs_create(dev, "tty", 0) == 0) {
-      vfs_node_t *tty =
-          vfs_resolve_path(dev, "/dev/tty"); // or vfs_finddir(dev, "tty")
-      if (tty) {
-        tty->read = tty_read;
-        tty->write = tty_write;
-        klog(LOG_INFO, "TTY: /dev/tty registered.");
-      } else {
-        klog(LOG_ERROR, "TTY: Failed to resolve /dev/tty after creation.");
-      }
-    } else {
-      klog(LOG_WARN, "TTY: /dev/tty creation failed (maybe exists?). "
-                     "attempting to resolve.");
-      vfs_node_t *tty = vfs_resolve_path(dev, "/dev/tty");
-      if (tty) {
-        tty->read = tty_read;
-        tty->write = tty_write;
-        klog(LOG_INFO, "TTY: /dev/tty handlers updated.");
-      }
-    }
+  vfs_node_t *tty = vfs_resolve_path(vfs_root, "/dev/tty");
+  if (tty) {
+    tty->read = tty_read;
+    tty->write = tty_write;
+    klog(LOG_INFO, "TTY: /dev/tty handlers registered.");
   } else {
-    klog(LOG_ERROR, "TTY: Failed to create or find /dev.");
+    klog(LOG_ERROR, "TTY: Failed to resolve /dev/tty. This should have been created by KyroFS.");
   }
 }

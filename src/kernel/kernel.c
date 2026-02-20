@@ -152,13 +152,13 @@ void kmain_x64(void) {
   vfs_init();
   serial_print("KMAIN: after vfs_init()\n");
 
-  serial_print("KMAIN: before tty_init()\n");
-  tty_init();
-  serial_print("KMAIN: after tty_init()\n");
-
   serial_print("KMAIN: before kyrofs_init()\n");
   kyrofs_init();
   serial_print("KMAIN: after kyrofs_init()\n");
+
+  serial_print("KMAIN: before tty_init()\n");
+  tty_init();
+  serial_print("KMAIN: after tty_init()\n");
 
   serial_print("KMAIN: before fs_disk_vfs_init()\n");
   fs_disk_vfs_init(); // Initialize and register the disk filesystem

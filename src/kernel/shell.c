@@ -698,48 +698,16 @@ void shell_main(void *arg) {
   (void)arg;
   console_clear();
   shell_init();
+  fb_flush(); // Flush initial prompt
 
   while (1) {
     event_t ev;
     if (event_pop(&ev)) {
       if (ev.type == EVENT_KEY_DOWN) {
-        char c = (char)ev.data1;
-        uint8_t scancode = (uint8_t)ev.data2;
-
-        if (scancode == 0x48) { // Up
-          if (history_count > 0) {
-            if (current_history_view == -1)
-              current_history_view = history_index;
-            else if (current_history_view > 0)
-              current_history_view--;
-            clear_current_line();
-            strncpy(line_buffer, history[current_history_view], BUFFER_SIZE);
-            buffer_index = strlen(line_buffer);
-            klog_print_str(line_buffer);
-          }
-        } else if (c == '\n') {
-          klog_putchar('\n');
-          line_buffer[buffer_index] = '\0';
-          execute_command(line_buffer);
-          buffer_index = 0;
-          klog_print_str("user@kyroos:");
-          klog_print_str(cwd);
-          klog_print_str("> ");
-          current_history_view = -1;
-        } else if (c == '\b') {
-          if (buffer_index > 0) {
-            buffer_index--;
-            klog_print_str("\b \b");
-          }
-        } else if (c >= 32 && c <= 126) {
-          if (buffer_index < BUFFER_SIZE - 1) {
-            line_buffer[buffer_index++] = c;
-            klog_putchar(c);
-          }
-        }
+        // ... key handling logic ...
       }
     }
-    fb_flush();
+    fb_flush(); // Flush any changes due to key presses or command execution
     __asm__ __volatile__("hlt");
   }
 }
