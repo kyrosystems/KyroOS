@@ -65,9 +65,9 @@ void perror(const char *s) {
   // Add more specific handling for higher error codes if needed
 
   if (s && strlen(s) > 0) {
-    ksprintf(buffer, "%s: %s\n", s, err_str);
+    sprintf(buffer, "%s: %s\n", s, err_str);
   } else {
-    ksprintf(buffer, "%s\n", err_str);
+    sprintf(buffer, "%s\n", err_str);
   }
   print(buffer);
 }

@@ -37,7 +37,7 @@ int snprintf(char *buf, size_t size, const char *fmt, ...) {
 
   // Use ksprintf but limit to size
   char temp_buf[2048];
-  int len = ksprintf(temp_buf, fmt, args);
+  int len = vsprintf(temp_buf, fmt, args);
 
   va_end(args);
 

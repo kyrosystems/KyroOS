@@ -3,7 +3,7 @@ global thread_switch
 global userspace_trampoline
 global thread_starter
 
-extern hhdm_offset
+extern kernel_hhdm_offset
 extern thread_entry
 
 ; void thread_switch(thread_t* old_thread, thread_t* new_thread);
@@ -28,7 +28,7 @@ thread_switch:
     je .no_cr3_switch
 
     ; Switch CR3
-    mov rcx, [rel hhdm_offset]
+    mov rcx, [rel kernel_hhdm_offset]
     sub rbx, rcx ; rbx is now physical address of new_pml4
     mov cr3, rbx
 

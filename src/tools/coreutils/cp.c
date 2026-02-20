@@ -63,8 +63,8 @@ static int copy_recursive(const char *src, const char *dest) {
                 continue;
             }
 
-            ksprintf(src_entry_path, "%s/%s", src, de.name);
-            ksprintf(dest_entry_path, "%s/%s", dest, de.name);
+            sprintf(src_entry_path, "%s/%s", src, de.name);
+            sprintf(dest_entry_path, "%s/%s", dest, de.name);
             
             if (copy_recursive(src_entry_path, dest_entry_path) != 0) {
                 close(dir_fd);

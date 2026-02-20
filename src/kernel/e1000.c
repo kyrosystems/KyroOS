@@ -265,7 +265,7 @@ static int e1000_attach(device_t *dev) {
   uint32_t bar0 = pci_read_config_dword(dev->bus, dev->device, dev->func, 0x10);
   uint32_t mmio_phys_base = bar0 & 0xFFFFFFF0;
   e1000_dev->mmio_base =
-      (volatile uint32_t *)(uint64_t)(mmio_phys_base + hhdm_offset);
+      (volatile uint32_t *)(uint64_t)(mmio_phys_base + kernel_hhdm_offset);
 
   // 3. Read MAC Address
   uint32_t mac_low = e1000_read_reg(e1000_dev, E1000_REG_RA);

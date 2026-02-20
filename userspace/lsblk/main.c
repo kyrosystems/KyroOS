@@ -15,7 +15,7 @@ void lsblk() {
     int index = 0;
     while (readdir(dev_fd, index++, &dir_entry) > 0) {
         char dev_path[256];
-        ksprintf(dev_path, "/dev/%s", dir_entry.name);
+        sprintf(dev_path, "/dev/%s", dir_entry.name);
 
         int fd = open(dev_path, O_RDONLY);
         if (fd < 0) {
@@ -27,7 +27,7 @@ void lsblk() {
             // successful ioctl
             uint64_t size_mb = (info.total_sectors * info.bytes_per_sector) / (1024 * 1024);
             char out_buf[256];
-            ksprintf(out_buf, "%-9s %dM\n", dir_entry.name, size_mb);
+            sprintf(out_buf, "%-9s %dM\n", dir_entry.name, size_mb);
             print(out_buf);
         }
 

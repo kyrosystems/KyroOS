@@ -24,7 +24,7 @@ void installer_disk_detection() {
     }
 
     char info_buf[128];
-    ksprintf(info_buf, "INSTALLER: Found disk %s: Total sectors: %llu, Bytes per sector: %u\n", 
+    sprintf(info_buf, "INSTALLER: Found disk %s: Total sectors: %llu, Bytes per sector: %u\n", 
              disk_path, disk_info.total_sectors, disk_info.bytes_per_sector);
     print(info_buf);
 
@@ -46,7 +46,7 @@ void installer_disk_detection() {
         mbr_partition_entry_t *part = &mbr.partitions[i];
         if (part->type_code == 0x00) continue; // Empty partition
 
-        ksprintf(info_buf, "  [%d] Type: 0x%02x, Start LBA: %u, Size: %u sectors\n",
+        sprintf(info_buf, "  [%d] Type: 0x%02x, Start LBA: %u, Size: %u sectors\n",
                  i, part->type_code, part->starting_lba, part->size_in_sectors);
         print(info_buf);
     }
@@ -80,7 +80,7 @@ void installer_partition_selection() {
         if (part->type_code == 0x00) continue;
 
         char info_buf[128];
-        ksprintf(info_buf, "  [%d] Type: 0x%02x, Start LBA: %u, Size: %u sectors\n",
+        sprintf(info_buf, "  [%d] Type: 0x%02x, Start LBA: %u, Size: %u sectors\n",
                  i + 1, part->type_code, part->starting_lba, part->size_in_sectors); // Display 1-indexed
         print(info_buf);
     }
@@ -92,7 +92,7 @@ void installer_partition_selection() {
             selected_partition_lba = part->starting_lba;
             selected_partition_size = part->size_in_sectors;
             char info_buf[128];
-            ksprintf(info_buf, "INSTALLER: Auto-selected partition %d (LBA: %u, Size: %u sectors)\n",
+            sprintf(info_buf, "INSTALLER: Auto-selected partition %d (LBA: %u, Size: %u sectors)\n",
                      i + 1, selected_partition_lba, selected_partition_size);
             print(info_buf);
             return;
@@ -119,7 +119,7 @@ void installer_filesystem_formatting() {
     }
     
     char info_buf[128];
-    ksprintf(info_buf, "INSTALLER: Formatting partition at LBA %u, size %u sectors...\n", 
+    sprintf(info_buf, "INSTALLER: Formatting partition at LBA %u, size %u sectors...\n", 
              selected_partition_lba, selected_partition_size);
     print(info_buf);
 
@@ -141,7 +141,7 @@ void installer_filesystem_formatting() {
     // The device node path should reflect the specific partition, e.g. /dev/sda1
     // For now, hardcode it as /dev/sda1 in the device_node_path
     char partition_device_node_path[32];
-    ksprintf(partition_device_node_path, "%s%u", disk_path, 1); // e.g., /dev/sda1 (assuming first partition)
+    sprintf(partition_device_node_path, "%s%u", disk_path, 1); // e.g., /dev/sda1 (assuming first partition)
 
     if (mount("/mnt", partition_device_node_path, "fs_disk") != 0) {
         print("INSTALLER: Error: Failed to mount filesystem to /mnt.\n");

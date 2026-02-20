@@ -15,8 +15,8 @@
 #include "vmm.h"
 
 // HHDM offset from kernel.c, needed for V_TO_P
-extern uint64_t hhdm_offset;
-#define V_TO_P(v) ((void *)((uint64_t)(v) - hhdm_offset))
+extern uint64_t kernel_hhdm_offset;
+#define V_TO_P(v) ((void *)((uint64_t)(v) - kernel_hhdm_offset))
 
 typedef void (*syscall_func_t)(struct registers *regs);
 static syscall_func_t syscall_table[256];
@@ -75,7 +75,7 @@ static void sys_open(struct registers *regs) {
   // process if the pointer is bad, and we handle that fault. (This is a big
   // assumption). A slightly safer, but still not perfect, approach is to check
   // the pointer is in userspace.
-  if ((uint64_t)user_path >= hhdm_offset) {
+  if ((uint64_t)user_path >= kernel_hhdm_offset) {
     regs->rax = -1; // Pointer is in kernel space, deny.
     return;
   }
@@ -210,7 +210,7 @@ static void sys_stat(struct registers *regs) {
   struct stat *stat_buf = (struct stat *)regs->rsi;
 
   char path[MAX_FILENAME_LEN];
-  if ((uint64_t)user_path >= hhdm_offset) {
+  if ((uint64_t)user_path >= kernel_hhdm_offset) {
     regs->rax = -1;
     return;
   }
@@ -235,7 +235,7 @@ static void sys_mkdir(struct registers *regs) {
   char *user_path = (char *)regs->rdi;
 
   char path[MAX_FILENAME_LEN];
-  if ((uint64_t)user_path >= hhdm_offset) {
+  if ((uint64_t)user_path >= kernel_hhdm_offset) {
     regs->rax = -1;
     return;
   }
@@ -264,7 +264,7 @@ static void sys_unlink(struct registers *regs) {
   char *user_path = (char *)regs->rdi;
 
   char path[MAX_FILENAME_LEN];
-  if ((uint64_t)user_path >= hhdm_offset) {
+  if ((uint64_t)user_path >= kernel_hhdm_offset) {
     regs->rax = -1;
     return;
   }
@@ -278,7 +278,7 @@ static void sys_rmdir(struct registers *regs) {
   char *user_path = (char *)regs->rdi;
 
   char path[MAX_FILENAME_LEN];
-  if ((uint64_t)user_path >= hhdm_offset) {
+  if ((uint64_t)user_path >= kernel_hhdm_offset) {
     regs->rax = -1;
     return;
   }
@@ -452,7 +452,7 @@ static void sys_mount(struct registers *regs) {
   char *user_fs_type_name = (char *)regs->rdx;
 
   char mount_point_path[MAX_FILENAME_LEN];
-  if ((uint64_t)user_mount_point_path >= hhdm_offset) {
+  if ((uint64_t)user_mount_point_path >= kernel_hhdm_offset) {
     regs->rax = -1;
     return;
   }
@@ -460,7 +460,7 @@ static void sys_mount(struct registers *regs) {
   mount_point_path[MAX_FILENAME_LEN - 1] = '\0';
 
   char device_node_path[MAX_FILENAME_LEN];
-  if ((uint64_t)user_device_node_path >= hhdm_offset) {
+  if ((uint64_t)user_device_node_path >= kernel_hhdm_offset) {
     regs->rax = -1;
     return;
   }
@@ -468,7 +468,7 @@ static void sys_mount(struct registers *regs) {
   device_node_path[MAX_FILENAME_LEN - 1] = '\0';
 
   char fs_type_name[32]; // Filesystem names are short
-  if ((uint64_t)user_fs_type_name >= hhdm_offset) {
+  if ((uint64_t)user_fs_type_name >= kernel_hhdm_offset) {
     regs->rax = -1;
     return;
   }
@@ -499,7 +499,7 @@ static void sys_unmount(struct registers *regs) {
   char *user_mount_point_path = (char *)regs->rdi;
 
   char mount_point_path[MAX_FILENAME_LEN];
-  if ((uint64_t)user_mount_point_path >= hhdm_offset) {
+  if ((uint64_t)user_mount_point_path >= kernel_hhdm_offset) {
     regs->rax = -1;
     return;
   }

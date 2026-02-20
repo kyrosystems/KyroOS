@@ -5,7 +5,7 @@
 #include "net.h"    // For net_dev_t
 #include <stdint.h>
 
-extern uint64_t hhdm_offset;
+extern uint64_t kernel_hhdm_offset;
 
 // Function to initialize the E1000 driver
 void e1000_driver_init();

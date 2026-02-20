@@ -8,8 +8,8 @@
 #include "vmm.h"
 
 
-extern uint64_t hhdm_offset;
-#define P_TO_V(p) ((void *)((uint64_t)(p) + hhdm_offset))
+extern uint64_t kernel_hhdm_offset;
+#define P_TO_V(p) ((void *)((uint64_t)(p) + kernel_hhdm_offset))
 
 elf_load_result_t elf_load(pml4_t *pml4, const uint8_t *elf_data) {
   elf_load_result_t result = {0, 0};

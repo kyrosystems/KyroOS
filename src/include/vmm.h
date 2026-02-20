@@ -12,7 +12,7 @@
 #define PAGE_NO_EXEC (1ULL << 63) // No-Execute bit (NX)
 #define PHYSICAL_ADDR_MASK 0x000FFFFFFFFFF000ULL
 
-extern uint64_t hhdm_offset; // Defined in kernel.c
+extern uint64_t kernel_hhdm_offset; // Defined in kernel.c
 
 // Function declarations for P_TO_V and V_TO_P equivalents
 void *vmm_phys_to_virt(void *phys_addr);

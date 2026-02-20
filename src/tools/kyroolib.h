@@ -4,7 +4,9 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdarg.h> // For va_list, va_start, va_arg, va_end
-#include "vfs.h" // For O_* flags
+#include <stdbool.h> // For bool type in sprintf
+
+#include "vfs.h" // For O_* flags (e.g. O_RDONLY)
 #include "event.h" // For event_t
 #include "syscall.h" // For SYS_* macros
 #include "socket.h" // For sockaddr_in
@@ -63,7 +65,155 @@ static inline uint64_t syscall(uint64_t num, uint64_t a1, uint64_t a2,
 
 static inline void exit(int status) { syscall(SYS_EXIT, (uint64_t)status, 0, 0); }
 void print(const char *s);
-int ksprintf(char *buffer, const char *format, ...);
+
+static inline int vsprintf(char *buffer, const char *format, va_list args) {
+  char *buf_ptr = buffer;
+
+  while (*format) {
+    if (*format == '%') {
+      format++;
+      int padding = 0;
+      char pad_char = ' ';
+
+      if (*format == '0') {
+        format++;
+        if (*format >= '0' && *format <= '9') {
+          padding = *format - '0';
+          format++;
+          if (*format >= '0' && *format <= '9') { 
+            padding = padding * 10 + (*format - '0');
+            format++;
+          }
+          pad_char = '0';
+        }
+      }
+
+      bool is_long = false;
+      bool is_long_long = false;
+      if (*format == 'l') {
+        is_long = true;
+        format++;
+        if (*format == 'l') {
+          is_long_long = true;
+          format++;
+        }
+      }
+
+      switch (*format) {
+      case 's': {
+        char *s = va_arg(args, char *);
+        if (!s)
+          s = "(null)";
+        while (*s) {
+          *buf_ptr++ = *s++;
+        }
+        break;
+      }
+      case 'c': {
+        char c = (char)va_arg(args, int);
+        *buf_ptr++ = c;
+        break;
+      }
+      case 'p':
+      case 'x': {
+        uint64_t val;
+        if (*format == 'p') {
+          val = (uint64_t)va_arg(args, void *);
+          *buf_ptr++ = '0';
+          *buf_ptr++ = 'x';
+        } else {
+          if (is_long_long || is_long) {
+            val = va_arg(args, uint64_t);
+          } else {
+            val = va_arg(args, uint32_t);
+          }
+        }
+
+        char hex_chars[] = "0123456789abcdef";
+        char hex_buf[20];
+        int i = 0;
+        if (val == 0) {
+          hex_buf[i++] = '0';
+        } else {
+          while (val > 0) {
+            hex_buf[i++] = hex_chars[val % 16];
+            val /= 16;
+          }
+        }
+
+        int h_padding = padding > i ? padding : i;
+        for (int j = 0; j < h_padding - i; j++) {
+          *buf_ptr++ = pad_char;
+        }
+        while (i > 0) {
+          *buf_ptr++ = hex_buf[--i];
+        }
+        break;
+      }
+      case 'u':
+      case 'd': {
+        uint64_t val;
+        if (is_long_long || is_long) {
+          val = va_arg(args, uint64_t);
+        } else {
+          val = (uint64_t)va_arg(args, int);
+        }
+
+        if (*format == 'd' && (int64_t)val < 0) {
+          *buf_ptr++ = '-';
+          val = -(int64_t)val;
+        }
+
+        char num_str[21]; 
+        int i = 0;
+        if (val == 0) {
+          num_str[i++] = '0';
+        } else {
+          while (val > 0) {
+            num_str[i++] = (val % 10) + '0';
+            val /= 10;
+          }
+        }
+
+        int d_padding = padding > i ? padding : i;
+        for (int j = 0; j < d_padding - i; j++) {
+          *buf_ptr++ = pad_char;
+        }
+        while (i > 0) {
+          *buf_ptr++ = num_str[--i];
+        }
+        break;
+      }
+      default:
+        if (pad_char == '0' && padding > 0) { 
+          *buf_ptr++ = '%';
+          *buf_ptr++ = '0';
+          if (padding >= 10)
+            *buf_ptr++ = (padding / 10) + '0';
+          *buf_ptr++ = (padding % 10) + '0';
+        } else { 
+          *buf_ptr++ = '%';
+        }
+        *buf_ptr++ = *format;
+        break;
+      }
+    } else {
+      *buf_ptr++ = *format;
+    }
+    format++;
+  }
+  *buf_ptr = '\0';
+  return buf_ptr - buffer;
+}
+
+static inline int sprintf(char *buffer, const char *format, ...) {
+  va_list args;
+  va_start(args, format);
+  int ret = vsprintf(buffer, format, args);
+  va_end(args);
+  return ret;
+}
+
 static inline int open(const char *path, int flags) {
   return (int)syscall(SYS_OPEN, (uint64_t)path, (uint64_t)flags, 0);
 }
@@ -71,11 +221,11 @@ static inline int close(int fd) {
   return (int)syscall(SYS_CLOSE, (uint64_t)fd, 0, 0);
 }
 static inline int read(int fd, void *buf, size_t size) {
-  return (int)syscall(SYS_READ, fd, (uint64_t)buf, size);
+  return (int)syscall(SYS_READ, (uint64_t)fd, (uint64_t)buf, (uint64_t)size);
 }
 
 static inline int write(int fd, const void *buf, size_t size) {
-  return (int)syscall(SYS_WRITE, fd, (uint64_t)buf, size);
+  return (int)syscall(SYS_WRITE, (uint64_t)fd, (uint64_t)buf, (uint64_t)size);
 }
 static inline int mkdir(const char *path) {
   return (int)syscall(SYS_MKDIR, (uint64_t)path, 0, 0);
@@ -168,15 +318,16 @@ char *strncpy(char *dest, const char *src, size_t n);
 void *memcpy(void *dest, const void *src, size_t n);
 void *memset(void *s, int c, size_t n);
 
-// Basic sprintf implementation for userspace (adapted from kernel/string.c)
-int vksprintf(char *buffer, const char *format, va_list args);
-int ksprintf(char *buffer, const char *format, ...);
+static inline void *malloc(size_t size) {
+    return (void*)syscall(SYS_MALLOC, (uint64_t)size, 0, 0);
+}
 
-extern void *malloc(size_t size);
-extern void free(void *ptr);
+static inline void free(void *ptr) {
+    syscall(SYS_FREE, (uint64_t)ptr, 0, 0);
+}
 
 static inline void *sbrk(intptr_t increment) {
     return (void *)syscall(SYS_SBRK, (uint64_t)increment, 0, 0);
 }
 
-#endif
+#endif // KYROLIB_H

@@ -60,7 +60,7 @@ __attribute__((
         ".limine_reqs"))) static volatile struct limine_kernel_address_request
     kernel_address_request = {.id = LIMINE_KERNEL_ADDRESS_REQUEST,
                               .revision = 0};
-uint64_t hhdm_offset = 0;
+uint64_t kernel_hhdm_offset = 0;
 __attribute__((
     used, section(".limine_reqs"))) static volatile struct limine_module_request
     module_request = {.id = LIMINE_MODULE_REQUEST, .revision = 0};
@@ -92,7 +92,7 @@ void kmain_x64(void) {
 
   serial_print("KMAIN: before hhdm_request check\n");
   if (hhdm_request.response != NULL) {
-    hhdm_offset = hhdm_request.response->offset;
+    kernel_hhdm_offset = hhdm_request.response->offset;
   }
   serial_print("KMAIN: after hhdm_request check\n");
 
@@ -107,7 +107,7 @@ void kmain_x64(void) {
   serial_print("KMAIN: before memmap_request check\n");
   if (memmap_request.response != NULL) {
     serial_print("KMAIN: before pmm_init()\n");
-    pmm_init(memmap_request.response, hhdm_offset);
+    pmm_init(memmap_request.response, kernel_hhdm_offset);
     serial_print("KMAIN: after pmm_init()\n");
 
     serial_print("KMAIN: before heap_init()\n");

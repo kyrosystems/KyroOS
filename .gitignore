@@ -24,3 +24,4 @@ panic_reasons.txt.idea/
 *.ko
 *.o
 t.txt
+/.idea/

@@ -8,11 +8,11 @@
 pml4_t *kernel_pml4;
 
 void *vmm_phys_to_virt(void *phys_addr) {
-  return (void *)((uint64_t)phys_addr + hhdm_offset);
+  return (void *)((uint64_t)phys_addr + kernel_hhdm_offset);
 }
 
 void *vmm_virt_to_phys(void *virt_addr) {
-  return (void *)((uint64_t)virt_addr - hhdm_offset);
+  return (void *)((uint64_t)virt_addr - kernel_hhdm_offset);
 }
 
 void vmm_init() {

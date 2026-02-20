@@ -7,7 +7,7 @@
 #include "vmm.h"
 #include <stdbool.h>
 
-extern uint64_t hhdm_offset;
+extern uint64_t kernel_hhdm_offset;
 extern pml4_t* kernel_pml4;
 
 static struct limine_framebuffer *fb_tag_global_ptr = NULL;
@@ -23,7 +23,7 @@ void fb_init(struct limine_framebuffer *fb_tag) {
             return;
         }
         klog(LOG_INFO, "Framebuffer: Original address: %p", fb_tag_global_ptr->address);
-        klog(LOG_INFO, "Framebuffer: HHDM offset: %p", (void*)hhdm_offset);
+        klog(LOG_INFO, "Framebuffer: HHDM offset: %p", (void*)kernel_hhdm_offset);
         // The framebuffer's address provided by Limine is already a virtual address,
         // so no need to add hhdm_offset.
         // fb_tag_global_ptr->address = (void*)((uint64_t)fb_tag_global_ptr->address + hhdm_offset);

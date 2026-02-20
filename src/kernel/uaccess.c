@@ -4,10 +4,10 @@
 #include "log.h"
 #include "vmm.h"
 
-extern uint64_t hhdm_offset;
+extern uint64_t kernel_hhdm_offset; // Assuming kernel_hhdm_offset is defined and available
 extern pml4_t *kernel_pml4;
 
-#define USERSPACE_END hhdm_offset
+#define USERSPACE_END kernel_hhdm_offset
 
 int validate_user_pointer(const void *ptr, size_t size) {
   uint64_t addr = (uint64_t)ptr;

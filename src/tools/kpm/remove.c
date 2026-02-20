@@ -35,7 +35,7 @@ static int remove_recursive(const char *path) {
                 continue;
             }
 
-            ksprintf(entry_full_path, "%s/%s", path, de.name);
+            sprintf(entry_full_path, "%s/%s", path, de.name);
             if (remove_recursive(entry_full_path) != 0) {
                 close(dir_fd);
                 return -1; // Propagate error
