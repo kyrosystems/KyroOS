@@ -44,9 +44,6 @@ thread_switch:
     pop rbp
     
     ret
-
-userspace_trampoline:
-    iretq
     
 ; thread_starter(func, arg)
 ; This is the initial entry point for new threads.

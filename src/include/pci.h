@@ -20,6 +20,15 @@
 #define PCI_LATENCY_TIMER     0x0D
 #define PCI_HEADER_TYPE       0x0E
 #define PCI_BIST              0x0F
+
+// PCI Base Address Registers (BARs)
+#define PCI_BAR0              0x10
+#define PCI_BAR1              0x14
+#define PCI_BAR2              0x18
+#define PCI_BAR3              0x1C
+#define PCI_BAR4              0x20
+#define PCI_BAR5              0x24
+
 #define PCI_INTERRUPT_LINE    0x3C
 
 

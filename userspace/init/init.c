@@ -2,7 +2,7 @@
 
 // A minimal syscall function
 void syscall(long number, long arg1, long arg2, long arg3) {
-    asm volatile (
+    __asm__ volatile (
         "mov %0, %%rax\n\t"
         "mov %1, %%rdi\n\t"
         "mov %2, %%rsi\n\t"
@@ -14,7 +14,7 @@ void syscall(long number, long arg1, long arg2, long arg3) {
     );
 }
 
-void _start() {
+void main() {
     const char* msg = "Hello from userspace!";
     
     // Call SYS_WRITE

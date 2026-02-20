@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <kyroolib.h>
 
 #define BUF_SIZE 1024
@@ -40,15 +41,10 @@ static int copy_recursive(const char *src, const char *dest) {
         close(dest_fd);
         return 0;
     } else if (S_ISDIR(st.st_mode)) { // It's a directory
-        if (mkdir(dest) != 0) {
-            // If it exists, that's fine. If it's another error, return it.
-            // Our current mkdir might not return specific error codes for "already exists".
-            // For now, if mkdir returns <0, we consider it an error unless we can positively check for "already exists"
-            struct stat dest_st;
-            if (stat(dest, &dest_st) != 0 || !S_ISDIR(dest_st.st_mode)) {
-                print("cp: cannot create directory '"); print(dest); print("'\n");
-                return -1;
-            }
+        int ret = mkdir(dest);
+        if (ret < 0 && ret != -EEXIST) {
+            print("cp: cannot create directory '"); print(dest); print("'\n");
+            return -1;
         }
 
         int dir_fd = open(src, O_RDONLY); // Open source directory for reading entries

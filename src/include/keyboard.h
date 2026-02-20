@@ -3,7 +3,9 @@
 
 #include <stdbool.h>
 
-void keyboard_init();
 bool keyboard_is_ctrl_pressed();
+bool keyboard_is_shift_pressed();
+
+void keyboard_init();
 
 #endif // KEYBOARD_H

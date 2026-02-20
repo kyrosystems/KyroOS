@@ -9,7 +9,7 @@
 static arp_cache_entry_t arp_cache[ARP_CACHE_SIZE];
 static uint8_t arp_cache_next_idx = 0;
 
-// Hardcoded local IP for now (e.g., a test IP)
+
 // extern uint32_t local_ip; // Use the local_ip from ip.c
 
 void arp_init() {

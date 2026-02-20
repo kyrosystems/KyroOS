@@ -10,6 +10,8 @@
 #include "log.h" // For klog
 #include "isr.h"
 #include "pmm.h"
+#include "random.h" // For random_get_uint32
+#include "random.h" // For random_get_uint32 (newly added)
 
 #define PANIC_BG_COLOR 0xFFFF0000
 #define PANIC_FG_COLOR 0xFFFFFFFF
@@ -126,9 +128,92 @@ static void print_stack_trace(int *x, int *y, uint64_t rbp, uint32_t fg, uint32_
 
 
 void panic_screen_init(void) {
-    // This function is now a stub, as the quote feature was removed.
-    // Kept for compatibility with calls in kmain.
-    return;
+    vfs_node_t *file_node = vfs_resolve_path(vfs_root, "/panic_quotes.txt");
+    if (!file_node) {
+        klog(LOG_WARN, "PANIC_SCREEN: Could not open /panic_quotes.txt. File node not found.");
+        return;
+    }
+
+    struct stat st;
+    if (file_node->stat && file_node->stat(file_node, &st) < 0) {
+        klog(LOG_WARN, "PANIC_SCREEN: Could not stat /panic_quotes.txt.");
+        return;
+    }
+
+    char *file_content = (char *)kmalloc(st.st_size + 1);
+    if (!file_content) {
+        klog(LOG_WARN, "PANIC_SCREEN: Failed to allocate memory for panic quotes.");
+        return;
+    }
+
+    if (file_node->read && file_node->read(file_node, 0, st.st_size, (uint8_t *)file_content) != st.st_size) {
+        klog(LOG_WARN, "PANIC_SCREEN: Failed to read /panic_quotes.txt.");
+        kfree(file_content);
+        return;
+    }
+    file_content[st.st_size] = '\0'; // Null-terminate
+
+    // Parse quotes (one per line)
+    char *ptr = file_content;
+    char *end_of_line;
+    size_t temp_num_quotes = 0;
+    while (*ptr != '\0') {
+        temp_num_quotes++;
+        ptr = strchr(ptr, '\n');
+        if (ptr) {
+            ptr++; // Move past newline
+        } else {
+            break;
+        }
+    }
+
+    if (temp_num_quotes == 0) {
+        kfree(file_content);
+        return;
+    }
+
+    // Allocate memory for pointers to quotes
+    panic_quotes = (char **)kmalloc(temp_num_quotes * sizeof(char *));
+    if (!panic_quotes) {
+        kfree(file_content);
+        klog(LOG_WARN, "PANIC_SCREEN: Failed to allocate memory for quote pointers.");
+        return;
+    }
+
+    ptr = file_content;
+    size_t current_quote_idx = 0;
+    while (*ptr != '\0' && current_quote_idx < temp_num_quotes) {
+        end_of_line = strchr(ptr, '\n');
+        size_t len;
+        if (end_of_line) {
+            len = end_of_line - ptr;
+        }
+        else {
+            len = strlen(ptr);
+        }
+
+        // Allocate memory for the quote itself
+        panic_quotes[current_quote_idx] = (char *)kmalloc(len + 1);
+        if (panic_quotes[current_quote_idx]) {
+            strncpy(panic_quotes[current_quote_idx], ptr, len);
+            panic_quotes[current_quote_idx][len] = '\0';
+            current_quote_idx++;
+        } else {
+            klog(LOG_WARN, "PANIC_SCREEN: Failed to allocate memory for a quote.");
+            // Handle error, potentially free already allocated quotes
+            break;
+        }
+
+        if (end_of_line) {
+            ptr = end_of_line + 1;
+        } else {
+            break;
+        }
+    }
+    num_panic_quotes = current_quote_idx;
+    kfree(file_content); // File content is now copied
+
+    klog(LOG_INFO, "PANIC_SCREEN: Loaded %u panic quotes.", num_panic_quotes);
 }
 
 
@@ -182,6 +267,19 @@ void panic_screen_show(const char *message, struct registers *regs) {
 
     ksprintf(info_buf, "Display: %dx%d @ %dbpp", fb_info->width, fb_info->height, fb_info->bpp);
     panic_print_str(&temp_x, &temp_y, info_buf, PANIC_FG_COLOR, PANIC_BG_COLOR);
+    
+    // --- Random Panic Quote ---
+    if (panic_quotes && num_panic_quotes > 0) {
+        uint32_t random_index = (uint32_t)(random_get_uint64() % num_panic_quotes);
+        const char *quote = panic_quotes[random_index];
+
+        y = 20 + (FONT_HEIGHT * 5); // Start Y for this section
+        x = 20; // Start X for this section
+        panic_print_str(&x, &y, "Quote of the moment:", INFO_TEXT_COLOR, PANIC_BG_COLOR);
+        y += FONT_HEIGHT;
+        x = 20;
+        panic_print_str(&x, &y, quote, PANIC_FG_COLOR, PANIC_BG_COLOR);
+    }
     
     // Reset Y to be below the panic message for the main content
     y = 20 + (FONT_HEIGHT * 5);
@@ -271,10 +369,10 @@ void panic_screen_show(const char *message, struct registers *regs) {
     // --- Bottom Right: QR Code Placeholder ---
     temp_x = fb_info->width - (35 * FONT_WIDTH); 
     temp_y = fb_info->height - (3 * FONT_HEIGHT);
-    panic_print_str(&temp_x, &temp_y, "[QR Code Placeholder]", INFO_TEXT_COLOR, PANIC_BG_COLOR);
+    panic_print_str(&temp_x, &temp_y, "Эххх.. не люблю кернел паники", INFO_TEXT_COLOR, PANIC_BG_COLOR);
     temp_y += FONT_HEIGHT;
     temp_x = fb_info->width - (35 * FONT_WIDTH);
-    panic_print_str(&temp_x, &temp_y, "kyroos.pp.ua/kernel-panic", INFO_TEXT_COLOR, PANIC_BG_COLOR);
+    panic_print_str(&temp_x, &temp_y, "Но, что поделать..", INFO_TEXT_COLOR, PANIC_BG_COLOR);
     
     // Make sure everything is drawn to the screen.
     fb_flush();

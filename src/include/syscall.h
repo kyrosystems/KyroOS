@@ -31,6 +31,7 @@
 #define SYS_EXEC 24
 #define SYS_GFX_GET_FB_INFO 25
 #define SYS_INPUT_POLL_EVENT 26
+#define SYS_SBRK 27
 
 void syscall_init();
 void syscall_handler(struct registers *regs);

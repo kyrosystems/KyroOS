@@ -3,6 +3,8 @@
 ; It prepares the stack for an IRETQ to transition to userspace.
 
 global userspace_exit_stub
+global userspace_trampoline ; Make it globally accessible
+global userspace_thread_starter
 
 section .text
 userspace_exit_stub:
@@ -13,29 +15,29 @@ userspace_exit_stub:
     ; to the correct position for IRETQ.
     ; RSP should point directly to the saved SS value.
 
-    ; Let's assume the IRETQ frame is structured on the kernel stack as:
-    ; ...
-    ; RBP
-    ; RBX
-    ; R12
-    ; R13
-    ; R14
-    ; R15
-    ; CS (userspace)
-    ; RIP (userspace)
-    ; RFLAGS
-    ; RSP (userspace)
-    ; SS (userspace)
-
-    ; If thread_create_userspace pushes the IRETQ frame and then the fake callee-saved registers,
-    ; then thread_switch pops the fake registers and 'ret's to this stub.
-
-    ; This stub receives control in kernel mode.
-    ; The kernel stack (RSP) now contains the IRETQ frame (SS, RSP, RFLAGS, CS, RIP)
-    ; pushed by thread_create_userspace.
-
     ; Simply execute IRETQ.
     ; This will pop SS, RSP, RFLAGS, CS, RIP from the *current* kernel stack (RSP)
     ; and switch to userspace.
 
     iretq
+
+userspace_thread_starter:
+    ; This function is called by the `ret` in `thread_switch`.
+    ; The stack pointer (RSP) now points to the IRETQ frame.
+    ; Callee-saved registers were restored by thread_switch.
+    ; argc is in RBX, argv is in R12.
+    mov rdi, rbx
+    mov rsi, r12
+    iretq
+
+userspace_trampoline:
+    ; The userspace stack has:
+    ; entry_point (main)
+    ; argv_ptr
+    ; argc
+
+    pop rdi  ; argc to RDI
+    pop rsi  ; argv to RSI
+    pop rax  ; entry_point to RAX
+
+    jmp rax  ; Jump to the userspace entry point

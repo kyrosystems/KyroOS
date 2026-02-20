@@ -2,9 +2,10 @@
 #include "heap.h"
 #include "isr.h"
 #include "log.h"
-#include "thread.h"
 #include "pmm.h" // For pmm_free_page
-#include "vmm.h" // For vmm_unmap_page, vmm_destroy_address_space, PAGE_SIZE
+#include "thread.h"
+#include "tss.h"
+#include "vmm.h"    // For vmm_unmap_page, vmm_destroy_address_space, PAGE_SIZE
 #include <stddef.h> // for NULL
 
 // Simple round-robin scheduler
@@ -42,97 +43,93 @@ thread_t *get_current_thread() { return current_thread; }
 void schedule() {
   disable_interrupts();
 
-  if (!current_thread) {
+  if (!current_thread || !ready_queue) {
     enable_interrupts();
-    return; // Nothing to schedule
+    return;
   }
 
   thread_t *old_thread = current_thread;
-  thread_t *next_thread = NULL;
+  thread_t *next_thread =
+      ready_queue->next; // Start looking from the next thread in the queue
 
-  if (ready_queue) {
-    next_thread = ready_queue->next;
+  // 1. Clean up DEAD threads and find the next READY thread
+  thread_t *prev = ready_queue;
+  thread_t *start_node = next_thread;
+  thread_t *curr = start_node;
 
-    // Find a ready thread
-    while (next_thread->state != THREAD_READY &&
-           next_thread != ready_queue->next) {
-      if (next_thread->state == THREAD_DEAD) {
-        // Clean up the dead thread
-        thread_t* dead_thread = next_thread;
-        next_thread = next_thread->next;
-        
-        // Unlink from ready queue
-        // Find the thread before the dead one
-        thread_t* prev = ready_queue;
-        while(prev->next != dead_thread) {
-            prev = prev->next;
-        }
-        prev->next = next_thread;
-        if (ready_queue == dead_thread) {
-            ready_queue = prev;
-        }
-        
-        // Free user stack
-        if (dead_thread->user_stack_base) {
-            for (uint64_t i = 0; i < USER_STACK_SIZE; i += PAGE_SIZE) {
-                void* vaddr = (void*)((uint64_t)dead_thread->user_stack_base + i);
-                void* phys_addr = vmm_unmap_page(dead_thread->pml4, vaddr);
-                if (phys_addr) {
-                    pmm_free_page(phys_addr);
-                }
-            }
-        }
-        
-        // Free address space
-        if (dead_thread->pml4) {
-            // Don't destroy kernel address space
-            if (dead_thread->id != 0) { // Assuming kernel thread has id 0
-                 vmm_destroy_address_space(dead_thread->pml4);
-            }
-        }
-
-        // Free kernel stack
-        if (dead_thread->stack) {
-            kfree(dead_thread->stack);
-        }
-
-        // Free thread struct
-        kfree(dead_thread);
-
-      } else {
-        next_thread = next_thread->next;
+  do {
+    if (curr->state == THREAD_DEAD &&
+        curr->id != 0) { // Don't kill kernel thread
+      if (curr == old_thread) {
+        // Can't free the current thread yet, it needs to switch away first.
+        // It will be freed by the NEXT scheduler call.
+        prev = curr;
+        curr = curr->next;
+        continue;
       }
+      thread_t *dead_thread = curr;
+      prev->next = curr->next;
+      curr = curr->next;
+
+      if (ready_queue == dead_thread) {
+        ready_queue = prev;
+      }
+
+      // Cleanup logic (simplified for brevity, keeping existing logic)
+      if (dead_thread->user_stack_base) {
+        for (uint64_t i = 0; i < USER_STACK_SIZE; i += PAGE_SIZE) {
+          void *vaddr = (void *)((uint64_t)dead_thread->user_stack_base + i);
+          void *phys_addr = vmm_unmap_page(dead_thread->pml4, vaddr);
+          if (phys_addr)
+            pmm_free_page(phys_addr);
+        }
+      }
+      if (dead_thread->pml4 && dead_thread->id != 0) {
+        vmm_destroy_address_space(dead_thread->pml4);
+      }
+      if (dead_thread->stack)
+        kfree(dead_thread->stack);
+      kfree(dead_thread);
+
+      if (ready_queue == NULL)
+        break; // All threads gone? (Shouldn't happen with idle/kernel)
+      continue;
     }
 
-    if (next_thread->state != THREAD_READY) {
-      // No ready threads found
-      next_thread = NULL;
+    if (curr->state == THREAD_READY) {
+      next_thread = curr;
+      break;
     }
-  }
 
-  if (!next_thread) {
-    // No other ready threads, continue with the current one if it's running
+    prev = curr;
+    curr = curr->next;
+  } while (curr != start_node);
+
+  // 2. Decide if we switch
+  if (next_thread->state != THREAD_READY) {
+    // If we only have the current thread and it's still running, keep it.
     if (old_thread->state == THREAD_RUNNING) {
       enable_interrupts();
       return;
-    } else {
-      // Current thread is blocked/dead, but there's nothing else to run
-      panic("Scheduler: No runnable threads!", NULL);
     }
+    // If current is blocked and nothing else is ready, we are in trouble.
+    panic("Scheduler: No runnable threads!", NULL);
   }
 
-  ready_queue =
-      next_thread; // The new head of the ready queue is the next thread to run.
+  // 3. Perform Switch
+  ready_queue = next_thread; // Tail of the queue for next time
 
   if (old_thread->state == THREAD_RUNNING) {
     old_thread->state = THREAD_READY;
   }
-
   next_thread->state = THREAD_RUNNING;
   current_thread = next_thread;
 
   if (old_thread != next_thread) {
-    klog(LOG_DEBUG, "Scheduler: Switching from %p (ID: %d) to %p (ID: %d)", old_thread, old_thread->id, next_thread, next_thread->id);
+    // Update TSS and switch
+    if (next_thread->stack) {
+      tss_set_stack((uint64_t)next_thread->stack + KERNEL_STACK_SIZE);
+    }
     thread_switch(old_thread, next_thread);
   }
 

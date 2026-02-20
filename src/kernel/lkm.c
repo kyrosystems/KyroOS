@@ -56,7 +56,7 @@ int lkm_load(const uint8_t* module_data, size_t module_size) {
     // Find and call init function (a real loader would use symbol tables)
     // For this demo, we assume a simple module structure and search for the symbol.
     // This is NOT a robust way to do this.
-    // We are skipping the actual loading and relocation for now and just
+
     // logging success.
     
     klog(LOG_INFO, "LKM: Module loaded (stub). Would call init function now.");

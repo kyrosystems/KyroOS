@@ -1,5 +1,6 @@
 #include "e1000.h"
 #include "arp.h" // Include ARP header
+#include "dhcp.h"
 #include "deviceman.h"
 #include "heap.h"
 #include "ip.h" // Include IP header
@@ -382,6 +383,9 @@ static int e1000_attach(device_t *dev) {
   e1000_dev->net_dev.receive_packet =
       NULL; // Zero-copy, so packets are handled in interrupt
   net_register_device(&e1000_dev->net_dev);
+
+  // Start DHCP client
+  dhcp_client_start();
 
   // klog(LOG_INFO, "E1000: Device initialized and registered successfully.");
   return 0;

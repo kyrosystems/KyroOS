@@ -2,6 +2,7 @@
 #define PANIC_SCREEN_H
 
 #include "isr.h"
+#include "panic.h" // Include panic.h for panic_reason_t
 #include <stdint.h>
 #include <stddef.h> // For size_t
 

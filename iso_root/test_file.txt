@@ -1,0 +1,5 @@
+Hello from KyroOS!
+This is a test file for the 'cat' command.
+It should display this text.
+New line test.
+End of file.

@@ -4,6 +4,23 @@
 #include <stdint.h>
 #include "vfs.h" // For vfs_node_t and ioctl_vfs_t
 
+#pragma pack(push, 1)
+typedef struct {
+    uint8_t status;
+    uint8_t chs_first_sector[3];
+    uint8_t type;
+    uint8_t chs_last_sector[3];
+    uint32_t lba_first_sector;
+    uint32_t sector_count;
+} MBR_PartitionEntry;
+
+typedef struct {
+    uint8_t boot_code[446];
+    MBR_PartitionEntry partitions[4];
+    uint16_t boot_signature;
+} MBR;
+#pragma pack(pop)
+
 // IOCTL Requests for IDE driver
 #define IDE_IOCTL_GET_DISK_INFO 0x01 // Get disk geometry (total sectors, sector size)
 typedef struct {
@@ -32,8 +49,8 @@ typedef struct {
 } ide_ioctl_format_t;
 
 void ide_driver_init();
-int ide_read_sectors(uint8_t drive, uint32_t lba, uint8_t num_sectors, uint16_t* buffer);
-int ide_write_sectors(uint8_t drive, uint32_t lba, uint8_t num_sectors, const uint16_t* buffer);
+uint32_t ide_read_sectors(uint8_t drive, uint32_t lba, uint8_t num_sectors, uint16_t* buffer);
+uint32_t ide_write_sectors(uint8_t drive, uint32_t lba, uint8_t num_sectors, const uint16_t* buffer);
 void ide_test_read();
 
 #endif // IDE_H

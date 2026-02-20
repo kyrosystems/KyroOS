@@ -1,37 +1,35 @@
 #include "kstring.h"
-#include <stdbool.h>
 #include <stdarg.h> // For va_list
+#include <stdbool.h>
 #include <stdint.h> // For uint8_t
 
 void *memcpy(void *dest, const void *src, size_t n) {
-    __asm__ __volatile__ (
-        "cld;"
-        "rep movsb"
-        : "+D"(dest), "+S"(src), "+c"(n)
-        :
-        : "memory"
-    );
-    return dest;
+  __asm__ __volatile__("cld;"
+                       "rep movsb"
+                       : "+D"(dest), "+S"(src), "+c"(n)
+                       :
+                       : "memory");
+  return dest;
 }
 
 void *memmove(void *dest, const void *src, size_t n) {
-    unsigned char *d = dest;
-    const unsigned char *s = src;
-    if (d == s) {
-        return d;
+  unsigned char *d = dest;
+  const unsigned char *s = src;
+  if (d == s) {
+    return d;
+  }
+  if (d < s) {
+    // Copy forwards
+    for (size_t i = 0; i < n; i++) {
+      d[i] = s[i];
     }
-    if (d < s) {
-        // Copy forwards
-        for (size_t i = 0; i < n; i++) {
-            d[i] = s[i];
-        }
-    } else {
-        // Copy backwards
-        for (size_t i = n; i != 0; i--) {
-            d[i-1] = s[i-1];
-        }
+  } else {
+    // Copy backwards
+    for (size_t i = n; i != 0; i--) {
+      d[i - 1] = s[i - 1];
     }
-    return dest;
+  }
+  return dest;
 }
 
 void *memset(void *s, int c, size_t n) {
@@ -94,16 +92,17 @@ char *strchr(const char *s, int c) {
 }
 
 char *strrchr(const char *s, int c) {
-    const char *last = NULL;
-    do {
-        if (*s == (char)c) {
-            last = s;
-        }
-    } while (*s++);
-    return (char *)last;
+  const char *last = NULL;
+  do {
+    if (*s == (char)c) {
+      last = s;
+    }
+  } while (*s++);
+  return (char *)last;
 }
 
 // Helper function to convert integer to string and return length
+static int int_to_str(int n, char s[]) __attribute__((unused));
 static int int_to_str(int n, char s[]) {
   int i = 0;
   int is_negative = 0;
@@ -144,6 +143,9 @@ static int int_to_str(int n, char s[]) {
   return i; // Return length of the string
 }
 
+// Helper to avoid implicit declaration
+int vksprintf(char *buffer, const char *format, va_list args);
+
 int ksprintf(char *buffer, const char *format, ...) {
   va_list args;
   va_start(args, format);
@@ -154,8 +156,6 @@ int ksprintf(char *buffer, const char *format, ...) {
 
 int vksprintf(char *buffer, const char *format, va_list args) {
   char *buf_ptr = buffer;
-  char
-      num_buf[12]; // Enough for a 32-bit integer, plus null terminator and sign
 
   while (*format) {
     if (*format == '%') {
@@ -177,11 +177,16 @@ int vksprintf(char *buffer, const char *format, va_list args) {
         }
       }
 
-      // Check for 'l' modifier for 64-bit hex
+      // Check for length modifiers
       bool is_long = false;
+      bool is_long_long = false;
       if (*format == 'l') {
-          is_long = true;
+        is_long = true;
+        format++;
+        if (*format == 'l') {
+          is_long_long = true;
           format++;
+        }
       }
 
       switch (*format) {
@@ -194,6 +199,11 @@ int vksprintf(char *buffer, const char *format, va_list args) {
         }
         break;
       }
+      case 'c': {
+        char c = (char)va_arg(args, int);
+        *buf_ptr++ = c;
+        break;
+      }
       case 'p':
       case 'x': {
         uint64_t val;
@@ -202,7 +212,7 @@ int vksprintf(char *buffer, const char *format, va_list args) {
           *buf_ptr++ = '0';
           *buf_ptr++ = 'x';
         } else {
-          if (is_long) {
+          if (is_long_long || is_long) {
             val = va_arg(args, uint64_t);
           } else {
             val = va_arg(args, uint32_t); // Standard %x is 32-bit
@@ -210,7 +220,7 @@ int vksprintf(char *buffer, const char *format, va_list args) {
         }
 
         char hex_chars[] = "0123456789abcdef";
-        char hex_buf[16];
+        char hex_buf[20];
         int i = 0;
         if (val == 0) {
           hex_buf[i++] = '0';
@@ -231,17 +241,37 @@ int vksprintf(char *buffer, const char *format, va_list args) {
         }
         break;
       }
+      case 'u':
       case 'd': {
-        int d = va_arg(args, int);
-        int len = int_to_str(d, num_buf);
-
-        // Apply padding
-        for (int i = 0; i < padding - len; i++) {
-          *buf_ptr++ = pad_char;
+        uint64_t val;
+        if (is_long_long || is_long) {
+          val = va_arg(args, uint64_t);
+        } else {
+          val = (uint64_t)va_arg(args, int);
         }
 
-        for (int i = 0; i < len; i++) {
-          *buf_ptr++ = num_buf[i];
+        if (*format == 'd' && (int64_t)val < 0) {
+          *buf_ptr++ = '-';
+          val = -(int64_t)val;
+        }
+
+        char num_str[21]; // Max for uint64_t is 20 digits + null terminator
+        int i = 0;
+        if (val == 0) {
+          num_str[i++] = '0';
+        } else {
+          while (val > 0) {
+            num_str[i++] = (val % 10) + '0';
+            val /= 10;
+          }
+        }
+
+        int d_padding = padding > i ? padding : i;
+        for (int j = 0; j < d_padding - i; j++) {
+          *buf_ptr++ = pad_char;
+        }
+        while (i > 0) {
+          *buf_ptr++ = num_str[--i];
         }
         break;
       }

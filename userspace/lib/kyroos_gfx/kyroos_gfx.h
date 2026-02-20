@@ -20,7 +20,7 @@ typedef struct {
 int gfx_init();
 void gfx_draw_pixel(uint32_t x, uint32_t y, uint32_t color);
 void gfx_draw_rect(uint32_t x, uint32_t y, uint32_t width, uint32_t height, uint32_t color);
-void gfx_flip(); // No-op for now as we draw directly
+void gfx_flip();
 int gfx_poll_event(gfx_event_t* event);
 uint32_t gfx_get_width();
 uint32_t gfx_get_height();

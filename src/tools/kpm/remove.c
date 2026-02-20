@@ -1,7 +1,7 @@
 #include "../../include/kpm.h"
 #include "../kyroolib.h"
 
-#define MAX_DB_SIZE 4096 // Max size for the in-memory package database
+#define MAX_DB_SIZE 16384 // Max size for the in-memory package database (16KB)
 
 // Helper to recursively remove files and directories
 static int remove_recursive(const char *path) {
@@ -50,6 +50,7 @@ static int remove_recursive(const char *path) {
 }
 
 int pkg_remove(const char *name) {
+  int deletion_successful = 1;
   print("Attempting to remove package: ");
   print(name);
   print("\n");
@@ -87,7 +88,7 @@ int pkg_remove(const char *name) {
     // Extract current line
     char current_line[256]; // Max line length
     int line_len = line_end - line_start;
-    if (line_len >= sizeof(current_line)) line_len = sizeof(current_line) - 1; // Prevent buffer overflow
+    if ((size_t)line_len >= sizeof(current_line)) line_len = sizeof(current_line) - 1; // Prevent buffer overflow
     memcpy(current_line, line_start, line_len);
     current_line[line_len] = '\0';
 
@@ -96,7 +97,7 @@ int pkg_remove(const char *name) {
     char *pipe_pos = strchr(current_line, '|');
     if (pipe_pos) {
         int name_len = pipe_pos - current_line;
-        if (name_len >= sizeof(pkg_name_in_db)) name_len = sizeof(pkg_name_in_db) - 1;
+        if ((size_t)name_len >= sizeof(pkg_name_in_db)) name_len = sizeof(pkg_name_in_db) - 1;
         memcpy(pkg_name_in_db, current_line, name_len);
         pkg_name_in_db[name_len] = '\0';
     } else {
@@ -129,15 +130,21 @@ int pkg_remove(const char *name) {
           while (*path_end != '\n' && *path_end != '\0') path_end++;
           
           int path_len = path_end - path_start;
-          if (path_len >= sizeof(install_path_in_db)) path_len = sizeof(install_path_in_db) - 1;
+          if ((size_t)path_len >= sizeof(install_path_in_db)) path_len = sizeof(install_path_in_db) - 1;
           strncpy(install_path_in_db, path_start, path_len);
           install_path_in_db[path_len] = '\0';
 
           // Delete the package files recursively
           if (remove_recursive(install_path_in_db) != 0) {
               print("kpm: Failed to remove package files for '"); print(name); print("'\n");
-              // Even if file deletion fails, we still remove from DB for now.
-              // A more robust PM would mark it as partially removed.
+              // File deletion failed. Keep the entry in the DB.
+              deletion_successful = 0;
+              strcat(new_db_buffer, current_line);
+              strcat(new_db_buffer, "\n");
+          } else {
+              print("  Package '");
+              print(name);
+              print("' files removed.\n");
           }
       } else {
           print("kpm: Warning: Malformed entry in DB, could not get install path for "); print(name); print("\n");
@@ -158,6 +165,11 @@ int pkg_remove(const char *name) {
     return -1; // Indicate failure to remove
   }
 
+  if (!deletion_successful) {
+    // File deletion failed earlier, so we return an error.
+    return -1;
+  }
+
   // Rewrite the database file
   fd = open(PKG_DB_PATH, O_CREAT | O_TRUNC | O_WRONLY); // create truncates existing file
   if (fd < 0) {
@@ -167,8 +179,10 @@ int pkg_remove(const char *name) {
   write(fd, new_db_buffer, strlen(new_db_buffer));
   close(fd);
 
-  print("Package '");
-  print(name);
-  print("' removed from database.\n");
+  if (deletion_successful) {
+    print("Package '");
+    print(name);
+    print("' removed from database.\n");
+  }
   return 0;
 }

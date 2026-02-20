@@ -6,13 +6,23 @@
 #include "udp.h" // For UDP protocol handler registration and sending
 #include "thread.h" // For get_current_thread, THREAD_BLOCKED, THREAD_READY
 #include "scheduler.h" // For schedule
+#include "dhcp.h"
 
 socket_t *active_sockets = NULL;
 
 // This function is now the specific handler for UDP data, called by the IP layer
-void sock_udp_receive_packet_handler(net_dev_t *net_dev, ipv4_header_t *ip_hdr, udp_header_t *udp_hdr, const uint8_t *data, size_t len) {
-    (void)net_dev; // Unused for now
-    (void)ip_hdr; // Unused for now
+void sock_udp_receive_packet_handler(net_dev_t *net_dev, const ipv4_header_t *ip_hdr, udp_header_t *udp_hdr, const uint8_t *data, size_t len) {
+    (void)net_dev;
+    (void)ip_hdr;
+
+    // If destination port is DHCP client port (68) or server port (67), it's a DHCP packet
+    // This is a temporary hack because the client often sends from 68 and expects replies to 68.
+    // However, server replies to 67.
+    // This needs to be refined.
+    if (__builtin_bswap16(udp_hdr->dest_port) == 68 || __builtin_bswap16(udp_hdr->dest_port) == 67) {
+        dhcp_handle_packet(data, len);
+        return;
+    }
 
     // Find the socket that is bound to the destination port
     socket_t *current_sock = active_sockets;
@@ -30,7 +40,7 @@ void sock_udp_receive_packet_handler(net_dev_t *net_dev, ipv4_header_t *ip_hdr, 
             klog(LOG_INFO, "SOCKET: UDP packet received for port %d, len=%d", __builtin_bswap16(udp_hdr->dest_port), len);
 
             // Wake up any waiting threads (TODO: proper thread blocking/unblocking)
-            // For now, if waiting_thread is set, simply mark it as ready.
+
             if (current_sock->waiting_thread) {
                 current_sock->waiting_thread->state = THREAD_READY;
                 current_sock->waiting_thread = NULL; // Only wake up once
@@ -78,7 +88,7 @@ socket_t *sock_create(int domain, int type, int protocol) {
         klog(LOG_ERROR, "SOCKET: Unsupported type %d", type);
         return NULL;
     }
-    // For now, only UDP is really implemented on top of IP.
+
     if (protocol != IPPROTO_UDP && protocol != IPPROTO_TCP) { // Allow TCP for future, but won't work
         klog(LOG_ERROR, "SOCKET: Unsupported protocol %d", protocol);
         return NULL;
@@ -137,7 +147,7 @@ int sock_connect(socket_t *sock, const sockaddr_in_t *addr) {
         return 0;
     }
     // TODO: Implement TCP handshake
-    klog(LOG_WARN, "SOCKET: Connect: Only UDP is supported for now.");
+    klog(LOG_WARN, "SOCKET: Connect: Only UDP is supported.");
     return -1;
 }
 
@@ -146,14 +156,14 @@ int sock_send(socket_t *sock, const void *buf, size_t len, int flags) {
     if (!sock || !buf || len == 0) {
         return -1;
     }
-    (void)flags; // Unused for now
+    (void)flags;
 
     if (sock->protocol == IPPROTO_UDP) {
         if (sock->state != SOCK_STATE_CONNECTED) {
             klog(LOG_ERROR, "SOCKET: UDP send failed: not connected.");
             return -1;
         }
-        // Use the default network device (E1000 for now)
+
         if (!network_devices) {
             klog(LOG_ERROR, "SOCKET: No network device available for sending.");
             return -1;
@@ -164,7 +174,7 @@ int sock_send(socket_t *sock, const void *buf, size_t len, int flags) {
         return len;
     }
     // TODO: Implement TCP send
-    klog(LOG_WARN, "SOCKET: Send: Only UDP is supported for now.");
+    klog(LOG_WARN, "SOCKET: Send: Only UDP is supported.");
     return -1;
 }
 
@@ -173,7 +183,7 @@ int sock_recv(socket_t *sock, void *buf, size_t len, int flags) {
     if (!sock || !buf || len == 0) {
         return -1;
     }
-    (void)flags; // Unused for now
+    (void)flags;
 
     if (sock->protocol == IPPROTO_UDP) {
         if (sock->state == SOCK_STATE_CLOSED) {
@@ -206,7 +216,7 @@ int sock_recv(socket_t *sock, void *buf, size_t len, int flags) {
         return bytes_to_copy;
     }
     // TODO: Implement TCP recv
-    klog(LOG_WARN, "SOCKET: Recv: Only UDP is supported for now.");
+    klog(LOG_WARN, "SOCKET: Recv: Only UDP is supported.");
     return -1;
 }
 

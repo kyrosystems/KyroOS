@@ -135,5 +135,5 @@ void pci_check_all_buses() {
 }
 
 void pci_init() {
-  // No specific initialization for now.
+
 }

@@ -5,8 +5,8 @@
 
 // CPU state pushed onto the stack by the ISR stub
 struct registers {
-  uint64_t r15, r14, r13, r12, r11, r10, r9, r8;
-  uint64_t rbp, rdi, rsi, rdx, rcx, rbx, rax;
+  uint64_t rax, rbx, rcx, rdx, rsi, rdi, rbp, r8, r9, r10, r11, r12, r13, r14,
+      r15;
   uint64_t int_no, err_code;
   uint64_t rip, cs, rflags, rsp, ss;
 };
@@ -24,15 +24,15 @@ static inline void enable_interrupts() { __asm__ __volatile__("sti"); }
 static inline void disable_interrupts() { __asm__ __volatile__("cli"); }
 
 static inline uint64_t read_cr2() {
-    uint64_t val;
-    __asm__ __volatile__("mov %%cr2, %0" : "=r"(val));
-    return val;
+  uint64_t val;
+  __asm__ __volatile__("mov %%cr2, %0" : "=r"(val));
+  return val;
 }
 
 static inline uint64_t read_cr3() {
-    uint64_t val;
-    __asm__ __volatile__("mov %%cr3, %0" : "=r"(val));
-    return val;
+  uint64_t val;
+  __asm__ __volatile__("mov %%cr3, %0" : "=r"(val));
+  return val;
 }
 
 #endif // ISR_H

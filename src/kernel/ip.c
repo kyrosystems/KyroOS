@@ -9,9 +9,9 @@
 void sock_handle_incoming_packet(net_dev_t *net_dev, const ipv4_header_t *ip_hdr, const uint8_t *payload, size_t payload_size, uint8_t protocol); // Temporary explicit prototype
 
 // Our local IP address
-static uint32_t local_ip = 0x00000000; // Default to 0.0.0.0, to be set by DHCP
-static uint32_t subnet_mask = 0x00000000; // Default to 0.0.0.0
-static uint32_t default_gateway = 0x00000000; // Default to 0.0.0.0
+static uint32_t local_ip;
+static uint32_t subnet_mask;
+static uint32_t default_gateway;
 
 void ip_set_local_ip(uint32_t ip) {
     local_ip = ip;

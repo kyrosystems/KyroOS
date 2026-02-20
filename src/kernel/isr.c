@@ -3,7 +3,8 @@
 #include "port_io.h"
 #include "scheduler.h"
 
-extern void syscall_handler(struct registers *regs); // Declare syscall_handler here
+extern void
+syscall_handler(struct registers *regs); // Declare syscall_handler here
 
 // Array of IRQ handlers
 static irq_handler_t irq_handlers[16] = {0};
@@ -63,6 +64,37 @@ void timer_init(uint32_t frequency) {
 
 void isr_handler(struct registers *regs) {
   if (regs->int_no < 32) { // CPU Exceptions
+    klog(LOG_ERROR, "EXCEPTION: %s (#%d) at RIP: %p, Error Code: %lx",
+         exception_messages[regs->int_no], regs->int_no, (void *)regs->rip,
+         regs->err_code);
+
+    // Direct serial print for emergency debugging
+    serial_print("\n--- EMERGENCY EXCEPTION DUMP ---\n");
+    serial_print("Exception: ");
+    serial_print(exception_messages[regs->int_no]);
+    serial_print("\n");
+    serial_print("RIP: ");
+    serial_print_hex(regs->rip);
+    serial_print("\n");
+    serial_print("RAX: ");
+    serial_print_hex(regs->rax);
+    serial_print(" RBX: ");
+    serial_print_hex(regs->rbx);
+    serial_print("\n");
+    serial_print("RCX: ");
+    serial_print_hex(regs->rcx);
+    serial_print(" RDX: ");
+    serial_print_hex(regs->rdx);
+    serial_print("\n");
+    serial_print("RSP: ");
+    serial_print_hex(regs->rsp);
+    serial_print(" ERR: ");
+    serial_print_hex(regs->err_code);
+    serial_print("\n");
+
+    klog(LOG_ERROR,
+         "Registers: RAX=%lx, RBX=%lx, RCX=%lx, RDX=%lx, RSP=%lx, RFLAGS=%lx",
+         regs->rax, regs->rbx, regs->rcx, regs->rdx, regs->rsp, regs->rflags);
     panic(exception_messages[regs->int_no], regs);
   } else if (regs->int_no >= 32 && regs->int_no <= 47) { // IRQs
     uint8_t irq_num = regs->int_no - 32;
@@ -86,7 +118,7 @@ void isr_handler(struct registers *regs) {
       schedule();
     }
   } else if (regs->int_no == 128) { // Syscall interrupt (0x80)
-      syscall_handler(regs);
+    syscall_handler(regs);
   }
 }
 

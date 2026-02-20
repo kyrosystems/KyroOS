@@ -105,11 +105,11 @@ void fb_draw_char(char c, int x, int y, uint32_t fg, uint32_t bg) {
     const uint8_t *glyph = default_font[(uint8_t)c];
 
     for (uint32_t cy = 0; cy < 16; cy++) {
-        if (y + cy < 0 || y + cy >= (int)fb_info->height) continue;
+        if (y + (int)cy < 0 || y + (int)cy >= (int)fb_info->height) continue;
         uint8_t row = glyph[cy];
         uint32_t* line = backbuffer + ((y + cy) * (fb_info->pitch / 4));
         for (uint32_t cx = 0; cx < 8; cx++) {
-            if (x + cx < 0 || x + cx >= (int)fb_info->width) continue;
+            if (x + (int)cx < 0 || x + (int)cx >= (int)fb_info->width) continue;
             uint32_t color = ((row >> (7 - cx)) & 1) ? fg : bg;
             line[x + cx] = color;
         }

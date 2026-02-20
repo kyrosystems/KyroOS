@@ -35,6 +35,9 @@ void console_clear(void);
 extern uint32_t console_x;
 extern uint32_t console_y;
 
+// Expose current log level for shell modification
+extern log_level_t current_log_level;
+
 // Early Serial Debug API
 void serial_print(const char *str);
 void serial_print_hex(uint64_t val);

@@ -44,6 +44,7 @@
 #define SYS_EXEC 24
 #define SYS_GFX_GET_FB_INFO 25
 #define SYS_INPUT_POLL_EVENT 26
+#define SYS_SBRK 27
 
 static inline uint64_t syscall(uint64_t num, uint64_t a1, uint64_t a2,
                                uint64_t a3) {
@@ -60,10 +61,9 @@ static inline uint64_t syscall(uint64_t num, uint64_t a1, uint64_t a2,
   return ret;
 }
 
-static inline void exit() { syscall(SYS_EXIT, 0, 0, 0); }
-static inline void print(const char *s) {
-  syscall(SYS_WRITE, 1, (uint64_t)s, 0);
-}
+static inline void exit(int status) { syscall(SYS_EXIT, (uint64_t)status, 0, 0); }
+void print(const char *s);
+int ksprintf(char *buffer, const char *format, ...);
 static inline int open(const char *path, int flags) {
   return (int)syscall(SYS_OPEN, (uint64_t)path, (uint64_t)flags, 0);
 }
@@ -135,8 +135,6 @@ static inline int gfx_get_fb_info(user_fb_info_t *info_ptr) {
     return (int)syscall(SYS_GFX_GET_FB_INFO, (uint64_t)info_ptr, 0, 0);
 }
 
-
-
 static inline int ioctl(int fd, int request, void* argp) {
     return (int)syscall(SYS_IOCTL, (uint64_t)fd, (uint64_t)request, (uint64_t)argp);
 }
@@ -153,22 +151,7 @@ static inline int input_poll_event(event_t *event) {
     return (int)syscall(SYS_INPUT_POLL_EVENT, (uint64_t)event, 0, 0);
 }
 
-static inline int atoi(const char *s) {
-    int res = 0;
-    int sign = 1;
-    while (*s == ' ') s++; // Skip leading whitespace
-    if (*s == '-') {
-        sign = -1;
-        s++;
-    } else if (*s == '+') {
-        s++;
-    }
-    while (*s >= '0' && *s <= '9') {
-        res = res * 10 + (*s - '0');
-        s++;
-    }
-    return res * sign;
-}
+int atoi(const char *s);
 
 static inline uint64_t get_ticks() { return syscall(SYS_GET_TICKS, 0, 0, 0); }
 
@@ -186,98 +169,14 @@ void *memcpy(void *dest, const void *src, size_t n);
 void *memset(void *s, int c, size_t n);
 
 // Basic sprintf implementation for userspace (adapted from kernel/string.c)
-static inline int vksprintf(char *buffer, const char *format, va_list args) {
-    char *buf_ptr = buffer;
-    int written = 0;
+int vksprintf(char *buffer, const char *format, va_list args);
+int ksprintf(char *buffer, const char *format, ...);
 
-    // A minimal implementation, similar to kernel's
-    // Handles %s, %d, %x, %c, %%
-    while (*format) {
-        if (*format == '%') {
-            format++;
-            if (*format == 's') {
-                char *s = va_arg(args, char *);
-                while (*s) {
-                    *buf_ptr++ = *s++;
-                    written++;
-                }
-            } else if (*format == 'd') {
-                int d = va_arg(args, int);
-                char num_buf[12]; // Max for int + sign
-                int i = 0;
-                if (d == 0) {
-                    num_buf[i++] = '0';
-                } else {
-                    int is_negative = 0;
-                    if (d < 0) {
-                        is_negative = 1;
-                        d = -d;
-                    }
-                    while (d > 0) {
-                        num_buf[i++] = (d % 10) + '0';
-                        d /= 10;
-                    }
-                    if (is_negative) {
-                        num_buf[i++] = '-';
-                    }
-                }
-                while (i > 0) {
-                    *buf_ptr++ = num_buf[--i];
-                    written++;
-                }
-            } else if (*format == 'x') { // Hexadecimal
-                unsigned int x = va_arg(args, unsigned int);
-                char hex_buf[9]; // Max for uint32_t (8 chars) + null
-                int i = 0;
-                if (x == 0) {
-                    hex_buf[i++] = '0';
-                } else {
-                    while (x > 0) {
-                        int digit = x % 16;
-                        if (digit < 10) {
-                            hex_buf[i++] = digit + '0';
-                        } else {
-                            hex_buf[i++] = digit - 10 + 'a';
-                        }
-                        x /= 16;
-                    }
-                }
-                while (i > 0) {
-                    *buf_ptr++ = hex_buf[--i];
-                    written++;
-                }
-            } else if (*format == 'c') {
-                char c = va_arg(args, int); // Chars are promoted to int
-                *buf_ptr++ = c;
-                written++;
-            } else if (*format == '%') {
-                *buf_ptr++ = '%';
-                written++;
-            }
-        } else {
-            *buf_ptr++ = *format;
-            written++;
-        }
-        format++;
-    }
-    *buf_ptr = '\0';
-    return written;
-}
+extern void *malloc(size_t size);
+extern void free(void *ptr);
 
-static inline int ksprintf(char *buffer, const char *format, ...) {
-    va_list args;
-    va_start(args, format);
-    int ret = vksprintf(buffer, format, args);
-    va_end(args);
-    return ret;
-}
-
-static inline void *malloc(size_t size) {
-    return (void *)syscall(SYS_MALLOC, (uint64_t)size, 0, 0);
-}
-
-static inline void free(void *ptr) {
-    syscall(SYS_FREE, (uint64_t)ptr, 0, 0);
+static inline void *sbrk(intptr_t increment) {
+    return (void *)syscall(SYS_SBRK, (uint64_t)increment, 0, 0);
 }
 
 #endif

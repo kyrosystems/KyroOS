@@ -2,11 +2,11 @@
 #define ELF_H
 
 #include <stdint.h>
-#include "vmm.h"
+#include "vmm.h" // For pml4_t
 
 #define EI_NIDENT 16
 
-// ELF64 Header
+// ELF Header
 typedef struct {
     unsigned char e_ident[EI_NIDENT];
     uint16_t      e_type;
@@ -24,7 +24,7 @@ typedef struct {
     uint16_t      e_shstrndx;
 } Elf64_Ehdr;
 
-// ELF64 Program Header
+// Program Header
 typedef struct {
     uint32_t p_type;
     uint32_t p_flags;
@@ -36,39 +36,40 @@ typedef struct {
     uint64_t p_align;
 } Elf64_Phdr;
 
-// e_ident[] indices
-#define EI_MAG0    0
-#define EI_MAG1    1
-#define EI_MAG2    2
-#define EI_MAG3    3
-#define EI_CLASS   4
-#define EI_DATA    5
-#define EI_VERSION 6
+// e_ident[] indexes
+#define EI_MAG0       0
+#define EI_MAG1       1
+#define EI_MAG2       2
+#define EI_MAG3       3
+#define EI_CLASS      4
+#define EI_DATA       5
+#define EI_VERSION    6
 
-// ELF Magic
-#define ELFMAG0 0x7f
-#define ELFMAG1 'E'
-#define ELFMAG2 'L'
-#define ELFMAG3 'F'
+// e_ident[] values
+#define ELFMAG0       0x7f
+#define ELFMAG1       'E'
+#define ELFMAG2       'L'
+#define ELFMAG3       'F'
+#define ELFCLASS64    2
 
-// ELF Class
-#define ELFCLASS64 2
+// e_type values
+#define ET_EXEC       2
+#define ET_REL        1
 
-// e_type
-#define ET_REL  1 // Relocatable file
-#define ET_EXEC 2 // Executable file
+// p_type values
+#define PT_LOAD       1
 
-// p_type
-#define PT_LOAD 1 // Loadable segment
+// p_flags values
+#define PF_X          1 // Execute
+#define PF_W          2 // Write
+#define PF_R          4 // Read
 
-// p_flags
-#define PF_X 1 // Execute
-#define PF_W 2 // Write
-#define PF_R 4 // Read
+typedef struct {
+    uint64_t entry_point;
+    uint64_t program_break;
+} elf_load_result_t;
 
-
-// Function to load an ELF executable from memory
-int elf_load(pml4_t* pml4, const uint8_t* elf_data);
-int elf_exec_as_thread(const char* path);
+elf_load_result_t elf_load(pml4_t* pml4, const uint8_t* elf_data);
+int elf_exec_as_thread(const char* path, int argc, char* argv[]);
 
 #endif // ELF_H

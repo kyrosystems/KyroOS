@@ -1,268 +1,163 @@
-# KyroOS Build System (Optimized for WSL + Windows QEMU)
-
-# --- Toolchain Setup ---
-# В Ubuntu/WSL пакет называется x86_64-linux-gnu, он отлично подходит
-# при использовании флагов -ffreestanding и -nostdlib
-TARGET = x86_64-linux-gnu
-CC = $(TARGET)-gcc
-AR = $(TARGET)-ar
+TOOLCHAIN_PREFIX ?= x86_64-linux-gnu-
+ifeq ($(shell which $(TOOLCHAIN_PREFIX)gcc 2>/dev/null),)
+    ifeq ($(shell which x86_64-pc-linux-gnu-gcc 2>/dev/null),)
+        TOOLCHAIN_PREFIX =
+        $(warning No cross-compiler found. Using host gcc.)
+    else
+        TOOLCHAIN_PREFIX = x86_64-pc-linux-gnu-
+    endif
+endif
+CC = $(TOOLCHAIN_PREFIX)gcc
+AR = $(TOOLCHAIN_PREFIX)ar
+LD = $(TOOLCHAIN_PREFIX)ld
 AS = nasm
-LD = $(TARGET)-ld
-
-# Kernel compilation flags
-CFLAGS := \
-    -ffreestanding \
-    -fno-stack-protector \
-    -fno-stack-check \
-    -fno-lto \
-    -fno-pie \
-    -fno-pic \
-    -m64 \
-    -march=x86-64 \
-    -mabi=sysv \
-    -mno-80387 \
-# --- Compilation Flags ---
-# Optimized for Kernel Development
-K_CFLAGS = -Wall -Wextra -std=c11 -ffreestanding -O2 -Isrc/include \
+VERSION_H = src/include/version.h
+V_MAJOR = $(shell grep -oP 'KYROOS_VERSION_MAJOR \K\d+' $(VERSION_H))
+V_MINOR = $(shell grep -oP 'KYROOS_VERSION_MINOR \K\d+' $(VERSION_H))
+V_PATCH = $(shell grep -oP 'KYROOS_VERSION_PATCH \K\d+' $(VERSION_H))
+V_BUILD = $(shell grep -oP 'KYROOS_VERSION_BUILD \K"\K\d+' $(VERSION_H) | sed 's/"//')
+FULL_VERSION = $(V_MAJOR).$(V_MINOR).$(V_PATCH)-$(V_BUILD)
+BUILD_DIR = build
+ISO_DIR   = $(BUILD_DIR)/isodir
+OUTPUT_DIR = isofiles
+SRC_DIR   = src
+USER_DIR  = userspace
+TOOLS_SRC = src/tools
+MODULES_DIR = modules
+KERNEL = $(BUILD_DIR)/kernel/kyroos.elf
+ISO_FILENAME = $(OUTPUT_DIR)/KyroOS-$(FULL_VERSION).iso
+K_CFLAGS = -Wall -Wextra -std=c11 -ffreestanding -O2 -I$(SRC_DIR)/include \
+           -I$(SRC_DIR)/include/drivers/gpu/amd_gpu \
            -mcmodel=kernel -mno-red-zone -m64 -nostdlib -fno-stack-protector \
            -mno-sse -mno-sse2 -mno-mmx -mno-80387 -fno-pic -fno-pie
 NASMFLAGS = -f elf64
+U_CFLAGS = -Wall -Wextra -std=c11 -I$(USER_DIR)/lib -I$(USER_DIR)/lib/libc -I$(USER_DIR)/lib/kyroos_gfx \
+           -I$(USER_DIR)/lib/tui -I$(SRC_DIR)/include -I$(TOOLS_SRC) -ffreestanding -nostdlib \
+           -fno-stack-protector -fno-pie -m64 -O2
+K_BOOT_OBJS = $(BUILD_DIR)/boot/boot.o $(BUILD_DIR)/boot/gdt_flush.o $(BUILD_DIR)/boot/isr_stubs.o \
+              $(BUILD_DIR)/boot/long_mode_entry.o $(BUILD_DIR)/boot/switch.o $(BUILD_DIR)/boot/userspace_exit_stub.o
+K_OBJS_C = $(patsubst $(SRC_DIR)/kernel/%.c, $(BUILD_DIR)/kernel/%.o, $(wildcard $(SRC_DIR)/kernel/*.c))
 
-# Userspace flags
-U_CFLAGS = -Wall -Wextra -std=gnu11 -O2 -I. -Iuserspace/lib -I$(SRC_DIR)/tools -I$(SRC_DIR)/include -ffreestanding -nostdlib
+# New: AMD GPU driver source files
+K_DRIVER_GPU_AMDGPU_SRCS = $(wildcard $(SRC_DIR)/kernel/drivers/gpu/amd_gpu/*.c)
+K_DRIVER_GPU_AMDGPU_OBJS = $(patsubst $(SRC_DIR)/kernel/drivers/gpu/amd_gpu/%.c, $(BUILD_DIR)/kernel/drivers/gpu/amd_gpu/%.o, $(K_DRIVER_GPU_AMDGPU_SRCS))
 
-
-# --- Project Structure ---
-BUILD_DIR = build
-SRC_DIR = src
-ISO_DIR = $(BUILD_DIR)/isodir
-USER_DIR = userspace
-MODULES_DIR = modules
-
-# --- Files Path Logic ---
-K_OBJS = \
-	$(BUILD_DIR)/boot/boot.o \
-	$(BUILD_DIR)/boot/gdt_flush.o \
-	$(BUILD_DIR)/boot/isr_stubs.o \
-	$(BUILD_DIR)/boot/long_mode_entry.o \
-	$(BUILD_DIR)/boot/switch.o \
-	$(BUILD_DIR)/boot/userspace_exit_stub.o \
-	$(BUILD_DIR)/kernel/ac97.o \
-	$(BUILD_DIR)/kernel/arp.o \
-	$(BUILD_DIR)/kernel/audio.o \
-	$(BUILD_DIR)/kernel/crypto.o \
-	$(BUILD_DIR)/kernel/deviceman.o \
-	$(BUILD_DIR)/kernel/dhcp.o \
-	$(BUILD_DIR)/kernel/e1000.o \
-	$(BUILD_DIR)/kernel/elf.o \
-	$(BUILD_DIR)/kernel/event.o \
-	$(BUILD_DIR)/kernel/epstein.o \
-	$(BUILD_DIR)/kernel/fb.o \
-	$(BUILD_DIR)/kernel/font.o \
-	$(BUILD_DIR)/kernel/gdt.o \
-	$(BUILD_DIR)/kernel/gui.o \
-	$(BUILD_DIR)/kernel/heap.o \
-	$(BUILD_DIR)/kernel/icmp.o \
-	$(BUILD_DIR)/kernel/ide.o \
-	$(BUILD_DIR)/kernel/idt.o \
-	$(BUILD_DIR)/kernel/ip.o \
-	$(BUILD_DIR)/kernel/isr.o \
-	$(BUILD_DIR)/kernel/kernel.o \
-	$(BUILD_DIR)/kernel/keyboard.o \
-	$(BUILD_DIR)/kernel/kyrofs.o \
-	$(BUILD_DIR)/kernel/lkm.o \
-	$(BUILD_DIR)/kernel/log.o \
-	$(BUILD_DIR)/kernel/mouse.o \
-	$(BUILD_DIR)/kernel/null_pci_driver.o \
-	$(BUILD_DIR)/kernel/pci.o \
-	$(BUILD_DIR)/kernel/pmm.o \
-	$(BUILD_DIR)/kernel/panic_screen.o \
-	$(BUILD_DIR)/kernel/scheduler.o \
-	$(BUILD_DIR)/kernel/shell.o \
-	$(BUILD_DIR)/kernel/socket.o \
-	$(BUILD_DIR)/kernel/string.o \
-	$(BUILD_DIR)/kernel/syscall.o \
-	$(BUILD_DIR)/kernel/tcp.o \
-	$(BUILD_DIR)/kernel/thread.o \
-	$(BUILD_DIR)/kernel/tss.o \
-	$(BUILD_DIR)/kernel/udp.o \
-	$(BUILD_DIR)/kernel/userspace.o \
-	$(BUILD_DIR)/kernel/vfs.o \
-	$(BUILD_DIR)/kernel/vmm.o \
-	$(BUILD_DIR)/kernel/fs_disk.o \
-	$(BUILD_DIR)/kernel/fs_disk_vfs.o
-
-
-KERNEL_NAME = kyroos
-KERNEL = build/$(KERNEL_NAME).elf
-GAME_ELF = $(BUILD_DIR)/bin/game
-TUI_INSTALLER_ELF = $(BUILD_DIR)/bin/tui_installer
-INSTALLER_ELF = $(BUILD_DIR)/bin/installer
-HELLO_LKM = $(MODULES_DIR)/hello_lkm/hello.ko
-LOGO_FILE = kyroos_logo.png
-
-# --- Main Targets ---
-.PHONY: all
-all: update_version tools userspace $(KERNEL_NAME).iso
-
-$(KERNEL_NAME).iso: $(KERNEL) $(HELLO_LKM) limine.conf
-	@echo "Creating $(KERNEL_NAME).iso (Build $(shell grep KYROOS_VERSION_BUILD $(VERSION_FILE) | awk '{print $$3}' | tr -d '"'))"
-	@rm -rf $(ISO_DIR)
-	@mkdir -p $(ISO_DIR)/boot/limine $(ISO_DIR)/bin $(ISO_DIR)/modules $(ISO_DIR)/etc
-	@cp $(KERNEL) $(ISO_DIR)/kernel.elf
+# Extend K_OBJS_C to include AMD GPU driver objects
+K_OBJS_C += $(K_DRIVER_GPU_AMDGPU_OBJS)
+USER_LIBC_A   = $(BUILD_DIR)/userspace/libkyroos_user.a
+USER_CRT0_OBJ = $(BUILD_DIR)/userspace/crt0.o
+USER_LINKER   = $(USER_DIR)/linker.ld
+INIT_ELF      = $(BUILD_DIR)/userspace/init/init
+KPM_ELF       = $(BUILD_DIR)/tools/kpm/kpm
+INSTALLER_ELF = $(BUILD_DIR)/tools/installer/installer
+COREUTILS_SRCS = $(wildcard $(TOOLS_SRC)/coreutils/*.c)
+COREUTILS_ELFS = $(patsubst $(TOOLS_SRC)/coreutils/%.c, $(BUILD_DIR)/bin/%, $(COREUTILS_SRCS))
+APP_DIRS = $(filter-out $(USER_DIR)/init $(USER_DIR)/lib $(USER_DIR)/micropython $(USER_DIR)/crt0.asm $(USER_DIR)/linker.ld, $(wildcard $(USER_DIR)/*))
+_APP_SRCS_FULL_PATHS = $(foreach dir,$(APP_DIRS),$(dir)/main.c)
+USER_APP_SRCS = $(filter $(_APP_SRCS_FULL_PATHS), $(wildcard $(_APP_SRCS_FULL_PATHS)))
+USER_APP_OBJS = $(patsubst $(USER_DIR)/%/main.c, $(BUILD_DIR)/userspace/%/%.o, $(USER_APP_SRCS))
+USER_APP_ELFS = $(patsubst $(BUILD_DIR)/userspace/%/%.o, $(BUILD_DIR)/userspace/%/%, $(USER_APP_OBJS))
+.PHONY: all clean run iso update_version userspace tools modules coreutils
+all: update_version $(KERNEL) $(USER_LIBC_A) userspace tools modules coreutils iso
+run: all
+	@echo "--- Запуск KyroOS $(FULL_VERSION) в QEMU ---"
+	@qemu-system-x86_64 -cdrom $(ISO_FILENAME) -serial stdio -no-reboot
+iso:
+	@mkdir -p $(ISO_DIR)/boot/limine $(ISO_DIR)/bin $(ISO_DIR)/modules $(ISO_DIR)/etc $(OUTPUT_DIR)
 	@cp $(KERNEL) $(ISO_DIR)/boot/kernel.elf
-	@cp $(GAME_ELF) $(ISO_DIR)/bin/
-	@cp $(TUI_INSTALLER_ELF) $(ISO_DIR)/bin/installer
-	@cp $(COREUTILS_BINS) $(KPM_BIN) $(TEST_APP_BIN) $(ISO_DIR)/bin/
-	@cp $(HELLO_LKM) $(ISO_DIR)/modules/
-	@cp panic_quotes.txt $(ISO_DIR)/etc/
-	@cp limine.conf limine/limine-bios.sys limine/limine-bios-cd.bin limine/limine-bios-pxe.bin limine/limine-uefi-cd.bin $(ISO_DIR)/boot/limine/
-	@cp limine.conf limine/limine-bios.sys $(ISO_DIR)/
-	@xorriso -as mkisofs -R -J -iso-level 3 -volid "KYROOS" -b boot/limine/limine-bios-cd.bin \
-        -no-emul-boot -boot-load-size 4 -boot-info-table \
-        --efi-boot boot/limine/limine-uefi-cd.bin \
-        -efi-boot-part --efi-boot-image --protective-msdos-label \
-        $(ISO_DIR) -o $(KERNEL_NAME).iso
-
-# --- Versioning ---
-VERSION_FILE = src/include/version.h
-
+	@cp limine.conf $(ISO_DIR)/boot/limine/
+	@cp limine/BOOTX64.EFI limine/limine-bios.sys \
+	    limine/limine-bios-cd.bin limine/limine-uefi-cd.bin $(ISO_DIR)/boot/limine/
+	@cp $(INIT_ELF) $(ISO_DIR)/bin/ 2>/dev/null || true
+	@cp $(KPM_ELF) $(ISO_DIR)/bin/ 2>/dev/null || true
+	@cp $(INSTALLER_ELF) $(ISO_DIR)/bin/ 2>/dev/null || true
+	@if [ -d $(BUILD_DIR)/bin ]; then cp $(BUILD_DIR)/bin/* $(ISO_DIR)/bin/ 2>/dev/null || true; fi
+	@$(foreach app,$(USER_APP_ELFS), if [ -f $(app) ]; then cp $(app) $(ISO_DIR)/bin/; fi ;)
+	@cp panic_quotes.txt $(ISO_DIR)/etc/ 2>/dev/null || true
+	@xorriso -as mkisofs -R -J -iso-level 3 -volid "KYROOS" \
+	   -b boot/limine/limine-bios-cd.bin \
+	   -no-emul-boot -boot-load-size 4 -boot-info-table \
+	   --efi-boot boot/limine/BOOTX64.EFI \
+	   -efi-boot-part --efi-boot-image --protective-msdos-label \
+	   $(ISO_DIR) -o $(ISO_FILENAME)
+	@limine/limine bios-install $(ISO_FILENAME) 2>/dev/null || echo "Limine install skipped."
+	@rm -rf $(ISO_DIR)
+	@echo "--- ISO готова: $(ISO_FILENAME) ---"
 update_version:
-	@echo "Updating build number in $(VERSION_FILE)..."
-	@awk '/KYROOS_VERSION_BUILD/ {$$3 = sprintf("\"%04d\"", substr($$3, 2, length($$3)-2) + 1)} {print}' $(VERSION_FILE) > $(VERSION_FILE).tmp
-	@mv $(VERSION_FILE).tmp $(VERSION_FILE)
-
-# --- Kernel Build ---
-$(KERNEL): $(BUILD_DIR)/kernel/libkyroos_kernel.a linker.ld $(VERSION_FILE)
-	@$(LD) -T linker.ld -o $@ $(BUILD_DIR)/kernel/libkyroos_kernel.a -m elf_x86_64
-
-$(BUILD_DIR)/kernel/libkyroos_kernel.a: $(K_OBJS)
-	@$(AR) rcs $@ $^
-
+	@sed -i -E 's/^#define KYROOS_VERSION_BUILD "[0-9]+"/#define KYROOS_VERSION_BUILD "'$$(($(V_BUILD)+1))'"/' $(VERSION_H)
+	$(eval V_BUILD = $(shell grep -oP 'KYROOS_VERSION_BUILD "[0-9]+"' $(VERSION_H) | grep -oP '[0-9]+'))
+	$(eval FULL_VERSION = $(V_MAJOR).$(V_MINOR).$(V_PATCH)-$(V_BUILD))
+	$(eval ISO_FILENAME = $(OUTPUT_DIR)/KyroOS-$(FULL_VERSION).iso)
+$(KERNEL): $(K_BOOT_OBJS) $(K_OBJS_C)
+	@mkdir -p $(@D)
+	@$(LD) -T linker.ld -o $@ $^ -m elf_x86_64
 $(BUILD_DIR)/kernel/%.o: $(SRC_DIR)/kernel/%.c
 	@mkdir -p $(@D)
 	@$(CC) $(K_CFLAGS) -c $< -o $@
-
+$(BUILD_DIR)/kernel/drivers/gpu/amd_gpu/%.o: $(SRC_DIR)/kernel/drivers/gpu/amd_gpu/%.c
+	@mkdir -p $(@D)
+	@$(CC) $(K_CFLAGS) -c $< -o $@
 $(BUILD_DIR)/boot/%.o: $(SRC_DIR)/boot/%.asm
 	@mkdir -p $(@D)
 	@$(AS) $(NASMFLAGS) $< -o $@
-
-# --- Userspace Build ---
-.PHONY: userspace
-userspace: $(USER_LIBC_A) $(INSTALLER_ELF) $(TUI_INSTALLER_ELF) $(GAME_ELF)
-
-$(GAME_ELF): $(BUILD_DIR)/userspace/game.o $(BUILD_DIR)/userspace/libkyroos_gfx.a $(BUILD_DIR)/userspace/crt0.o
+$(BUILD_DIR)/userspace/crt0.o: userspace/crt0.asm
 	@mkdir -p $(@D)
-	@$(LD) -T $(USER_DIR)/game/link.ld -o $@ $(BUILD_DIR)/userspace/game.o $(BUILD_DIR)/userspace/crt0.o -L$(BUILD_DIR)/userspace -lkyroos_gfx -lkyroos_user
-
-$(BUILD_DIR)/userspace/game.o: $(USER_DIR)/game/game.c
+	@$(AS) $(NASMFLAGS) $< -o $@
+$(BUILD_DIR)/userspace/init/init.o: $(USER_DIR)/init/init.c
 	@mkdir -p $(@D)
 	@$(CC) $(U_CFLAGS) -c $< -o $@
-
-$(BUILD_DIR)/userspace/libkyroos_gfx.a: $(BUILD_DIR)/userspace/kyroos_gfx.o
-	@$(AR) rcs $@ $< 
-
-$(BUILD_DIR)/userspace/kyroos_gfx.o: $(USER_DIR)/lib/kyroos_gfx/kyroos_gfx.c
+$(USER_LIBC_A): $(patsubst $(USER_DIR)/lib/libc/%.c, $(BUILD_DIR)/userspace/libc/%.o, $(wildcard $(USER_DIR)/lib/libc/*.c)) \
+                 $(patsubst $(USER_DIR)/lib/kyroos_gfx/%.c, $(BUILD_DIR)/userspace/kyroos_gfx/%.o, $(wildcard $(USER_DIR)/lib/kyroos_gfx/*.c)) \
+                 $(patsubst $(USER_DIR)/lib/tui/%.c, $(BUILD_DIR)/userspace/tui/%.o, $(wildcard $(USER_DIR)/lib/tui/*.c))
 	@mkdir -p $(@D)
-	@$(CC) $(U_CFLAGS) -c $< -o $@
-
-# TUI Installer
-$(TUI_INSTALLER_ELF): $(BUILD_DIR)/userspace/tui_installer.o $(BUILD_DIR)/userspace/libtui.a $(BUILD_DIR)/userspace/crt0.o
-	@mkdir -p $(@D)
-	@$(LD) -T $(USER_DIR)/installer/link.ld -o $@ $(BUILD_DIR)/userspace/tui_installer.o $(BUILD_DIR)/userspace/crt0.o -L$(BUILD_DIR)/userspace -ltui -lkyroos_user
-
-$(BUILD_DIR)/userspace/tui_installer.o: $(USER_DIR)/installer/installer.c
-	@mkdir -p $(@D)
-	@$(CC) $(U_CFLAGS) -c $< -o $@
-
-$(BUILD_DIR)/userspace/libtui.a: $(BUILD_DIR)/userspace/tui.o
-	@$(AR) rcs $@ $< 
-
-$(BUILD_DIR)/userspace/tui.o: $(USER_DIR)/lib/tui/tui.c
-	@mkdir -p $(@D)
-	@$(CC) $(U_CFLAGS) -c $< -o $@
-
-# CLI Installer
-$(INSTALLER_ELF): $(BUILD_DIR)/tools/installer/installer.o $(BUILD_DIR)/userspace/crt0.o
-	@mkdir -p $(@D)
-	@$(LD) -T src/tools/installer/link.ld -o $@ $(BUILD_DIR)/tools/installer/installer.o $(BUILD_DIR)/userspace/crt0.o -L$(BUILD_DIR)/userspace -lkyroos_user
-
-$(BUILD_DIR)/tools/installer/installer.o: $(SRC_DIR)/tools/installer/installer.c
-	@mkdir -p $(@D)
-	@$(CC) $(U_CFLAGS) -c $< -o $@
-
-# --- Userspace Libc Build ---
-USER_LIBC_SRC = $(shell find $(USER_DIR)/lib/libc -name "*.c")
-USER_LIBC_OBJS = $(patsubst $(USER_DIR)/lib/libc/%.c, $(BUILD_DIR)/userspace/libc/%.o, $(USER_LIBC_SRC))
-USER_LIBC_A = $(BUILD_DIR)/userspace/libkyroos_user.a
-
+	@$(AR) rcs $@ $^
 $(BUILD_DIR)/userspace/libc/%.o: $(USER_DIR)/lib/libc/%.c
 	@mkdir -p $(@D)
 	@$(CC) $(U_CFLAGS) -c $< -o $@
-
-$(USER_LIBC_A): $(USER_LIBC_OBJS)
-	@$(AR) rcs $@ $^
-
-# --- Module Build ---
-.PHONY: modules
-modules: $(HELLO_LKM)
-
-$(HELLO_LKM):
-	@$(MAKE) -C $(MODULES_DIR)/hello_lkm
-
-# --- Tools & CoreUtils Build ---
-COREUTILS_SRC = $(shell find $(SRC_DIR)/tools/coreutils -name "*.c")
-COREUTILS_OBJS = $(patsubst $(SRC_DIR)/tools/coreutils/%.c, $(BUILD_DIR)/tools/coreutils/%.o, $(COREUTILS_SRC))
-COREUTILS_BINS = $(patsubst $(SRC_DIR)/tools/coreutils/%.c, $(BUILD_DIR)/bin/%, $(COREUTILS_SRC))
-
-KPM_SRC = $(shell find $(SRC_DIR)/tools/kpm -name "*.c")
-KPM_OBJS = $(patsubst $(SRC_DIR)/tools/kpm/%.c, $(BUILD_DIR)/tools/kpm/%.o, $(KPM_SRC))
-KPM_BIN = $(BUILD_DIR)/bin/kpm
-
-TEST_APP_SRC = $(SRC_DIR)/tools/test_app/test_app.c
-TEST_APP_OBJ = $(BUILD_DIR)/tools/test_app/test_app.o
-TEST_APP_BIN = $(BUILD_DIR)/bin/test_app
-
-# Generic rule to compile userspace C files into object files
-$(BUILD_DIR)/tools/coreutils/%.o: $(SRC_DIR)/tools/coreutils/%.c
+$(BUILD_DIR)/userspace/kyroos_gfx/%.o: $(USER_DIR)/lib/kyroos_gfx/%.c
 	@mkdir -p $(@D)
 	@$(CC) $(U_CFLAGS) -c $< -o $@
-
-$(BUILD_DIR)/tools/kpm/%.o: $(SRC_DIR)/tools/kpm/%.c
+$(BUILD_DIR)/userspace/tui/%.o: $(USER_DIR)/lib/tui/%.c
 	@mkdir -p $(@D)
 	@$(CC) $(U_CFLAGS) -c $< -o $@
-
-$(BUILD_DIR)/tools/test_app/%.o: $(SRC_DIR)/tools/test_app/%.c
+coreutils: $(COREUTILS_ELFS)
+$(BUILD_DIR)/bin/%: $(BUILD_DIR)/tools/coreutils/%.o $(USER_CRT0_OBJ) $(USER_LIBC_A)
+	@mkdir -p $(@D)
+	@$(LD) -T $(TOOLS_SRC)/coreutils/link.ld -o $@ $^
+$(BUILD_DIR)/tools/coreutils/%.o: $(TOOLS_SRC)/coreutils/%.c
 	@mkdir -p $(@D)
 	@$(CC) $(U_CFLAGS) -c $< -o $@
-
-
-.PHONY: tools
-tools: $(USER_LIBC_A) $(COREUTILS_BINS) $(KPM_BIN) $(TEST_APP_BIN)
-
-$(BUILD_DIR)/bin/%: $(BUILD_DIR)/tools/coreutils/%.o $(BUILD_DIR)/userspace/crt0.o
+userspace: $(INIT_ELF) $(USER_APP_ELFS)
+define LINK_APP_TEMPLATE
+$(1): $(patsubst %/%,%/%.o,$(1)) $(USER_CRT0_OBJ) $(USER_LIBC_A)
+	@mkdir -p $$(dir $$@)
+	@$(LD) -T $(USER_LINKER) -o $$@ $$^
+endef
+$(foreach app_elf,$(USER_APP_ELFS),$(eval $(call LINK_APP_TEMPLATE,$(app_elf))))
+$(foreach app_obj,$(USER_APP_OBJS),$(eval $(app_obj): $(patsubst $(BUILD_DIR)/userspace/%/%.o,$(USER_DIR)/%/main.c,$(app_obj)) ; @mkdir -p $$(dir $$@); $(CC) $(U_CFLAGS) -c $$< -o $$@))
+$(INIT_ELF): $(BUILD_DIR)/userspace/init/init.o $(USER_CRT0_OBJ) $(USER_LIBC_A)
 	@mkdir -p $(@D)
-	@$(LD) -T src/tools/coreutils/link.ld -o $@ $^ -L$(BUILD_DIR)/userspace -lkyroos_user
-
-$(KPM_BIN): $(KPM_OBJS) $(BUILD_DIR)/userspace/crt0.o
+	@$(LD) -T $(USER_LINKER) -o $@ $^
+tools: $(KPM_ELF) $(INSTALLER_ELF)
+$(KPM_ELF): $(patsubst $(TOOLS_SRC)/kpm/%.c, $(BUILD_DIR)/tools/kpm/%.o, $(wildcard $(TOOLS_SRC)/kpm/*.c)) $(USER_CRT0_OBJ) $(USER_LIBC_A)
 	@mkdir -p $(@D)
-	@$(LD) -T src/tools/kpm/link.ld -o $@ $^ -L$(BUILD_DIR)/userspace -lkyroos_user
-
-$(TEST_APP_BIN): $(TEST_APP_OBJ) $(BUILD_DIR)/userspace/crt0.o
+	@$(LD) -T $(TOOLS_SRC)/kpm/link.ld -o $@ $^
+$(BUILD_DIR)/tools/kpm/%.o: $(TOOLS_SRC)/kpm/%.c
 	@mkdir -p $(@D)
-	@$(LD) -T src/tools/coreutils/link.ld -o $@ $^ -L$(BUILD_DIR)/userspace -lkyroos_user
-
-$(BUILD_DIR)/userspace/crt0.o: $(USER_DIR)/crt0.asm
+	@$(CC) $(U_CFLAGS) -c $< -o $@
+$(INSTALLER_ELF): $(BUILD_DIR)/tools/installer/installer.o $(USER_CRT0_OBJ) $(USER_LIBC_A)
 	@mkdir -p $(@D)
-	@$(AS) $(NASMFLAGS) $< -o $@
-
-# --- Execution and Cleanup ---
-.PHONY: run
-run: clean all
-	@echo "Launching QEMU from Windows..."
-	@cmd.exe /c "C:\\Program Files\\qemu\\qemu-system-x86_64.exe" -cdrom $(KERNEL_NAME).iso -serial stdio -no-reboot -no-reboot -no-reboot
-
-.PHONY: clean
+	@$(LD) -T $(TOOLS_SRC)/installer/link.ld -o $@ $^
+$(BUILD_DIR)/tools/installer/installer.o: $(TOOLS_SRC)/installer/installer.c
+	@mkdir -p $(@D)
+	@$(CC) $(U_CFLAGS) -c $< -o $@
+modules:
+	$(MAKE) -C $(MODULES_DIR)/hello_lkm || true 
 clean:
-	@rm -rf $(BUILD_DIR) $(KERNEL_NAME).iso
-	@$(MAKE) -C $(MODULES_DIR)/hello_lkm clean 2>/dev/null || true
+	@echo "--- Очистка проекта KyroOS ---"
+	@# Удаляем директории сборки и вывода
+	@rm -rf $(BUILD_DIR) $(OUTPUT_DIR)
+	@# Очищаем модули (вызываем их собственные clean, если есть)
+	@$(MAKE) -C $(MODULES_DIR)/hello_lkm clean || true
+	@# (Опционально) Если нужно сбросить счетчик билдов в version.h, добавь команду сюда
+	@echo "Очистка завершена."

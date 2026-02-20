@@ -173,7 +173,7 @@ static int copy_file_to_mounted_fs(const char *src_path, const char *dest_path_o
         return -1;
     }
     
-    if (read(src_fd, buffer, st.st_size) != st.st_size) {
+    if (read(src_fd, buffer, st.st_size) != (int)st.st_size) {
         print("INSTALLER: Error: Failed to read source file: "); print(src_path); print("\n");
         free(buffer);
         close(src_fd);
@@ -189,7 +189,7 @@ static int copy_file_to_mounted_fs(const char *src_path, const char *dest_path_o
         return -1;
     }
 
-    if (write(dest_fd, buffer, st.st_size) != st.st_size) {
+    if (write(dest_fd, buffer, st.st_size) != (int)st.st_size) {
         print("INSTALLER: Error: Failed to write to destination file: "); print(dest_path_on_mounted_fs); print("\n");
         free(buffer);
         close(dest_fd);
@@ -244,9 +244,9 @@ void installer_base_system_installation() {
 
 void installer_install_initial_packages() {
     print("Installer: Installing initial packages...\n");
-    print("  (This would involve running `kpm install <package_name>` for base packages.)\n");
-    print("  kpm install coreutils.kpkg (simulated)\n");
-    print("  kpm install shell.kpkg (simulated)\n");
+    print("  (Note: kpm's network fetch is currently disabled due to missing TLS support.)\n");
+    print("  This would involve running 'kpm install <local_package.kpkg>' for base packages.\n");
+    print("  e.g., 'kpm install /packages/coreutils.kpkg' (simulated)\n");
     print("Installer: Initial packages installation complete (simulated).\n");
 }
 
@@ -328,10 +328,8 @@ int main(int argc, char **argv) {
     // Simple clear screen (mimic shell's clear)
     // Direct framebuffer access is not available from userspace.
     // Need a syscall for clearing screen or rely on shell's clear.
-    // For now, print newlines to clear console.
-    for (int i = 0; i < 50; i++) {
-        print("\n");
-    }
+
+    print("\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n");
 
     print("=========================================\n");
     print("      KyroOS Graphical Installer\n");

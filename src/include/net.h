@@ -19,7 +19,7 @@ typedef struct net_dev {
     net_send_packet_t send_packet;
     net_receive_packet_t receive_packet;
     // For zero-copy: a ring buffer or similar mechanism for received packets
-    // For now, simpler: receive_packet implies copying
+
     
     // Linked list for multiple network devices
     struct net_dev* next;

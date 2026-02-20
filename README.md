@@ -50,7 +50,7 @@ The full documentation for KyroOS can be found in the `docs_en/` or `docs_ru/` d
 *   [Портирование Приложений на KyroOS](docs_ru/porting_applications.md)
 *   [Написание Приложений для KyroOS](docs_ru/writing_applications.md)
 
-## First Alpha Release (26.01.00 811)
+## First Alpha Release (26.01.00 812)
 
 This is the first official alpha release of KyroOS. While the system is still in a very early stage of development, we are making an ISO available for enthusiasts who want to try it out.
 

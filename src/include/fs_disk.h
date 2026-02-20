@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "vfs.h"
 
 // Filesystem constants
 #define FS_SIGNATURE        0x4B59524F // "KYRO"
@@ -36,9 +37,9 @@ typedef struct {
 #define FS_FILE_FLAG_DIRECTORY  0x02
 
 // Functions for disk filesystem operations
-int fs_format(int disk_fd, uint32_t partition_lba, uint32_t partition_size);
-int fs_mount(int disk_fd, uint32_t partition_lba);
-int fs_unmount();
+int fs_format(vfs_node_t *disk_device_node, uint32_t partition_lba, uint32_t partition_size);
+int fs_mount(vfs_node_t *disk_device_node, uint32_t partition_lba);
+int fs_unmount(vfs_node_t *disk_device_node);
 
 int fs_create_file(const char *path, uint32_t flags); // flags: FS_FILE_FLAG_FILE or FS_FILE_FLAG_DIRECTORY
 int fs_write_file(const char *path, const uint8_t *data, size_t size);

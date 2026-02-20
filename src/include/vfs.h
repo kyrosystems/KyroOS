@@ -80,6 +80,7 @@ typedef struct vfs_node {
 #define VFS_FILE 0x01
 #define VFS_DIRECTORY 0x02
 #define VFS_MOUNTPOINT 0x04
+#define VFS_CHARDEVICE 0x08
 
 // Standard open flags (simplified from POSIX)
 #define O_RDONLY    0x0001 // Open for reading only

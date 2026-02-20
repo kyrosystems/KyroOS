@@ -9,13 +9,21 @@ int main(int argc, char **argv) {
         strcpy(path, "."); // Current directory
     }
 
-    print("ls: Directory listing for ");
-    print(path);
-    print(" (Not yet fully implemented to list actual contents)\n");
+    int dir_fd = open(path, O_RDONLY);
+    if (dir_fd < 0) {
+        print("ls: cannot access '");
+        print(path);
+        print("': No such file or directory\n");
+        return 1;
+    }
 
-    // Placeholder content for now
-    print("  a_file.txt\n");
-    print("  another_dir/\n");
+    struct dirent de;
+    int index = 0;
+    while (readdir(dir_fd, index++, &de)) {
+        print(de.name);
+        print("\n");
+    }
 
+    close(dir_fd);
     return 0;
 }

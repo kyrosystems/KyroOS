@@ -12,7 +12,7 @@ typedef struct {
   uint16_t checksum;
 } __attribute__((packed)) udp_header_t;
 
-typedef void (*udp_handler_t)(net_dev_t *net_dev, ipv4_header_t *ip_hdr,
+typedef void (*udp_handler_t)(net_dev_t *net_dev, const ipv4_header_t *ip_hdr,
                               udp_header_t *udp_hdr, const uint8_t *data,
                               size_t len);
 

@@ -17,7 +17,7 @@ static uint32_t fs_disk_vfs_read(vfs_node_t *node, uint64_t offset, uint32_t siz
         return (uint32_t)-1; // Cannot read a directory as a file
     }
     // For simple flat FS_DISK, path is actually node->name
-    // Offset is not supported directly, only full file read for now
+
     if (offset != 0) {
         klog(LOG_WARN, "FS_DISK_VFS: Offset not supported for read yet.");
         return (uint32_t)-1;
@@ -30,7 +30,7 @@ static uint32_t fs_disk_vfs_write(vfs_node_t *node, uint64_t offset, uint32_t si
         return (uint32_t)-1; // Cannot write a directory as a file
     }
     // For simple flat FS_DISK, path is actually node->name
-    // Offset is not supported directly, only full file write for now
+
     if (offset != 0) {
         klog(LOG_WARN, "FS_DISK_VFS: Offset not supported for write yet.");
         return (uint32_t)-1;
@@ -40,7 +40,7 @@ static uint32_t fs_disk_vfs_write(vfs_node_t *node, uint64_t offset, uint32_t si
 
 static void fs_disk_vfs_open(vfs_node_t *node, int flags) {
     // fs_disk.c doesn't have an explicit open, it operates on path.
-    // This is a no-op for now.
+
     (void)node;
     (void)flags;
 }
@@ -93,14 +93,14 @@ static int fs_disk_vfs_readdir(vfs_node_t *node, uint32_t index, struct dirent *
 
     // This is crude: we directly access the fs_disk's internal file table logic.
     // A better VFS would have a generic way to iterate FS entries.
-    // For now, iterate `fs_disk`'s cached file table.
-    int count = 0;
+
+    uint32_t count = 0;
     for (int i = 0; i < FS_MAX_FILES; i++) {
         fs_file_entry_t file_info;
         if (fs_get_file_info_by_index(i, &file_info) == 0 && file_info.filename[0] != '\0') {
             if (count == index) {
                 strncpy(dir_entry->name, file_info.filename, MAX_FILENAME_LEN - 1);
-                dir_entry->ino = i; // Use index as inode for now
+                dir_entry->ino = i;
                 return 1; // Found entry at index
             }
             count++;
@@ -178,7 +178,7 @@ int fs_disk_mount_func(vfs_node_t *mount_point, vfs_node_t *device_node) {
     // Assume device_node->ptr holds the partition LBA for /dev/sdaX
     uint32_t partition_lba = (uint32_t)(uintptr_t)device_node->ptr;
 
-    if (fs_mount(disk_fd, partition_lba) != 0) {
+    if (fs_mount(device_node, partition_lba) != 0) {
         klog(LOG_ERROR, "FS_DISK_VFS: fs_mount failed.");
         return -1;
     }

@@ -6,6 +6,7 @@
 #include "fs_disk.h" // For fs_unmount
 #include <stddef.h>
 #include <stdint.h>
+#include "tty.h"
 
 typedef struct kyrofs_dirent {
   vfs_node_t node;
@@ -40,7 +41,7 @@ static void kyrofs_open(vfs_node_t *node, int flags) {
             file_content->size = 0;
             node->length = 0;
             // Optionally reallocate with initial capacity if a non-zero capacity is desired on truncate
-            // For now, it will be allocated on first write
+
         }
         // In a real FS, read/write flags might affect access checks.
         // For in-memory KyroFS, we allow read/write always once opened.
@@ -122,7 +123,7 @@ static int kyrofs_readdir(vfs_node_t *node, uint32_t index, struct dirent *dir_e
   return 0; // End of directory or invalid index
 }
 
-static int kyrofs_create_node(vfs_node_t *parent, char *name, uint32_t flags) {
+int kyrofs_create_node(vfs_node_t *parent, char *name, uint32_t flags) {
   kyrofs_dirent_t *new_de = (kyrofs_dirent_t *)kmalloc(sizeof(kyrofs_dirent_t));
   if (!new_de) {
       panic("kyrofs_create_node: kmalloc failed for dirent", NULL);
@@ -210,7 +211,7 @@ static int kyrofs_remove(vfs_node_t *node, char *name) {
 }
 
 static int kyrofs_rmdir(vfs_node_t *node, char *name, uint16_t mode) {
-    (void)mode; // Unused for now
+    (void)mode;
     kyrofs_dirent_t *current = (kyrofs_dirent_t *)node->ptr;
     kyrofs_dirent_t *prev = NULL;
 
@@ -238,8 +239,27 @@ static int kyrofs_rmdir(vfs_node_t *node, char *name, uint16_t mode) {
 }
 
 static int kyrofs_stat(vfs_node_t *node, struct stat *stat_buf) {
-    (void)node;
-    (void)stat_buf;
+    if (!node || !stat_buf) {
+        return -1; // Invalid arguments
+    }
+    memset(stat_buf, 0, sizeof(struct stat)); // Clear stat_buf to prevent garbage
+
+    stat_buf->st_size = node->length;
+    stat_buf->st_ino = node->inode; // Use node->inode if available, or generate a simple one
+
+    // Determine file type
+    if (node->flags & VFS_FILE) {
+        stat_buf->st_mode |= S_IFREG;
+    } else if (node->flags & VFS_DIRECTORY) {
+        stat_buf->st_mode |= S_IFDIR;
+    } else if (node->flags & VFS_CHARDEVICE) {
+        // You might define S_IFCHR in vfs.h if needed
+
+        stat_buf->st_mode |= S_IFREG; // Treat char device as a special file for stat
+    }
+    // Add default permissions
+    stat_buf->st_mode |= 0755; // rwxr-xr-x
+
     return 0;
 }
 
@@ -318,11 +338,23 @@ void kyrofs_init() {
   kyrofs_mkdir(vfs_root, "etc", 0);
   kyrofs_mkdir(vfs_root, "var", 0);
   kyrofs_mkdir(vfs_root, "mnt", 0); // New: for mounting other filesystems
+  kyrofs_mkdir(vfs_root, "dev", 0);
 
   vfs_node_t *var_node = vfs_finddir(vfs_root, "var");
   kyrofs_mkdir(var_node, "lib", 0);
   vfs_node_t *lib_node = vfs_finddir(var_node, "lib");
   kyrofs_mkdir(lib_node, "kpm", 0);
+
+  // Create /dev/tty
+  vfs_node_t *dev_dir = vfs_finddir(vfs_root, "dev");
+  if (dev_dir) {
+      kyrofs_create_node(dev_dir, "tty", VFS_CHARDEVICE);
+      vfs_node_t* tty_node = vfs_finddir(dev_dir, "tty");
+      if (tty_node) {
+        tty_node->read = tty_read;
+        tty_node->write = tty_write;
+      }
+  }
 
   klog(LOG_INFO, "KyroFS: In-memory filesystem initialized.");
 }
@@ -368,9 +400,9 @@ int vfs_unmount(vfs_node_t *mount_point) {
         return -1;
     }
     // Need to find which filesystem is mounted here and call its unmount_func
-    // For now, simple implementation assuming the fs_disk is mounted.
+
     // This needs to be more robust for multiple FS types.
-    if (fs_unmount() != 0) {
+    if (fs_unmount(mount_point) != 0) {
         return -1;
     }
     mount_point->flags &= ~VFS_MOUNTPOINT;

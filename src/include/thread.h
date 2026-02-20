@@ -47,6 +47,8 @@ typedef struct thread {
   void *user_stack_base; // Base address of userspace stack
   uint64_t rsp; // Stack pointer
   pml4_t *pml4; // Page map level 4 for virtual memory
+  uint64_t program_break;
+  uint64_t initial_program_break;
   fd_entry_t fd_table[MAX_FILES]; // File descriptor table
   struct thread *next; // For scheduler linked list
 } thread_t;
@@ -56,7 +58,7 @@ typedef void (*thread_func_t)(void*);
 
 void thread_init();
 thread_t* thread_create(thread_func_t func, void* arg); // For kernel threads
-thread_t* thread_create_userspace(uint64_t entry_point, pml4_t* pml4); // For userspace ELFs
+thread_t* thread_create_userspace(uint64_t entry_point, pml4_t* pml4, uint64_t program_break, int argc, char* argv[]); // For userspace ELFs
 void thread_exit();
 
 // Assembly function for context switching

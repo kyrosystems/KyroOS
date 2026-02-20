@@ -1,3 +1,4 @@
+#include <errno.h>
 #include "../../include/kpm.h"
 #include "../kyroolib.h"
 
@@ -30,10 +31,11 @@ static int mkdir_p(char *path) {
     while (*p) {
         if (*p == '/') {
             *p = '\0'; // Temporarily terminate string
-            if (mkdir(path) < 0) {
-                // If it exists, that's fine. If it's another error, return it.
-                // Our current mkdir might not return specific error codes for "already exists".
-                // For now, if mkdir returns <0, we consider it an error unless we can positively check for "already exists"
+            int ret = mkdir(path);
+            if (ret < 0 && ret != -EEXIST) {
+                // It's an error other than "already exists", so we should fail.
+                *p = '/'; // Restore the slash before returning
+                return ret;
             }
             *p = '/'; // Restore slash
         }
@@ -42,8 +44,11 @@ static int mkdir_p(char *path) {
     // If path is a directory name (e.g., "/a/b/"), ensure the last component is also created
     // This part might be redundant if the loop already creates the last directory,
     // but it handles cases where path is just "/a" or "a"
-    if (strlen(path) > 0 && mkdir(path) < 0) {
-        // Handle error if needed
+    if (strlen(path) > 0) {
+        int ret = mkdir(path);
+        if (ret < 0 && ret != -EEXIST) {
+            return ret;
+        }
     }
     return 0; // Success
 }
@@ -67,7 +72,7 @@ int pkg_install_file(const char *path) {
     kpkg_entry_t entry;
     while (read(fd, &entry, sizeof(kpkg_entry_t)) == sizeof(kpkg_entry_t)) {
         if (entry.is_meta && strcmp(entry.filename, "meta/info.txt") == 0) {
-            if (read(fd, meta_buf, entry.size) == entry.size) {
+            if (read(fd, meta_buf, entry.size) == (int)entry.size) {
                 meta_buf[entry.size] = '\0';
                 parse_info(meta_buf, "name", name);
                 parse_info(meta_buf, "version", version);
@@ -177,7 +182,7 @@ int pkg_install_file(const char *path) {
     close(fd);
 
     // Register in database
-    int db_fd = open(PKG_DB_PATH, O_WRONLY | O_CREAT);
+    int db_fd = open(PKG_DB_PATH, O_WRONLY | O_CREAT | O_APPEND);
     if (db_fd > 0) {
         char entry_line[512];
         strcpy(entry_line, name);

@@ -164,9 +164,9 @@ void sha256_hash(const uint8_t* data, size_t len, uint8_t* hash_out) {
 int rsa_verify_signature(const uint8_t* signature, const uint8_t* hash) {
     // STUB: This is not a real RSA signature verification.
     // A real implementation would require a dedicated RSA library and public key.
-    // It always returns true to simulate a valid signature for now.
+
     klog(LOG_WARN, "CRYPTO_STUB: rsa_verify_signature called. Returning TRUE.");
     (void)signature; // Unused in stub
     (void)hash;      // Unused in stub
-    return 1; // 1 for success (signature is valid)
+    return false; // 1 for success (signature is valid)
 }

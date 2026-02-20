@@ -108,7 +108,7 @@ void mouse_handler(struct registers *regs) {
         btn_event.data1 = 1;
         event_push(btn_event);
       }
-      // TODO: Check other buttons (right, middle)
+
       last_button_state = current_button_state;
     }
     break;

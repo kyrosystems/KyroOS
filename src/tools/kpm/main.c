@@ -9,7 +9,7 @@ void usage() {
   print("  install <name>       - Install a package from repo\n");
   print("  remove <name>        - Remove an installed package\n");
   print("  list                 - List installed packages\n");
-  exit();
+  exit(1);
 }
 
 int main(int argc, char **argv) {

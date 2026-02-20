@@ -1,0 +1,63 @@
+# Changelog
+
+## 26.01.09
+
+### Features
+- **AMD GPU Driver (WIP):** Integrated the initial AMD GPU driver framework into the kernel build and initialization process:
+    - Included `src/include/drivers/gpu/amd_gpu/radeon.h` in `src/kernel/kernel.c`.
+    - Added a call to `amdgpu_driver_init()` in `src/kernel/kernel.c` to register the AMD GPU driver with the device manager during kernel startup.
+    - Updated the root `Makefile` to automatically compile `src/kernel/drivers/gpu/amd_gpu/radeon.c` and link it into the kernel, by extending `K_OBJS_C` and adding a new compilation rule for the source files in that directory.
+
+## 26.01.08
+
+### Features
+- **AMD GPU Driver (WIP):** Initial implementation of the AMD GPU driver framework. This includes:
+    - Added PCI BAR offsets to `src/include/pci.h`.
+    - Created `src/include/drivers/gpu/amd_gpu/radeon.h` defining the `radeon_device_t` structure for AMD GPU-specific information (MMIO, FB, GTT base addresses and sizes).
+    - Created `src/kernel/drivers/gpu/amd_gpu/radeon.c` with `amdgpu_probe` and `amdgpu_attach` functions to identify supported AMD GPUs (Polaris/RDNA family), read their PCI BARs, enable memory-mapped I/O and bus mastering, and store the collected hardware information. This lays the foundation for the full graphics stack.
+
+## 26.01.07
+
+### Features
+- **KyroFS (Filesystem Driver):** Initiated implementation of the native KyroFS extent-based filesystem. Defined core on-disk structures including `kyrofs_superblock_t`, `kyrofs_inode_t`, `kyrofs_extent_t`, `kyrofs_block_group_descriptor_t`, and `kyrofs_journal_entry_t` in `src/kernel/drivers/fs/kyrofs/disk_format.h`. These structures lay the foundation for a high-performance, journaled filesystem with extent-based block allocation.
+
+## 26.01.06
+
+### Features
+- **Font/Localization:** Added basic Cyrillic glyphs to the kernel's `default_font` in `src/kernel/font.c`, replacing the previously undefined extended ASCII range (`0xC0` to `0xFF`). This serves as a proof-of-concept for Cyrillic text display, addressing the user's report that Russian text did not display at all. Further integration with a proper Cyrillic font and potentially UTF-8 decoding would provide full support.
+
+## 26.01.05
+
+### Features
+- **Userspace:** Implemented `lsblk` utility for listing block devices and their partitions, along with their sizes. This provides a way to inspect disk layout and address user feedback regarding the inability to see available devices.
+
+## 26.01.04
+
+### Bug Fixes
+- **fs_disk:** Fixed a critical data corruption bug where only the first block of the filesystem's file table was being written to disk. This caused metadata changes (like file creation or size updates) to be lost on reboot. The `update_file_table` function now correctly writes all blocks of the file table, ensuring data persistence and fixing issues with the `stat` command showing incorrect sizes.
+
+## 26.01.03
+
+### Features
+- **Shell:** Implemented support for executing external ELF binaries. The shell will now search for and execute commands that are not built-in, looking in `/bin/` by default. This enables running userspace applications like `install`, `kpm`, and `game`.
+
+### Bug Fixes
+- **Shell:** Fixed a major bug in the kernel shell where commands like `touch`, `mkdir`, `rm`, and `stat` did not respect the current working directory. These commands now correctly handle relative paths, making the shell behavior more predictable and aligned with standard shells.
+
+## 26.01.01
+
+### Features
+- Implemented TTY driver and `/dev/tty` for userspace I/O.
+- Properly initialized standard file descriptors (stdin, stdout, stderr) for userspace threads.
+- Implemented full argument parsing in the shell for external commands.
+- Replaced the `game` application with a functional Snake game.
+- Added preliminary UTF-8 decoding and Cyrillic support to the TUI library.
+- Implemented proper VFS registration for `/dev/sda` and its partitions (`/dev/sdaX`) in `ide.c`, making disk devices accessible as VFS nodes.
+- Refactored `fs_disk` core functions (`fs_format`, `fs_mount`, `fs_unmount`, internal `read_block`/`write_block`) to operate directly on `vfs_node_t` instead of integer file descriptors, improving VFS integration.
+
+### Bug Fixes
+- Fixed critical build issues and missing include paths in the Makefile.
+- Resolved argument parsing logic in `shell.c` (correctly populating `argv`).
+- Fixed `undefined reference to tty_init` in kernel boot.
+
+---
