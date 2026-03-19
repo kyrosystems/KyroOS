@@ -1,0 +1,61 @@
+name: Build and Release KyroOS
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          nasm \
+          xorriso \
+          gcc-x86-64-linux-gnu \
+          binutils-x86-64-linux-gnu \
+          mtools \
+          libisoburn-dev
+
+    - name: Build OS and ISO
+      run: |
+        mkdir -p build isofiles
+        make iso
+
+    - name: Extract Version Info
+      id: get_version
+      run: |
+        # Достаем цифры из макросов
+        MAJOR=$(grep "KYROOS_VERSION_MAJOR" src/include/version.h | awk '{print $3}')
+        MINOR=$(grep "KYROOS_VERSION_MINOR" src/include/version.h | awk '{print $3}')
+        PATCH=$(grep "KYROOS_VERSION_PATCH" src/include/version.h | awk '{print $3}')
+        BUILD=$(grep "KYROOS_VERSION_BUILD" src/include/version.h | grep -oE '[0-9]+')
+        
+        FULL_VERSION="$MAJOR.$MINOR.$PATCH-build$BUILD"
+        echo "OS_VER=$FULL_VERSION" >> $GITHUB_OUTPUT
+        echo "Найдена версия: $FULL_VERSION"
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: v${{ steps.get_version.outputs.OS_VER }}
+        name: KyroOS Release ${{ steps.get_version.outputs.OS_VER }}
+        files: /tmp/KyroOS-Titanium.iso
+        body: |
+          Автоматическая сборка KyroOS.
+          Версия: ${{ steps.get_version.outputs.OS_VER }}
+          Статус: Скомпилировано успешно.
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
