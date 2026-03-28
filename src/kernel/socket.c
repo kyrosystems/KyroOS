@@ -20,7 +20,7 @@ void sock_udp_receive_packet_handler(net_dev_t *net_dev, const ipv4_header_t *ip
     // However, server replies to 67.
     // This needs to be refined.
     if (__builtin_bswap16(udp_hdr->dest_port) == 68 || __builtin_bswap16(udp_hdr->dest_port) == 67) {
-        dhcp_handle_packet(data, len);
+        dhcp_handle_packet((dhcp_packet_t *)data, len);
         return;
     }
 
@@ -39,12 +39,8 @@ void sock_udp_receive_packet_handler(net_dev_t *net_dev, const ipv4_header_t *ip
             current_sock->proto_data.udp_data.recv_data_len += len;
             klog(LOG_INFO, "SOCKET: UDP packet received for port %d, len=%d", __builtin_bswap16(udp_hdr->dest_port), len);
 
-            // Wake up any waiting threads (TODO: proper thread blocking/unblocking)
-
-            if (current_sock->waiting_thread) {
-                current_sock->waiting_thread->state = THREAD_READY;
-                current_sock->waiting_thread = NULL; // Only wake up once
-            }
+            // Wake up any waiting threads
+            waitqueue_wakeup_all(&current_sock->waiting_threads);
             return;
         }
         current_sock = current_sock->next;
@@ -105,6 +101,7 @@ socket_t *sock_create(int domain, int type, int protocol) {
     sock->type = type;
     sock->protocol = protocol;
     sock->state = SOCK_STATE_CLOSED;
+    waitqueue_init(&sock->waiting_threads);
     
     // Initialize UDP specific data
     if (protocol == IPPROTO_UDP) {
@@ -194,10 +191,9 @@ int sock_recv(socket_t *sock, void *buf, size_t len, int flags) {
         // Wait for data if buffer is empty
         while (sock->proto_data.udp_data.recv_data_len == 0) {
             // This is a blocking call. Put current thread to sleep.
-            sock->waiting_thread = get_current_thread();
+            waitqueue_add(&sock->waiting_threads, get_current_thread());
             get_current_thread()->state = THREAD_BLOCKED;
             schedule(); // Yield CPU until woken up by interrupt handler
-            sock->waiting_thread = NULL; // Clear after waking up
         }
 
         size_t bytes_to_copy = len;

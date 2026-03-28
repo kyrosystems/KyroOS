@@ -5,6 +5,7 @@
 #include "log.h"
 #include "random.h" // For random_get_bytes
 #include "vfs.h"
+#include "keyboard.h"
 
 // Global root node for devfs
 static vfs_node_t *devfs_root_node;
@@ -22,24 +23,24 @@ uint32_t console_write(vfs_node_t *node, uint64_t offset, uint32_t size,
     return 0;
   memcpy(str, buffer, size);
   str[size] = '\0';
-  klog_print_str(str); // Use klog_print_str equivalent
+  klog_print_str(str, true); // Use klog_print_str equivalent and flush immediately
   kfree(str);
   return size;
 }
 
 // Helper to read from console (keyboard)
-// This is a blocking read placeholder. Ideally should integrate with keyboard
-// buffer.
-extern char keyboard_get_char(); // Prototype, assuming exist or need include
 uint32_t console_read(vfs_node_t *node, uint64_t offset, uint32_t size,
                       uint8_t *buffer) {
   (void)node;
   (void)offset;
-  (void)size; // Suppress unused parameter warning
-  (void)buffer; // Suppress unused parameter warning
+  if (size == 0) return 0;
 
-  // Always return 0 to disable console input
-  return 0;
+  for (uint32_t i = 0; i < size; i++) {
+      buffer[i] = (uint8_t)keyboard_get_char_blocking();
+      // Basic line editing/echo could be here, but for now just raw
+  }
+
+  return size;
 }
 
 // --- urandom_read implementation ---

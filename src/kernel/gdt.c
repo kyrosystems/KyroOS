@@ -33,7 +33,7 @@ static void gdt_set_entry(int index, uint32_t base, uint32_t limit,
 // Function to set the TSS entry in the GDT
 void gdt_set_tss(void *tss_base) {
   uint64_t base = (uint64_t)tss_base;
-  uint32_t limit = sizeof(struct tss_entry_struct);
+  uint32_t limit = sizeof(struct tss_entry_struct) - 1;
 
   // Let's use a proper system segment descriptor structure
   struct gdt_system_entry_bits *tss_desc =

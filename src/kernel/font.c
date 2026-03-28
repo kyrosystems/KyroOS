@@ -1,7 +1,7 @@
 #include "font.h"
 
 // 8x16 font bitmap (IBM CP437 / VGA 8x16 inspired)
-const uint8_t default_font[256][16] = {
+const uint8_t font_bitmap[256][16] = {
 
     [0 ... 31] = {0},
 

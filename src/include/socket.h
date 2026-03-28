@@ -41,6 +41,8 @@ typedef struct sockaddr_in {
 
 #include "tcp.h" // For tcp_tcb_t
 
+#include "waitqueue.h"
+
 // Generic socket structure
 typedef struct socket {
     int domain;
@@ -67,7 +69,7 @@ typedef struct socket {
     } proto_data;
     
     // For blocking calls (common to both UDP and TCP recv)
-    thread_t* waiting_thread; // Thread currently waiting on this socket
+    wait_queue_t waiting_threads;
 
     // Functions for protocol-specific operations
     int (*sock_connect)(struct socket* sock, const sockaddr_in_t* addr);

@@ -11,15 +11,16 @@
 #include <string.h> // For memcpy, strlen
 
 // HHDM offset from kernel.c, needed for V_TO_P
-extern uint64_t hhdm_offset;
-#define P_TO_V(p) ((void *)((uint64_t)(p) + hhdm_offset))
-#define V_TO_P(v) ((void *)((uint64_t)(v) - hhdm_offset))
+extern uint64_t kernel_hhdm_offset;
+#define P_TO_V(p) ((void *)((uint64_t)(p) + kernel_hhdm_offset))
+#define V_TO_P(v) ((void *)((uint64_t)(v) - kernel_hhdm_offset))
 
 static uint64_t next_thread_id = 0;
 extern thread_t *current_thread;
 
 // This function is called from assembly when a thread starts for the first time
 void thread_entry(thread_func_t func, void *arg) {
+  serial_print("THREAD: thread_entry started\n");
   // Re-enable interrupts for the new thread
   enable_interrupts();
 
@@ -60,6 +61,7 @@ void thread_init() {
   }
 
   scheduler_init();
+  scheduler_add_thread(current_thread); // Add main thread to scheduler!
 }
 
 extern void thread_starter();

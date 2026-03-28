@@ -5,7 +5,6 @@
 #include "heap.h"
 #include "isr.h" // For timer_get_ticks
 #include "kstring.h"
-#include "kstring.h" // For strrchr
 #include "log.h"
 #include "pmm.h"
 #include "scheduler.h"
@@ -13,6 +12,11 @@
 #include "thread.h"
 #include "vfs.h"
 #include "vmm.h"
+#include "uaccess.h"
+
+// Forward declarations from vmm.h
+extern pml4_t *vmm_create_address_space(void);
+extern void vmm_destroy_address_space(pml4_t *pml4);
 
 // HHDM offset from kernel.c, needed for V_TO_P
 extern uint64_t kernel_hhdm_offset;
@@ -31,12 +35,19 @@ static void sys_write(struct registers *regs) {
   char *buffer = (char *)regs->rsi;
   size_t size = (size_t)regs->rdx;
   thread_t *t = get_current_thread();
-  klog(LOG_DEBUG, "sys_write: fd=%d, buffer=%p, size=%d, thread_id=%d", fd,
+  klog(LOG_DEBUG, "SYSCALL_ENTRY: sys_write: fd=%d, buffer=%p, size=%u, thread_id=%d", fd,
        buffer, size, t->id);
 
   if (fd < 0 || fd >= MAX_FILES || t->fd_table[fd].type == FD_TYPE_NONE) {
-    regs->rax = -1; // Invalid FD or not open
+    klog(LOG_ERROR, "SYSCALL_EXIT: sys_write: Invalid FD %d or not open. Returning -1.", fd);
+    regs->rax = (uint64_t)-1; // Invalid FD or not open
     return;
+  }
+
+  if (validate_user_pointer(buffer, size) != 0) {
+      klog(LOG_ERROR, "SYSCALL_EXIT: sys_write: Invalid buffer pointer %p", buffer);
+      regs->rax = (uint64_t)-1;
+      return;
   }
 
   if (t->fd_table[fd].type == FD_TYPE_FILE) {
@@ -45,47 +56,48 @@ static void sys_write(struct registers *regs) {
       current_offset =
           t->fd_table[fd].data.file.node->length; // For append, write at end
     }
-
+    klog(LOG_DEBUG, "SYSCALL_DEBUG: sys_write: Writing to file FD %d, offset %llu, size %u", fd, current_offset, size);
     regs->rax = vfs_write(t->fd_table[fd].data.file.node, current_offset, size,
                           (uint8_t *)buffer);
     if (regs->rax != (uint64_t)-1) {
       t->fd_table[fd].data.file.offset =
           current_offset + regs->rax; // Update offset
+      klog(LOG_DEBUG, "SYSCALL_EXIT: sys_write: Wrote %llu bytes to FD %d. New offset %llu.", regs->rax, fd, t->fd_table[fd].data.file.offset);
+    } else {
+      klog(LOG_ERROR, "SYSCALL_EXIT: sys_write: vfs_write failed for FD %d. Returning -1.", fd);
     }
   } else if (t->fd_table[fd].type == FD_TYPE_SOCKET) {
-    // Handle socket write
+    klog(LOG_DEBUG, "SYSCALL_DEBUG: sys_write: Writing to socket FD %d, size %u", fd, size);
     regs->rax = sock_send(t->fd_table[fd].data.sock, buffer, size,
                           0);
+    klog(LOG_DEBUG, "SYSCALL_EXIT: sys_write: Sent %llu bytes to socket FD %d.", regs->rax, fd);
   } else {
-    regs->rax = -1; // Invalid FD type
+    klog(LOG_ERROR, "SYSCALL_EXIT: sys_write: Invalid FD type %d for FD %d. Returning -1.", t->fd_table[fd].type, fd);
+    regs->rax = (uint64_t)-1; // Invalid FD type
   }
 }
 
 static void sys_open(struct registers *regs) {
   char *user_path = (char *)regs->rdi;
   int flags = (int)regs->rsi; // Get flags from rsi
+  klog(LOG_DEBUG, "SYSCALL_ENTRY: sys_open: user_path=%p, flags=%x", user_path, flags);
 
   // Copy path from userspace to a kernel buffer to avoid faulting.
   char path[MAX_FILENAME_LEN];
-  // A proper implementation would validate this pointer and the memory it
-
-  // crashes. We assume the user process will fault if it passes a bad pointer.
-  // A simple strncpy is not safe, but it's the best we can do without a full
-  // copy_from_user implementation. Let's assume it faults inside the user
-  // process if the pointer is bad, and we handle that fault. (This is a big
-  // assumption). A slightly safer, but still not perfect, approach is to check
-  // the pointer is in userspace.
-  if ((uint64_t)user_path >= kernel_hhdm_offset) {
-    regs->rax = -1; // Pointer is in kernel space, deny.
+  if (validate_user_pointer(user_path, 1) != 0) {
+    klog(LOG_ERROR, "SYSCALL_EXIT: sys_open: Invalid user path pointer. Denying.");
+    regs->rax = (uint64_t)-1;
     return;
   }
   strncpy(path, user_path, MAX_FILENAME_LEN - 1);
   path[MAX_FILENAME_LEN - 1] = '\0';
+  klog(LOG_DEBUG, "SYSCALL_DEBUG: sys_open: Resolved path: '%s'", path);
 
   vfs_node_t *node = vfs_resolve_path(vfs_root, path);
 
   // Handle O_CREAT flag
   if (!node && (flags & O_CREAT)) {
+    klog(LOG_DEBUG, "SYSCALL_DEBUG: sys_open: File '%s' not found, O_CREAT set. Attempting to create.", path);
     // Find parent directory
     char parent_path[MAX_FILENAME_LEN];
     char filename[MAX_FILENAME_LEN];
@@ -97,43 +109,47 @@ static void sys_open(struct registers *regs) {
       strncpy(parent_path, path, parent_len);
       parent_path[parent_len] = '\0';
       strncpy(filename, last_slash + 1, MAX_FILENAME_LEN);
+      parent_path[MAX_FILENAME_LEN - 1] = '\0'; // Ensure null-termination
+      filename[MAX_FILENAME_LEN - 1] = '\0'; // Ensure null-termination
       parent_node = vfs_resolve_path(vfs_root, parent_path);
     } else {
       // File in root, or current directory for relative path.
-
       strncpy(filename, path, MAX_FILENAME_LEN);
+      filename[MAX_FILENAME_LEN - 1] = '\0'; // Ensure null-termination
     }
 
     if (!parent_node || !(parent_node->flags & VFS_DIRECTORY)) {
-      regs->rax = -1; // Parent not found or not a directory
-      klog(LOG_WARN,
-           "SYSCALL: sys_open: Parent directory not found or invalid for %s",
+      regs->rax = (uint64_t)-1; // Parent not found or not a directory
+      klog(LOG_ERROR,
+           "SYSCALL_EXIT: sys_open: Parent directory not found or invalid for %s. Returning -1.",
            path);
       return;
     }
-
+    klog(LOG_DEBUG, "SYSCALL_DEBUG: sys_open: Creating file '%s' in parent '%s'", filename, parent_path);
     if (vfs_create(parent_node, filename, 0) != 0) {
-      regs->rax = -1;                                // Creation failed
-      klog(LOG_ERROR, "SYSCALL: sys_open: Failed to create file %s", path);
+      regs->rax = (uint64_t)-1;                                // Creation failed
+      klog(LOG_ERROR, "SYSCALL_EXIT: sys_open: Failed to create file %s. Returning -1.", path);
       return;
     }
     node = vfs_resolve_path(
         vfs_root, path); // Resolve again to get the newly created node
     if (!node) {
-      regs->rax = -1; // Should not happen if create succeeded
+      regs->rax = (uint64_t)-1; // Should not happen if create succeeded
       klog(LOG_ERROR,
-           "SYSCALL: sys_open: Created file %s but could not resolve it.",
+           "SYSCALL_EXIT: sys_open: Created file %s but could not resolve it. Returning -1.",
            path);
       return;
     }
+    klog(LOG_DEBUG, "SYSCALL_DEBUG: sys_open: File '%s' created successfully.", path);
   } else if (!node) {
-    regs->rax = -1; // File not found and O_CREAT not set
-    klog(LOG_WARN, "SYSCALL: sys_open: File not found: %s", path);
+    regs->rax = (uint64_t)-1; // File not found and O_CREAT not set
+    klog(LOG_WARN, "SYSCALL_EXIT: sys_open: File not found: %s. O_CREAT not set. Returning -1.", path);
     return;
   }
 
   // File exists or was created, now handle other flags
   if (node->open) {
+    klog(LOG_DEBUG, "SYSCALL_DEBUG: sys_open: Calling node->open for '%s' with flags %x", path, flags);
     node->open(node, flags);
   }
 
@@ -147,61 +163,85 @@ static void sys_open(struct registers *regs) {
           (flags & O_APPEND) ? node->length
                              : 0; // Set initial offset for append
       regs->rax = i;              // Return the file descriptor
+      klog(LOG_DEBUG, "SYSCALL_EXIT: sys_open: Opened file '%s' successfully. FD=%llu.", path, regs->rax);
       return;
     }
   }
-  regs->rax = -1; // No free file descriptors
-  klog(LOG_ERROR, "SYSCALL: sys_open: No free file descriptors for %s", path);
+  regs->rax = (uint64_t)-1; // No free file descriptors
+  klog(LOG_ERROR, "SYSCALL_EXIT: sys_open: No free file descriptors for %s. Returning -1.", path);
 }
 
 static void sys_close(struct registers *regs) {
   int fd = (int)regs->rdi;
   thread_t *t = get_current_thread();
+  klog(LOG_DEBUG, "SYSCALL_ENTRY: sys_close: fd=%d, thread_id=%d", fd, t->id);
 
   if (fd < 0 || fd >= MAX_FILES || t->fd_table[fd].type == FD_TYPE_NONE) {
-    regs->rax = -1;
+    klog(LOG_ERROR, "SYSCALL_EXIT: sys_close: Invalid FD %d or not open. Returning -1.", fd);
+    regs->rax = (uint64_t)-1;
     return;
   }
 
   if (t->fd_table[fd].type == FD_TYPE_FILE) {
-    // TODO: Call node->close if implemented (for files)
+    vfs_node_t *node = t->fd_table[fd].data.file.node;
+    if (node && node->close) {
+        klog(LOG_DEBUG, "SYSCALL_DEBUG: Calling node->close for FD %d.", fd);
+        node->close(node);
+    }
+    klog(LOG_DEBUG, "SYSCALL_DEBUG: sys_close: Closing file FD %d.", fd);
     t->fd_table[fd].type = FD_TYPE_NONE;   // Clear type
     t->fd_table[fd].data.file.node = NULL; // Clear node, reset other fields
     t->fd_table[fd].data.file.offset = 0;
     t->fd_table[fd].data.file.flags = 0;
   } else if (t->fd_table[fd].type == FD_TYPE_SOCKET) {
     // Close socket
+    klog(LOG_DEBUG, "SYSCALL_DEBUG: sys_close: Closing socket FD %d.", fd);
     sock_close(t->fd_table[fd].data.sock);
     t->fd_table[fd].type = FD_TYPE_NONE; // Clear type
     t->fd_table[fd].data.sock = NULL;
   }
   regs->rax = 0;
+  klog(LOG_DEBUG, "SYSCALL_EXIT: sys_close: Closed FD %d successfully. Returning 0.", fd);
 }
 static void sys_read(struct registers *regs) {
   int fd = (int)regs->rdi;
   char *buf = (char *)regs->rsi;
   size_t size = (size_t)regs->rdx;
   thread_t *t = get_current_thread();
+  klog(LOG_DEBUG, "SYSCALL_ENTRY: sys_read: fd=%d, buf=%p, size=%u, thread_id=%d", fd,
+       buf, size, t->id);
 
   if (fd < 0 || fd >= MAX_FILES || t->fd_table[fd].type == FD_TYPE_NONE) {
-    regs->rax = -1;
+    klog(LOG_ERROR, "SYSCALL_EXIT: sys_read: Invalid FD %d or not open. Returning -1.", fd);
+    regs->rax = (uint64_t)-1;
     return;
   }
 
+  if (validate_user_pointer(buf, size) != 0) {
+      klog(LOG_ERROR, "SYSCALL_EXIT: sys_read: Invalid buffer pointer %p", buf);
+      regs->rax = (uint64_t)-1;
+      return;
+  }
+
   if (t->fd_table[fd].type == FD_TYPE_FILE) {
-    // Read from current offset
+    klog(LOG_DEBUG, "SYSCALL_DEBUG: sys_read: Reading from file FD %d, offset %llu, size %u", fd, t->fd_table[fd].data.file.offset, size);
     regs->rax =
         vfs_read(t->fd_table[fd].data.file.node,
                  t->fd_table[fd].data.file.offset, size, (uint8_t *)buf);
     if ((int64_t)regs->rax != -1) {
       t->fd_table[fd].data.file.offset += regs->rax; // Update offset
+      klog(LOG_DEBUG, "SYSCALL_EXIT: sys_read: Read %llu bytes from FD %d. New offset %llu.", regs->rax, fd, t->fd_table[fd].data.file.offset);
+    } else {
+      klog(LOG_ERROR, "SYSCALL_EXIT: sys_read: vfs_read failed for FD %d. Returning -1.", fd);
     }
   } else if (t->fd_table[fd].type == FD_TYPE_SOCKET) {
-    // Handle socket read
+    klog(LOG_DEBUG, "SYSCALL_DEBUG: sys_read: Reading from socket FD %d, size %u", fd, size);
     regs->rax =
         sock_recv(t->fd_table[fd].data.sock, buf, size, 0);
+    klog(LOG_DEBUG, "SYSCALL_EXIT: sys_read: Received %llu bytes from socket FD %d.", regs->rax, fd);
   } else {
-    regs->rax = -1; // Invalid FD type
+    klog(LOG_ERROR, "SYSCALL_EXIT: sys_read: Invalid FD type %d for FD %d. Returning -1.", t->fd_table[fd].type, fd);
+    regs->rax = (uint64_t)-1; // Invalid FD type
   }
 }
 
@@ -210,12 +250,17 @@ static void sys_stat(struct registers *regs) {
   struct stat *stat_buf = (struct stat *)regs->rsi;
 
   char path[MAX_FILENAME_LEN];
-  if ((uint64_t)user_path >= kernel_hhdm_offset) {
-    regs->rax = -1;
+  if (validate_user_pointer(user_path, 1) != 0) {
+    regs->rax = (uint64_t)-1;
     return;
   }
   strncpy(path, user_path, MAX_FILENAME_LEN - 1);
   path[MAX_FILENAME_LEN - 1] = '\0';
+
+  if (validate_user_pointer(stat_buf, sizeof(struct stat)) != 0) {
+      regs->rax = (uint64_t)-1;
+      return;
+  }
 
 
   vfs_node_t *node = vfs_resolve_path(vfs_root, path);
@@ -235,8 +280,8 @@ static void sys_mkdir(struct registers *regs) {
   char *user_path = (char *)regs->rdi;
 
   char path[MAX_FILENAME_LEN];
-  if ((uint64_t)user_path >= kernel_hhdm_offset) {
-    regs->rax = -1;
+  if (validate_user_pointer(user_path, 1) != 0) {
+    regs->rax = (uint64_t)-1;
     return;
   }
   strncpy(path, user_path, MAX_FILENAME_LEN - 1);
@@ -251,6 +296,11 @@ static void sys_readdir(struct registers *regs) {
   struct dirent *dir_entry =
       (struct dirent *)regs->rdx; // Third argument for dirent buffer
 
+  if (validate_user_pointer(dir_entry, sizeof(struct dirent)) != 0) {
+      regs->rax = (uint64_t)-1;
+      return;
+  }
+
   if (!node) {
     node = vfs_root;
   }
@@ -264,8 +314,8 @@ static void sys_unlink(struct registers *regs) {
   char *user_path = (char *)regs->rdi;
 
   char path[MAX_FILENAME_LEN];
-  if ((uint64_t)user_path >= kernel_hhdm_offset) {
-    regs->rax = -1;
+  if (validate_user_pointer(user_path, 1) != 0) {
+    regs->rax = (uint64_t)-1;
     return;
   }
   strncpy(path, user_path, MAX_FILENAME_LEN - 1);
@@ -278,8 +328,8 @@ static void sys_rmdir(struct registers *regs) {
   char *user_path = (char *)regs->rdi;
 
   char path[MAX_FILENAME_LEN];
-  if ((uint64_t)user_path >= kernel_hhdm_offset) {
-    regs->rax = -1;
+  if (validate_user_pointer(user_path, 1) != 0) {
+    regs->rax = (uint64_t)-1;
     return;
   }
   strncpy(path, user_path, MAX_FILENAME_LEN - 1);
@@ -319,6 +369,11 @@ static void sys_connect(struct registers *regs) {
     return;
   }
 
+  if (validate_user_pointer(addr, sizeof(sockaddr_in_t)) != 0) {
+      regs->rax = (uint64_t)-1;
+      return;
+  }
+
   socket_t *sock = t->fd_table[fd].data.sock;
   regs->rax = sock_connect(sock, addr);
 }
@@ -332,6 +387,11 @@ static void sys_bind(struct registers *regs) {
   if (fd < 0 || fd >= MAX_FILES || t->fd_table[fd].type != FD_TYPE_SOCKET) {
     regs->rax = -1; // Not a valid socket FD
     return;
+  }
+
+  if (validate_user_pointer(addr, sizeof(sockaddr_in_t)) != 0) {
+      regs->rax = (uint64_t)-1;
+      return;
   }
 
   socket_t *sock = t->fd_table[fd].data.sock;
@@ -361,6 +421,11 @@ static void sys_accept(struct registers *regs) {
   if (fd < 0 || fd >= MAX_FILES || t->fd_table[fd].type != FD_TYPE_SOCKET) {
     regs->rax = -1; // Not a valid socket FD
     return;
+  }
+
+  if (validate_user_pointer(addr, sizeof(sockaddr_in_t)) != 0) {
+      regs->rax = (uint64_t)-1;
+      return;
   }
 
   socket_t *new_sock = sock_accept(t->fd_table[fd].data.sock, addr);
@@ -396,6 +461,11 @@ static void sys_recv(struct registers *regs) {
     return;
   }
 
+  if (validate_user_pointer(buf, len) != 0) {
+      regs->rax = (uint64_t)-1;
+      return;
+  }
+
   socket_t *sock = t->fd_table[fd].data.sock;
   regs->rax = sock_recv(sock, buf, len, flags);
 }
@@ -404,6 +474,11 @@ static void sys_sha256(struct registers *regs) {
   const uint8_t *data = (const uint8_t *)regs->rdi;
   size_t len = (size_t)regs->rsi;
   uint8_t *hash_out = (uint8_t *)regs->rdx;
+
+  if (validate_user_pointer(data, len) != 0 || validate_user_pointer(hash_out, 32) != 0) {
+      regs->rax = (uint64_t)-1;
+      return;
+  }
 
   sha256_hash(data, len, hash_out);
   regs->rax = 0; // Success
@@ -452,7 +527,7 @@ static void sys_mount(struct registers *regs) {
   char *user_fs_type_name = (char *)regs->rdx;
 
   char mount_point_path[MAX_FILENAME_LEN];
-  if ((uint64_t)user_mount_point_path >= kernel_hhdm_offset) {
+  if (validate_user_pointer(user_mount_point_path, 1) != 0) {
     regs->rax = -1;
     return;
   }
@@ -460,7 +535,7 @@ static void sys_mount(struct registers *regs) {
   mount_point_path[MAX_FILENAME_LEN - 1] = '\0';
 
   char device_node_path[MAX_FILENAME_LEN];
-  if ((uint64_t)user_device_node_path >= kernel_hhdm_offset) {
+  if (validate_user_pointer(user_device_node_path, 1) != 0) {
     regs->rax = -1;
     return;
   }
@@ -468,7 +543,7 @@ static void sys_mount(struct registers *regs) {
   device_node_path[MAX_FILENAME_LEN - 1] = '\0';
 
   char fs_type_name[32]; // Filesystem names are short
-  if ((uint64_t)user_fs_type_name >= kernel_hhdm_offset) {
+  if (validate_user_pointer(user_fs_type_name, 1) != 0) {
     regs->rax = -1;
     return;
   }
@@ -499,7 +574,7 @@ static void sys_unmount(struct registers *regs) {
   char *user_mount_point_path = (char *)regs->rdi;
 
   char mount_point_path[MAX_FILENAME_LEN];
-  if ((uint64_t)user_mount_point_path >= kernel_hhdm_offset) {
+  if (validate_user_pointer(user_mount_point_path, 1) != 0) {
     regs->rax = -1;
     return;
   }
@@ -518,12 +593,126 @@ static void sys_unmount(struct registers *regs) {
 }
 
 static void sys_exec(struct registers *regs) {
-  char *user_path = (char *)regs->rdi;
-  klog(LOG_WARN,
-       "sys_exec called for %p - currently disabled for safety. Use /bin/shell "
-       "for execution.",
-       user_path);
-  regs->rax = -1;
+    char *user_path = (char *)regs->rdi;
+    klog(LOG_DEBUG, "SYSCALL_EXEC: path=%p", user_path);
+    
+    if (validate_user_pointer(user_path, 1) != 0) {
+        regs->rax = (uint64_t)-1;
+        return;
+    }
+    
+    char path[MAX_FILENAME_LEN];
+    strncpy(path, user_path, MAX_FILENAME_LEN - 1);
+    path[MAX_FILENAME_LEN - 1] = '\0';
+    
+    vfs_node_t *node = vfs_resolve_path(vfs_root, path);
+    if (!node || (node->flags & VFS_DIRECTORY)) {
+        klog(LOG_ERROR, "SYSCALL_EXEC: File not found or is directory: %s", path);
+        regs->rax = (uint64_t)-1;
+        return;
+    }
+    
+    // Read ELF header
+    uint8_t elf_header[64];
+    if (vfs_read(node, 0, 64, elf_header) != 64) {
+        klog(LOG_ERROR, "SYSCALL_EXEC: Failed to read ELF header");
+        regs->rax = (uint64_t)-1;
+        return;
+    }
+    
+    // Verify ELF magic
+    if (elf_header[0] != 0x7F || elf_header[1] != 'E' || 
+        elf_header[2] != 'L' || elf_header[3] != 'F') {
+        klog(LOG_ERROR, "SYSCALL_EXEC: Not a valid ELF file");
+        regs->rax = (uint64_t)-1;
+        return;
+    }
+    
+    // Load entire file into memory
+    uint8_t *elf_data = (uint8_t *)kmalloc(node->length);
+    if (!elf_data) {
+        klog(LOG_ERROR, "SYSCALL_EXEC: Failed to allocate memory for ELF");
+        regs->rax = (uint64_t)-1;
+        return;
+    }
+    
+    if (vfs_read(node, 0, node->length, elf_data) != node->length) {
+        klog(LOG_ERROR, "SYSCALL_EXEC: Failed to read ELF file");
+        kfree(elf_data);
+        regs->rax = (uint64_t)-1;
+        return;
+    }
+    
+    // Parse ELF and create new address space
+    Elf64_Ehdr *ehdr = (Elf64_Ehdr *)elf_data;
+    Elf64_Phdr *phdr = (Elf64_Phdr *)(elf_data + ehdr->e_phoff);
+    
+    // Allocate new PML4 for the process
+    pml4_t *new_pml4 = vmm_create_address_space();
+    if (!new_pml4) {
+        klog(LOG_ERROR, "SYSCALL_EXEC: Failed to create new PML4");
+        kfree(elf_data);
+        regs->rax = (uint64_t)-1;
+        return;
+    }
+    
+    // Load program headers
+    uint64_t entry_point = 0;
+    for (int i = 0; i < ehdr->e_phnum; i++) {
+        if (phdr[i].p_type == PT_LOAD) {
+            // Allocate pages for this segment
+            uint64_t vaddr = phdr[i].p_vaddr & ~0xFFF;
+            uint64_t end_vaddr = (phdr[i].p_vaddr + phdr[i].p_memsz + 0xFFF) & ~0xFFF;
+            
+            for (uint64_t addr = vaddr; addr < end_vaddr; addr += PAGE_SIZE) {
+                void *phys = pmm_alloc_page();
+                if (!phys) {
+                    klog(LOG_ERROR, "SYSCALL_EXEC: Failed to allocate page");
+                    vmm_destroy_address_space(new_pml4);
+                    kfree(elf_data);
+                    regs->rax = (uint64_t)-1;
+                    return;
+                }
+                memset(phys, 0, PAGE_SIZE);
+                vmm_map_page(new_pml4, (void *)(addr + kernel_hhdm_offset), phys, PAGE_PRESENT | PAGE_WRITE | PAGE_USER);
+            }
+            
+            // Copy data to the mapped pages
+            uint8_t *vaddr_ptr = (uint8_t *)(phdr[i].p_vaddr + kernel_hhdm_offset);
+            memcpy(vaddr_ptr, elf_data + phdr[i].p_offset, phdr[i].p_filesz);
+            
+            if (i == 0) entry_point = ehdr->e_entry;
+        }
+    }
+    
+    // Allocate user stack
+    uint64_t stack_top = 0x8000000000; // User stack address
+    for (uint64_t addr = stack_top - (8 * PAGE_SIZE); addr < stack_top; addr += PAGE_SIZE) {
+        void *phys = pmm_alloc_page();
+        if (!phys) {
+            klog(LOG_ERROR, "SYSCALL_EXEC: Failed to allocate stack page");
+            vmm_destroy_address_space(new_pml4);
+            kfree(elf_data);
+            regs->rax = (uint64_t)-1;
+            return;
+        }
+        memset(phys, 0, PAGE_SIZE);
+        vmm_map_page(new_pml4, (void *)(addr + kernel_hhdm_offset), phys, PAGE_PRESENT | PAGE_WRITE | PAGE_USER);
+    }
+    
+    kfree(elf_data);
+    
+    // Use existing thread_create_userspace function
+    thread_t *new_thread = thread_create_userspace(entry_point, new_pml4, 0, 0, NULL);
+    if (!new_thread) {
+        klog(LOG_ERROR, "SYSCALL_EXEC: Failed to create thread");
+        vmm_destroy_address_space(new_pml4);
+        regs->rax = (uint64_t)-1;
+        return;
+    }
+    
+    klog(LOG_INFO, "SYSCALL_EXEC: Created userspace thread at entry %p", (void *)entry_point);
+    regs->rax = 0; // Success
 }
 
 static void sys_gfx_get_fb_info(struct registers *regs) {
@@ -542,6 +731,11 @@ static void sys_gfx_get_fb_info(struct registers *regs) {
 
   user_fb_info_t *user_info_ptr = (user_fb_info_t *)regs->rdi;
   klog(LOG_DEBUG, "SYSCALL_GFX: user_info_ptr = %p", user_info_ptr);
+
+  if (validate_user_pointer(user_info_ptr, sizeof(user_fb_info_t)) != 0) {
+      regs->rax = (uint64_t)-1;
+      return;
+  }
 
   const fb_info_t *kernel_fb =
       fb_get_info(); // fb_info_t is limine_framebuffer here
@@ -590,7 +784,13 @@ static void sys_gfx_get_fb_info(struct registers *regs) {
 }
 
 static void sys_input_poll_event(struct registers *regs) {
-  if (event_pop((event_t *)regs->rdi))
+  event_t *user_event = (event_t *)regs->rdi;
+  if (validate_user_pointer(user_event, sizeof(event_t)) != 0) {
+      regs->rax = 0;
+      return;
+  }
+
+  if (event_pop(user_event))
     regs->rax = 1;
   else
     regs->rax = 0;
@@ -613,7 +813,25 @@ static void sys_sbrk(struct registers *regs) {
     return;
   }
 
-  // A real implementation would allocate/deallocate pages here
+  if (new_brk > old_brk) {
+      // Allocate and map pages
+      for (uint64_t addr = (old_brk + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1); addr < new_brk; addr += PAGE_SIZE) {
+          void *phys = pmm_alloc_page();
+          if (!phys) {
+              regs->rax = (uint64_t)-1;
+              return;
+          }
+          vmm_map_page(t->pml4, (void*)addr, phys, PAGE_PRESENT | PAGE_WRITE | PAGE_USER);
+      }
+  } else if (new_brk < old_brk) {
+      // Unmap and free pages
+      for (uint64_t addr = (new_brk + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1); addr < old_brk; addr += PAGE_SIZE) {
+          void *phys = vmm_unmap_page(t->pml4, (void*)addr);
+          if (phys) {
+              pmm_free_page(phys);
+          }
+      }
+  }
 
   t->program_break = new_brk;
   regs->rax = old_brk;

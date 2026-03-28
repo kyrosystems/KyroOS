@@ -50,7 +50,7 @@ void gui_create_window(const char* title, int x, int y, int width, int height) {
 void gui_draw_rect(int x, int y, int width, int height, uint32_t color) {
     for (int i = 0; i < width; i++) {
         for (int j = 0; j < height; j++) {
-            fb_put_pixel(x + i, y + j, color);
+            fb_set_pixel(x + i, y + j, color);
         }
     }
 }
@@ -83,9 +83,9 @@ void gui_draw_cursor() {
     for (int y = 0; y < 11; y++) {
         for (int x = 0; x < 11; x++) {
             if (cursor_bitmap[y][x] == 1) {
-                fb_put_pixel(mouse_x + x, mouse_y + y, CURSOR_COLOR_1);
+                fb_set_pixel(mouse_x + x, mouse_y + y, CURSOR_COLOR_1);
             } else if (cursor_bitmap[y][x] == 2) {
-                fb_put_pixel(mouse_x + x, mouse_y + y, CURSOR_COLOR_2);
+                fb_set_pixel(mouse_x + x, mouse_y + y, CURSOR_COLOR_2);
             }
         }
     }

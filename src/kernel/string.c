@@ -40,6 +40,17 @@ void *memset(void *s, int c, size_t n) {
   return s;
 }
 
+int memcmp(const void *s1, const void *s2, size_t n) {
+  const unsigned char *p1 = (const unsigned char *)s1;
+  const unsigned char *p2 = (const unsigned char *)s2;
+  for (size_t i = 0; i < n; i++) {
+    if (p1[i] != p2[i]) {
+      return p1[i] - p2[i];
+    }
+  }
+  return 0;
+}
+
 // Simple implementation of __memcpy_chk that just calls our memcpy
 void *__memcpy_chk(void *dest, const void *src, size_t n, size_t dest_len) {
   // A real implementation would check if n > dest_len and abort.
@@ -80,6 +91,27 @@ char *strncpy(char *dest, const char *src, size_t n) {
   for (; i < n; i++)
     dest[i] = '\0';
   return dest;
+}
+
+char *strncat(char *dest, const char *src, size_t n) {
+    size_t dest_len = strlen(dest);
+    size_t i;
+    for (i = 0; i < n && src[i] != '\0'; i++)
+        dest[dest_len + i] = src[i];
+    dest[dest_len + i] = '\0';
+    return dest;
+}
+
+char *strstr(const char *haystack, const char *needle) {
+    if (!*needle) return (char *)haystack;
+    for (; *haystack; haystack++) {
+        if (*haystack != *needle) continue;
+        const char *h = haystack;
+        const char *n = needle;
+        while (*h && *n && *h == *n) { h++; n++; }
+        if (!*n) return (char *)haystack;
+    }
+    return NULL;
 }
 
 char *strchr(const char *s, int c) {

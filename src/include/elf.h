@@ -64,6 +64,47 @@ typedef struct {
 #define PF_W          2 // Write
 #define PF_R          4 // Read
 
+// Section Header
+typedef struct {
+    uint32_t sh_name;
+    uint32_t sh_type;
+    uint64_t sh_flags;
+    uint64_t sh_addr;
+    uint64_t sh_offset;
+    uint64_t sh_size;
+    uint32_t sh_link;
+    uint32_t sh_info;
+    uint64_t sh_addralign;
+    uint64_t sh_entsize;
+} Elf64_Shdr;
+
+// Symbol Table Entry
+typedef struct {
+    uint32_t st_name;
+    uint8_t  st_info;
+    uint8_t  st_other;
+    uint16_t st_shndx;
+    uint64_t st_value;
+    uint64_t st_size;
+} Elf64_Sym;
+
+// Relocation Entry (Addend)
+typedef struct {
+    uint64_t r_offset;
+    uint64_t r_info;
+    int64_t  r_addend;
+} Elf64_Rela;
+
+// ELF64_R_SYM and ELF64_R_TYPE macros
+#define ELF64_R_SYM(info) ((info) >> 32)
+#define ELF64_R_TYPE(info) ((info) & 0xFFFFFFFF)
+
+// Relocation types for x86-64
+#define R_X86_64_64       1
+#define R_X86_64_PC32     2
+#define R_X86_64_32       10
+#define R_X86_64_32S      11
+
 typedef struct {
     uint64_t entry_point;
     uint64_t program_break;

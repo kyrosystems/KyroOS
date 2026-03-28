@@ -2,6 +2,7 @@
 #include "kstring.h"
 #include "log.h"
 #include "pmm.h"
+#include "panic.h" // For panic
 #include <stddef.h> // for NULL
 
 // Kernel's top-level page map (PML4)
@@ -18,8 +19,35 @@ void *vmm_virt_to_phys(void *virt_addr) {
 void vmm_init() {
   uint64_t current_cr3_phys;
   __asm__ __volatile__("mov %%cr3, %0" : "=r"(current_cr3_phys));
-  kernel_pml4 = (pml4_t *)vmm_phys_to_virt((void *)current_cr3_phys);
-  klog(LOG_INFO, "VMM initialized. Kernel PML4 at %p.", kernel_pml4);
+
+  // 1. Allocate a new physical page for the writable PML4
+  void *new_pml4_phys = pmm_alloc_page();
+  if (!new_pml4_phys) {
+    panic("VMM: Failed to allocate page for new writable PML4!", NULL);
+  }
+
+  // 2. Get the virtual address of the new PML4 (via HHDM)
+  pml4_t *new_pml4_virt = (pml4_t *)vmm_phys_to_virt(new_pml4_phys);
+
+  // 3. Clear the new PML4 entirely before copying.
+  // This ensures a clean slate, especially for the user-space entries.
+  memset(new_pml4_virt, 0, PAGE_SIZE);
+
+  // 4. Copy the *upper half* (kernel mappings) from the old PML4 to the new writable PML4.
+  // The old PML4 is at `current_cr3_phys`. We need its virtual address for memcpy.
+  pml4_t *old_pml4_virt = (pml4_t *)vmm_phys_to_virt((void *)current_cr3_phys);
+  memcpy(&new_pml4_virt->entries[256], &old_pml4_virt->entries[256],
+         256 * sizeof(uint64_t));
+
+  // 5. Update CR3 to point to this new writable PML4 physical address.
+  // This makes the new PML4 active. After this, any page table operations
+  // will use the new PML4.
+  __asm__ __volatile__("mov %0, %%cr3" ::"r"(new_pml4_phys) : "memory");
+
+  // 6. Set kernel_pml4 to the virtual address of this new writable PML4.
+  kernel_pml4 = new_pml4_virt;
+
+  klog(LOG_INFO, "VMM initialized. Kernel PML4 moved to writable %p (phys %p).", kernel_pml4, new_pml4_phys);
 }
 
 pml4_t *vmm_get_current_pml4() {
@@ -65,7 +93,7 @@ void vmm_map_page(pml4_t *pml4_virt, void *virt, void *phys, uint64_t flags) {
     pdpt_virt = (pdpt_t *)vmm_phys_to_virt((void *)new_table_phys);
     memset(pdpt_virt, 0, PAGE_SIZE);
     pml4_virt->entries[pml4_index] =
-        (uint64_t)new_table_phys | PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
+        (uint64_t)new_table_phys | PAGE_PRESENT | PAGE_WRITE; // Removed PAGE_USER
   } else {
     pdpt_virt = (pdpt_t *)vmm_phys_to_virt(
         (void *)(pml4_virt->entries[pml4_index] & PHYSICAL_ADDR_MASK));
@@ -79,7 +107,7 @@ void vmm_map_page(pml4_t *pml4_virt, void *virt, void *phys, uint64_t flags) {
     pd_virt = (pd_t *)vmm_phys_to_virt((void *)new_table_phys);
     memset(pd_virt, 0, PAGE_SIZE);
     pdpt_virt->entries[pdpt_index] =
-        (uint64_t)new_table_phys | PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
+        (uint64_t)new_table_phys | PAGE_PRESENT | PAGE_WRITE; // Removed PAGE_USER
   } else {
     pd_virt = (pd_t *)vmm_phys_to_virt(
         (void *)(pdpt_virt->entries[pdpt_index] & PHYSICAL_ADDR_MASK));
@@ -93,7 +121,7 @@ void vmm_map_page(pml4_t *pml4_virt, void *virt, void *phys, uint64_t flags) {
     pt_virt = (pt_t *)vmm_phys_to_virt((void *)new_table_phys);
     memset(pt_virt, 0, PAGE_SIZE);
     pd_virt->entries[pd_index] =
-        (uint64_t)new_table_phys | PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
+        (uint64_t)new_table_phys | PAGE_PRESENT | PAGE_WRITE; // Removed PAGE_USER
   } else {
     pt_virt = (pt_t *)vmm_phys_to_virt(
         (void *)(pd_virt->entries[pd_index] & PHYSICAL_ADDR_MASK));
@@ -124,7 +152,7 @@ void *vmm_unmap_page(pml4_t *pml4_virt, void *virt) {
     return NULL;
 
   pd_t *pd_virt = (pd_t *)vmm_phys_to_virt(
-      (void *)(pdpt_virt->entries[pdpt_index] & PHYSICAL_ADDR_MASK));
+      (void *)(pdpt_virt->entries[pdpt_index] & PHYSICAL_ADDR_MASK)); // Fixed here
   if (!(pd_virt->entries[pd_index] & PAGE_PRESENT))
     return NULL;
 
@@ -159,7 +187,7 @@ uint64_t vmm_get_phys_addr(pml4_t *pml4, void *vaddr) {
   if (!(pdpt->entries[pdpt_index] & PAGE_PRESENT))
     return 0;
   pd_t *pd = (pd_t *)vmm_phys_to_virt(
-      (void *)(pdpt->entries[pdpt_index] & PHYSICAL_ADDR_MASK));
+      (void *)(pdpt->entries[pdpt_index] & PHYSICAL_ADDR_MASK)); // Fixed here
 
   if (!(pd->entries[pd_index] & PAGE_PRESENT))
     return 0;
@@ -192,9 +220,6 @@ void vmm_memcpy_to_userspace(pml4_t *pml4_target, void *dest_vaddr,
       return;
     }
 
-    klog(LOG_DEBUG,
-         "vmm_memcpy_to_userspace: copying %d bytes to vaddr %lx (phys %lx)",
-         (int)copy_size, virt_addr, phys_dest);
     void *kernel_virt_dest = vmm_phys_to_virt((void *)phys_dest);
     memcpy(kernel_virt_dest, src_ptr, copy_size);
 

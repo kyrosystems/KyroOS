@@ -28,6 +28,8 @@ typedef struct ipv4_header {
 
 void ip_init();
 uint32_t ip_get_local_ip();
+uint32_t ip_get_subnet_mask();
+uint32_t ip_get_default_gateway();
 void ip_set_local_ip(uint32_t ip);
 void ip_set_subnet_mask(uint32_t mask);
 void ip_set_default_gateway(uint32_t gateway);

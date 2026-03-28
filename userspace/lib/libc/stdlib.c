@@ -1,4 +1,4 @@
-#include <kyroolib.h>
+#include "kyroolib.h"
 
 // Simple atoi implementation
 int atoi(const char *str) {

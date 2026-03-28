@@ -25,3 +25,6 @@ panic_reasons.txt.idea/
 *.o
 t.txt
 /.idea/
+panic_reasons.txt
+panic_quotes.txt
+/limine-latest/

@@ -307,8 +307,11 @@ void tui_draw_text(const fb_info_t *info, uint32_t x, uint32_t y,
       if (codepoint >= 0x0410 && codepoint <= 0x045F) {
         index = 128 + (codepoint - 0x0410);
       }
+    } else if (codepoint == 0x0401) { // Ё
+        index = 192;
+    } else if (codepoint == 0x0451) { // ё
+        index = 193;
     }
-    // TODO: Map Yo (0x401, 0x451)
 
     const uint8_t *glyph = default_font[index];
     for (int row = 0; row < 16; row++) {

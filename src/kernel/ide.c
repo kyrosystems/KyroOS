@@ -98,7 +98,7 @@ static void ide_create_partition_node(vfs_node_t *dev_dir, vfs_node_t *disk_node
     ide_partition_data_t *part_data = (ide_partition_data_t*)kmalloc(sizeof(ide_partition_data_t));
     if (!part_data) {
         klog(LOG_ERROR, "IDE: Failed to allocate partition data for /dev/%s.", name);
-        // TODO: remove node from VFS
+        vfs_remove(dev_dir, name);
         return;
     }
     part_data->disk_node = disk_node;

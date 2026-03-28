@@ -105,6 +105,7 @@ int vfs_mkdir(vfs_node_t *root, const char *path, uint16_t mode);
 int vfs_create(vfs_node_t *root, const char *path, uint16_t mode);
 int vfs_remove(vfs_node_t *root, const char *path);
 vfs_node_t *vfs_resolve_path(vfs_node_t *root, const char *path);
+uint32_t vfs_get_next_inode();
 int vfs_rmdir(vfs_node_t *root, const char *path, uint16_t mode); // New: for removing directories
 int vfs_stat(vfs_node_t *root, const char *path, struct stat *stat_buf); // New: for getting file/dir info
 int vfs_ioctl(vfs_node_t *node, int request, void* argp); // New: for device-specific control
@@ -113,5 +114,6 @@ int vfs_unmount(vfs_node_t *mount_point); // New: for unmounting filesystems
 void register_filesystem(struct filesystem_type *fs); // New: to register filesystem drivers
 
 int kernel_ioctl(int fd, int request, void* argp); // New: kernel-internal ioctl
+uint32_t vfs_get_next_inode(); // New: Function to get a unique inode number
 
 #endif // VFS_H

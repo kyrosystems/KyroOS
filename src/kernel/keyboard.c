@@ -50,6 +50,16 @@ char keyboard_get_char() {
   return 0;
 }
 
+char keyboard_get_char_blocking() {
+    event_t ev;
+    while (1) {
+        event_wait(&ev);
+        if (ev.type == EVENT_KEY_DOWN) {
+            return (char)ev.data1;
+        }
+    }
+}
+
 static void keyboard_handler(struct registers *regs) {
   (void)regs; // Suppress unused parameter warning
 

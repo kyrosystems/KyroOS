@@ -9,6 +9,11 @@
 #define PAGE_PRESENT (1 << 0)
 #define PAGE_WRITE (1 << 1)
 #define PAGE_USER (1 << 2)
+#define PAGE_NO_CACHE (1 << 4) // Page Write-Through (PWT)
+#define PAGE_DISABLE_CACHE (1 << 7) // Page Cache Disable (PCD)
+
+// Combined flags for framebuffer memory mapping
+#define PAGE_FRAMEBUFFER (PAGE_PRESENT | PAGE_WRITE | PAGE_NO_CACHE | PAGE_DISABLE_CACHE)
 #define PAGE_NO_EXEC (1ULL << 63) // No-Execute bit (NX)
 #define PHYSICAL_ADDR_MASK 0x000FFFFFFFFFF000ULL
 

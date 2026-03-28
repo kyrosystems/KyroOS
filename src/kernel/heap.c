@@ -25,6 +25,7 @@ static header_t *morecore(size_t nunits) {
   uint64_t npages = (nbytes + PAGE_SIZE - 1) / PAGE_SIZE;
   void *page = pmm_alloc_pages(npages);
   if (page == NULL) {
+    klog(LOG_WARN, "Heap: pmm_alloc_pages failed in morecore.");
     return NULL;
   }
 
@@ -39,7 +40,7 @@ void heap_init() {
   base.next = &base;
   base.size = 0;
   freelist = &base;
-  klog(LOG_INFO, "Kernel heap initialized.");
+  serial_print("Heap: freelist setup in heap_init().\n"); // Use serial_print here to avoid kmalloc before it's ready
 }
 
 void *kmalloc(size_t nbytes) {
@@ -53,6 +54,11 @@ void *kmalloc(size_t nbytes) {
   header_t *prevp = freelist;
   header_t *p;
 
+  if (!freelist) { // Should not happen after heap_init
+    klog(LOG_ERROR, "Heap: kmalloc called with uninitialized freelist!");
+    return NULL;
+  }
+
   for (p = prevp->next;; prevp = p, p = p->next) {
     if (p->size >= nunits) {   // Big enough
       if (p->size == nunits) { // Exactly
@@ -65,9 +71,9 @@ void *kmalloc(size_t nbytes) {
       freelist = prevp;
       return (void *)(p + 1);
     }
-    if (p == freelist) { // Wrapped around free list
+    if (p == freelist) { // Wrapped around free list, need more memory
       if ((p = morecore(nunits)) == NULL) {
-        klog(LOG_WARN, "Heap: out of memory!");
+        klog(LOG_WARN, "Heap: out of memory from morecore!");
         return NULL; // No memory left
       }
     }
@@ -81,6 +87,11 @@ void kfree(void *ap) {
 
   header_t *bp = (header_t *)ap - 1; // Point to block header
   header_t *p;
+
+  if (!freelist) { // Should not happen, implies heap corruption or uninitialized
+    klog(LOG_ERROR, "Heap: kfree called with uninitialized freelist or corrupt heap!");
+    return;
+  }
 
   for (p = freelist; !(bp > p && bp < p->next); p = p->next) {
     if (p >= p->next && (bp > p || bp < p->next)) {
@@ -122,6 +133,7 @@ void *krealloc(void *ptr, size_t new_size) {
 
   void *new_ptr = kmalloc(new_size);
   if (new_ptr == NULL) {
+    klog(LOG_WARN, "Heap: krealloc: kmalloc for new_ptr failed.");
     return NULL;
   }
 

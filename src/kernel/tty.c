@@ -1,12 +1,18 @@
 #include "tty.h"
 #include "event.h"
+#include "fb.h" // Include framebuffer header
 #include "heap.h"
 #include "keyboard.h"
 #include "kstring.h"
-#include "log.h"
+#include "log.h" // For klog_putchar, klog_print_str
 #include "vfs.h"
 #include <stdint.h>
 #include <string.h>
+
+// console_x, console_y are extern from log.h
+// console_cols, console_rows, char_width, char_height are also implicitly managed by klog_putchar
+// Only foreground/background colors remain local state for this TTY instance if needed,
+// but for now, we'll let log.c manage colors.
 
 uint32_t tty_read(vfs_node_t *node, uint64_t offset, uint32_t size,
                   uint8_t *buffer) {
@@ -37,12 +43,10 @@ uint32_t tty_write(vfs_node_t *node, uint64_t offset, uint32_t size,
   (void)node;
   (void)offset;
 
-  char kbuf[size + 1];
-  memcpy(kbuf, buffer, size);
-  kbuf[size] = '\0';
-
-  klog_print_str(kbuf);
-
+  // klog_print_str handles both serial and framebuffer output, and cursor management
+  // It also calls fb_flush internally as part of its framebuffer update.
+  klog_print_str((const char *)buffer, true); // Flush immediately after writing to tty
+  
   return size;
 }
 
