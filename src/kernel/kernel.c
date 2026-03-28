@@ -78,6 +78,12 @@ void kmain_x64(void) {
   log_init(); // Serial only, VGA cleared by console_clear after HHDM set.
   serial_print("KMAIN: after log_init()\n");
 
+  serial_print("KMAIN: before hhdm_request check\n");
+  if (hhdm_request.response != NULL) {
+    kernel_hhdm_offset = hhdm_request.response->offset;
+  }
+  serial_print("KMAIN: after hhdm_request check\n");
+
   serial_print("KMAIN: before framebuffer_request check\n");
   if (framebuffer_request.response == NULL ||
       framebuffer_request.response->framebuffer_count < 1) {
@@ -85,16 +91,11 @@ void kmain_x64(void) {
       __asm__ __volatile__("hlt");
     } // System cannot boot without framebuffer
   }
-  serial_print("KMAIN: after framebuffer_request check\n");
-
   struct limine_framebuffer *fb_tag =
       framebuffer_request.response->framebuffers[0];
+  serial_print("KMAIN: after framebuffer_request check\n");
 
-  serial_print("KMAIN: before hhdm_request check\n");
-  if (hhdm_request.response != NULL) {
-    kernel_hhdm_offset = hhdm_request.response->offset;
-  }
-  serial_print("KMAIN: after hhdm_request check\n");
+
 
   serial_print("KMAIN: before fb_init()\n");
   fb_init(fb_tag);
@@ -103,6 +104,7 @@ void kmain_x64(void) {
   serial_print("KMAIN: before console_clear()\n");
   console_clear();
   serial_print("KMAIN: after console_clear()\n");
+  fb_flush(); // Flush the cleared screen to the framebuffer
 
   serial_print("KMAIN: before memmap_request check\n");
   if (memmap_request.response != NULL) {
@@ -242,6 +244,7 @@ void kmain_x64(void) {
   serial_print("KMAIN: before starting shell_main as a kernel thread\n");
   thread_create(shell_main, NULL);
   serial_print("KMAIN: after starting shell_main as a kernel thread\n");
+  fb_flush();
 
   __asm__ __volatile__(
       "sti"); // Enable interrupts only if necessary services are started

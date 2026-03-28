@@ -64,42 +64,49 @@ void serial_print_hex(uint64_t n) {
 // --- Framebuffer Text Output Functions ---
 
 void klog_putchar(char c) {
-  const fb_info_t *fb_info = fb_get_info();
-  if (!fb_info)
-    return; // Cannot draw if no framebuffer info
+  serial_putchar(c); // Always redirect to serial
 
-  uint32_t max_console_x = fb_info->width / FONT_WIDTH;
-  uint32_t max_console_y = fb_info->height / FONT_HEIGHT;
+  const fb_info_t *fb_info = fb_get_info();
+  if (!fb_info || !fb_is_backbuffer_initialized()) {
+    return; // Cannot draw to framebuffer if not initialized
+  }
+
+  // Calculate maximum characters per line and lines per screen
+  uint32_t chars_per_line = fb_info->width / FONT_WIDTH;
+  // uint32_t lines_per_screen = fb_info->height / FONT_HEIGHT; // Unused, hence the warning
 
   if (c == '\n') {
     console_x = 0;
-    console_y++;
-  } else if (c == '\b') {
+    console_y += FONT_HEIGHT;
+  } else if (c == '\b') { // Handle backspace
     if (console_x > 0) {
-      console_x--;
-      fb_draw_char(' ', console_x * FONT_WIDTH, console_y * FONT_HEIGHT,
-                   FB_DEFAULT_FG_COLOR, FB_DEFAULT_BG_COLOR);
+      console_x -= FONT_WIDTH;
+      fb_draw_char(' ', console_x, console_y, FB_DEFAULT_FG_COLOR, FB_DEFAULT_BG_COLOR);
+    } else if (console_y > 0) {
+      console_y -= FONT_HEIGHT;
+      console_x = (chars_per_line - 1) * FONT_WIDTH;
+      fb_draw_char(' ', console_x, console_y, FB_DEFAULT_FG_COLOR, FB_DEFAULT_BG_COLOR);
     }
   } else {
-    fb_draw_char(c, console_x * FONT_WIDTH, console_y * FONT_HEIGHT,
-                 FB_DEFAULT_FG_COLOR, FB_DEFAULT_BG_COLOR);
-    console_x++;
+    fb_draw_char(c, console_x, console_y, FB_DEFAULT_FG_COLOR, FB_DEFAULT_BG_COLOR);
+    console_x += FONT_WIDTH;
   }
 
-  if (console_x >= max_console_x) {
+  // Handle line wrapping
+  if (console_x >= fb_info->width) {
     console_x = 0;
-    console_y++;
+    console_y += FONT_HEIGHT;
   }
 
-  if (console_y >= max_console_y) {
-    // Scroll up: Copy region from FONT_HEIGHT to (max_console_y - 1) *
-    // FONT_HEIGHT
-    fb_copy_region(FONT_HEIGHT, 0, (max_console_y - 1) * FONT_HEIGHT);
-    // Clear the last line
-    fb_draw_rect(0, (max_console_y - 1) * FONT_HEIGHT, fb_info->width,
-                 FONT_HEIGHT, FB_DEFAULT_BG_COLOR);
-    console_y = max_console_y - 1;
+  // Handle scrolling
+  if (console_y >= fb_info->height) {
+    fb_copy_region(FONT_HEIGHT, 0, fb_info->height - FONT_HEIGHT);
+    // Clear the last line that was scrolled up into
+    fb_draw_rect(0, fb_info->height - FONT_HEIGHT, fb_info->width, FONT_HEIGHT, FB_DEFAULT_BG_COLOR);
+    console_y = fb_info->height - FONT_HEIGHT; // Keep cursor on the last line
   }
+
+  fb_flush(); // Flush after every character to ensure immediate display
 }
 
 void klog_print_str(const char *s) {
