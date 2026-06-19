@@ -1,6 +1,6 @@
-CC = x86_64-linux-gnu-gcc
+CC = gcc
 AS = nasm
-LD = x86_64-linux-gnu-ld
+LD = ld
 
 CFLAGS = -Wall -Wextra -std=c11 -ffreestanding -fno-stack-protector -fno-pic -fno-pie \
          -Ilib/libc -Ilib/kyroos_gfx -Ilib/tui -Ilib -I../src/include
@@ -30,12 +30,12 @@ libs: $(LIB_OBJS)
 $(APPS):
 	@mkdir -p $(BIN_DIR)
 	@echo "Building userspace app: $@"
-	@$(AS) -f elf64 crt0.asm -o crt0.o
+	@$(AS) -f elf64 crt0.asm -o $@_crt0.o
 	@for f in $@/*.c; do \
 		$(CC) $(CFLAGS) -c $$f -o $${f%.c}.o; \
 	done
-	@$(LD) $(LDFLAGS) -o $(BIN_DIR)/$@ crt0.o $@/*.o $(LIB_OBJS)
-	@rm -f $@/*.o crt0.o
+	@$(LD) $(LDFLAGS) -o $(BIN_DIR)/$@ $@_crt0.o $@/*.o $(LIB_OBJS)
+	@rm -f $@/*.o $@_crt0.o
 
 clean:
 	@rm -rf $(BIN_DIR)/*

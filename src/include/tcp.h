@@ -3,9 +3,10 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include "ip.h" 
-#include "net.h" 
-#include "thread.h" 
+#include "ip.h"
+#include "net.h"
+#include "thread.h"
+#include "waitqueue.h"
 
 #define TCP_FLAG_FIN 0x01
 #define TCP_FLAG_SYN 0x02
@@ -21,7 +22,7 @@ typedef struct {
     uint16_t dest_port;
     uint32_t seq_num;
     uint32_t ack_num;
-    uint8_t  data_offset_res; 
+    uint8_t  data_offset_res;
     uint8_t  flags;
     uint16_t window_size;
     uint16_t checksum;
@@ -47,28 +48,32 @@ typedef struct tcp_tcb {
     uint16_t local_port;
     uint16_t remote_port;
 
-    uint32_t snd_nxt; 
-    uint32_t rcv_nxt; 
+    uint32_t snd_nxt;
+    uint32_t rcv_nxt;
     uint32_t snd_una;
 
     tcp_state_t state;
 
-    uint8_t* recv_buffer;
-    size_t recv_buffer_size;
+    uint8_t *recv_buffer;
+    size_t   recv_buffer_size;
     volatile size_t recv_data_len;
     volatile size_t recv_read_idx;
 
-    struct tcp_tcb* next;
+    wait_queue_t connect_wq;  /* woken when ESTABLISHED */
+    wait_queue_t recv_wq;     /* woken when data arrives or FIN */
+
+    struct tcp_tcb *next;
 } tcp_tcb_t;
 
-extern tcp_tcb_t* active_tcbs;
+extern tcp_tcb_t *active_tcbs;
 
-void tcp_init();
-tcp_tcb_t* tcp_create_tcb();
-int tcp_connect_tcb(tcp_tcb_t* tcb, uint32_t remote_ip, uint16_t remote_port);
-int tcp_send_tcb(tcp_tcb_t* tcb, const void* buf, size_t len);
-int tcp_recv_tcb(tcp_tcb_t* tcb, void* buf, size_t len);
-void tcp_handle_packet(net_dev_t *net_dev, const ipv4_header_t *ip_hdr, const uint8_t *packet, size_t size);
-int tcp_close_tcb(tcp_tcb_t* tcb);
+void        tcp_init();
+tcp_tcb_t  *tcp_create_tcb();
+int         tcp_connect_tcb(tcp_tcb_t *tcb, uint32_t remote_ip, uint16_t remote_port);
+int         tcp_send_tcb(tcp_tcb_t *tcb, const void *buf, size_t len);
+int         tcp_recv_tcb(tcp_tcb_t *tcb, void *buf, size_t len);
+void        tcp_handle_packet(net_dev_t *net_dev, const ipv4_header_t *ip_hdr,
+                               const uint8_t *packet, size_t size);
+int         tcp_close_tcb(tcp_tcb_t *tcb);
 
-#endif
+#endif // TCP_H

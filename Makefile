@@ -1,6 +1,6 @@
 TOOLCHAIN_PREFIX ?= x86_64-linux-gnu-
 CC = $(TOOLCHAIN_PREFIX)gcc
-LD = $(TOOLCHAIN_PREFIX)ld
+LD = ld
 AS = nasm
 
 # Increment build number on every make invocation
@@ -11,15 +11,15 @@ _BUILD_INC := $(shell \
 	mv src/include/version.h.tmp src/include/version.h \
 )
 
-OS_VERSION = 26.03.11-Titanium
+OS_VERSION = 26.03.12-Beryllium
 K_CFLAGS = -Wall -Wextra -std=c11 -ffreestanding -O2 -Isrc/include \
            -mcmodel=kernel -mno-red-zone -m64 -nostdlib -fno-stack-protector \
+           -isystem /usr/lib64/gcc/x86_64-suse-linux/15/include \
            -mno-sse -mno-sse2 -mno-mmx -mno-80387 -fno-pic -fno-pie \
            -DOS_VERSION="\"$(OS_VERSION)\""
-
 BUILD_DIR = build
 OUTPUT_DIR = isofiles
-ISO_FILENAME = /tmp/KyroOS-Titanium.iso
+ISO_FILENAME = /tmp/KyroOS-Beryllium.iso
 
 K_BOOT_OBJS = $(BUILD_DIR)/boot/boot.o $(BUILD_DIR)/boot/gdt_flush.o $(BUILD_DIR)/boot/isr_stubs.o \
               $(BUILD_DIR)/boot/long_mode_entry.o $(BUILD_DIR)/boot/switch.o $(BUILD_DIR)/boot/userspace_exit_stub.o
@@ -27,10 +27,12 @@ K_BOOT_OBJS = $(BUILD_DIR)/boot/boot.o $(BUILD_DIR)/boot/gdt_flush.o $(BUILD_DIR
 K_SRCS = $(wildcard src/kernel/*.c)
 K_OBJS = $(patsubst src/kernel/%.c, $(BUILD_DIR)/kernel/%.o, $(K_SRCS))
 
+
 # QEMU Flags
 QEMU_FLAGS = -cdrom $(ISO_FILENAME) -serial stdio -no-reboot \
-             -net nic,model=e1000 -net user,hostname=kyroos,dns=8.8.8.8 \
-             -display sdl -vga std
+             -device e1000,netdev=net0 \
+             -netdev user,id=net0,hostname=kyroos,dnssearch=8.8.8.8 \
+             -display gtk -vga std
 
 .PHONY: all clean run iso userspace
 
