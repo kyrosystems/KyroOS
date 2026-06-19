@@ -32,6 +32,10 @@
 #define SYS_GFX_GET_FB_INFO 25
 #define SYS_INPUT_POLL_EVENT 26
 #define SYS_SBRK 27
+#define SYS_SENDTO      28
+#define SYS_RECVFROM    29
+#define SYS_SETSOCKOPT  30
+#define SYS_DNS_RESOLVE 31
 
 void syscall_init();
 void syscall_handler(struct registers *regs);

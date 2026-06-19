@@ -19,6 +19,20 @@
 #define IPPROTO_ICMP    1   // Control Message Protocol
 #define IPPROTO_TCP     6   // Transmission Control Protocol
 #define IPPROTO_UDP     17  // User Datagram Protocol
+#define SOCK_RAW      3
+
+#define SOL_SOCKET    1
+#define SO_RCVTIMEO   20
+#define SO_SNDTIMEO   21
+
+#define IPPROTO_ICMP  1
+
+typedef uint32_t socklen_t;
+
+struct timeval {
+    uint32_t tv_sec;
+    uint32_t tv_usec;
+};
 
 // Socket states
 typedef enum {
@@ -79,6 +93,8 @@ typedef struct socket {
 
     struct socket* next; // For linked list of all active sockets
 } socket_t;
+
+
 
 
 // Global list of active sockets (managed by kernel)

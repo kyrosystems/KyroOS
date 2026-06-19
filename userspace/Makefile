@@ -12,7 +12,7 @@ BIN_DIR = ../build/isodir/bin
 
 # Library objects
 LIBC_OBJS = lib/libc/chk.o lib/libc/errno.o lib/libc/print.o lib/libc/puts.o \
-            lib/libc/stdlib.o lib/libc/string.o lib/libc/strlen.o
+            lib/libc/stdlib.o lib/libc/string.o lib/libc/strlen.o lib/libc/dns.o
 GFX_OBJS  = $(patsubst %.c,%.o,$(wildcard lib/kyroos_gfx/*.c))
 TUI_OBJS  = $(patsubst %.c,%.o,$(wildcard lib/tui/*.c))
 LIB_OBJS  = $(LIBC_OBJS) $(GFX_OBJS) $(TUI_OBJS)

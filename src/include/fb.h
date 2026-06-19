@@ -23,6 +23,7 @@ void fb_draw_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color
 void fb_draw_char(char c, uint32_t x, uint32_t y, uint32_t fg, uint32_t bg);
 void fb_flush();
 void fb_copy_region(uint32_t src_y, uint32_t dst_y, uint32_t h);
+void fb_draw_bitmap(int x, int y, const uint32_t *data, int w, int h);
 const fb_info_t *fb_get_info();
 
 #endif

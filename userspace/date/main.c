@@ -12,7 +12,7 @@ int main(int argc, char **argv) {
     uint64_t mins = (seconds / 60) % 60;
     uint64_t secs = seconds % 60;
     
-    // Simple date output (would need RTC for real date)
+    // Simple date output (need rtc)
     print("Wed Mar 18 ");
     
     // Print hours

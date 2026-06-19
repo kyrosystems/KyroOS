@@ -47,6 +47,12 @@
 #define SYS_GFX_GET_FB_INFO 25
 #define SYS_INPUT_POLL_EVENT 26
 #define SYS_SBRK 27
+#define SYS_SENDTO    28
+#define SYS_RECVFROM  29
+#define SYS_SETSOCKOPT 30
+#define SYS_DNS_RESOLVE 31
+
+uint32_t dns_resolve(const char *host);
 
 static inline uint64_t syscall(uint64_t num, uint64_t a1, uint64_t a2,
                                uint64_t a3) {
@@ -280,8 +286,35 @@ static inline int recv(int sockfd, void *buf, size_t len, int /*flags*/) {
     return syscall(SYS_RECV, sockfd, (uint64_t)buf, len);
 }
 
+static inline int sendto(int sockfd, const void *buf, size_t len, int flags,
+                         const struct sockaddr_in *addr, socklen_t addrlen) {
+    (void)flags; (void)addr; (void)addrlen;
+    return (int)syscall(SYS_SENDTO, (uint64_t)sockfd, (uint64_t)buf, (uint64_t)len);
+}
+
+static inline int recvfrom(int sockfd, void *buf, size_t len, int flags,
+                            struct sockaddr_in *addr, socklen_t *addrlen) {
+    (void)flags; (void)addr; (void)addrlen;
+    return (int)syscall(SYS_RECVFROM, (uint64_t)sockfd, (uint64_t)buf, (uint64_t)len);
+}
+
+static inline int setsockopt(int sockfd, int level, int optname,
+                              const void *optval, socklen_t optlen) {
+    (void)level; (void)optname; (void)optval; (void)optlen;
+    return (int)syscall(SYS_SETSOCKOPT, (uint64_t)sockfd, 0, 0);
+}
+
+
 static inline int sha256(const uint8_t* data, size_t len, uint8_t* hash_out) {
   return (int)syscall(SYS_SHA256, (uint64_t)data, (uint64_t)len, (uint64_t)hash_out);
+}
+
+static int strncmp(const char *a, const char *b, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        if (a[i] != b[i]) return (unsigned char)a[i] - (unsigned char)b[i];
+        if (a[i] == '\0') return 0;
+    }
+    return 0;
 }
 
 typedef struct {
@@ -315,6 +348,16 @@ static inline int input_poll_event(event_t *event) {
 int atoi(const char *s);
 
 static inline uint64_t get_ticks() { return syscall(SYS_GET_TICKS, 0, 0, 0); }
+
+
+static inline uint32_t uptime_ms(void) {
+    return (uint32_t)(get_ticks());
+}
+
+static inline void sleep_ms(uint32_t ms) {
+    uint32_t end = uptime_ms() + ms;
+    while (uptime_ms() < end) {}
+}
 
 // Minimal string/memory functions
 size_t strlen(const char *s);

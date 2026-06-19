@@ -45,6 +45,17 @@ void fb_clear(uint32_t color) {
   }
 }
 
+void fb_draw_bitmap(int x, int y, const uint32_t *data, int w, int h) {
+    for (int row = 0; row < h; row++) {
+        for (int col = 0; col < w; col++) {
+            uint32_t pixel = data[row * w + col];
+            uint8_t a = (pixel >> 24) & 0xFF;
+            if (a > 128)  
+                fb_set_pixel(x + col, y + row, pixel & 0x00FFFFFF);
+        }
+    }
+}
+
 void fb_draw_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color) {
   for (uint32_t i = 0; i < h; i++) {
     for (uint32_t j = 0; j < w; j++) {

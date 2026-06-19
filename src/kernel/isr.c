@@ -2,6 +2,7 @@
 #include "log.h"
 #include "port_io.h"
 #include "scheduler.h"
+#include "panic_screen.h"
 
 extern void
 syscall_handler(struct registers *regs); // Declare syscall_handler here
@@ -95,7 +96,8 @@ void isr_handler(struct registers *regs) {
     klog(LOG_ERROR,
          "Registers: RAX=%lx, RBX=%lx, RCX=%lx, RDX=%lx, RSP=%lx, RFLAGS=%lx",
          regs->rax, regs->rbx, regs->rcx, regs->rdx, regs->rsp, regs->rflags);
-    panic(exception_messages[regs->int_no], regs);
+    panic_screen_show(exception_messages[regs->int_no], regs);
+    for (;;) __asm__ volatile("cli; hlt");
   } else if (regs->int_no >= 32 && regs->int_no <= 47) { // IRQs
     uint8_t irq_num = regs->int_no - 32;
 
