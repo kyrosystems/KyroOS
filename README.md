@@ -70,4 +70,4 @@ You can find the ISO file on the [GitHub Releases](https://github.com/pon4ikisdo
 
 ## Warning
 
-KyroOS is under heavy development and is considered an **alpha** quality operating system. It is not stable, may contain significant bugs, and is not suitable for production use.
+KyroOS is under heavy development and is considered an **pre-alpha** quality operating system. It is not stable, may contain significant bugs, and is not suitable for production use.
