@@ -56,7 +56,7 @@ This is the first official alpha release of KyroOS. While the system is still in
 
 **What to Expect:**
 
-*   The system boots to a graphical desktop environment.
+*   The system boots to a basic console
 *   You can interact with the basic shell and run a few commands.
 *   The keyboard, and framebuffer drivers are functional.
 
@@ -70,4 +70,4 @@ You can find the ISO file on the [GitHub Releases](https://github.com/pon4ikisdo
 
 ## Warning
 
-KyroOS is under heavy development and is considered an **alpha** quality operating system. It is not stable, may contain significant bugs, and is not suitable for production use.
+KyroOS is under heavy development and is considered an **pre-alpha** quality operating system. It is not stable, may contain significant bugs, and is not suitable for production use.
