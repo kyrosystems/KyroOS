@@ -56,7 +56,7 @@ This is the first official alpha release of KyroOS. While the system is still in
 
 **What to Expect:**
 
-*   The system boots to a graphical desktop environment.
+*   The system boots to a basic console
 *   You can interact with the basic shell and run a few commands.
 *   The keyboard, and framebuffer drivers are functional.
 
