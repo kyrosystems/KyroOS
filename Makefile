@@ -19,7 +19,9 @@ K_CFLAGS = -Wall -Wextra -std=c11 -ffreestanding -O2 -Isrc/include \
            -DOS_VERSION="\"$(OS_VERSION)\""
 BUILD_DIR = build
 OUTPUT_DIR = isofiles
-ISO_FILENAME = /tmp/KyroOS-Beryllium.iso
+VERSION_TAG = $(shell grep "#define KYROOS_VERSION_MAJOR" src/include/version.h | sed 's/[^0-9]//g').$(shell grep "#define KYROOS_VERSION_MINOR" src/include/version.h | sed 's/[^0-9]//g').$(shell grep "#define KYROOS_VERSION_PATCH" src/include/version.h | sed 's/[^0-9]//g')
+BUILD_NUM = $(shell grep "#define KYROOS_VERSION_BUILD" src/include/version.h | sed 's/[^0-9]//g')
+ISO_FILENAME = KyroOS-$(VERSION_TAG)-$(BUILD_NUM).iso
 
 K_BOOT_OBJS = $(BUILD_DIR)/boot/boot.o $(BUILD_DIR)/boot/gdt_flush.o $(BUILD_DIR)/boot/isr_stubs.o \
               $(BUILD_DIR)/boot/long_mode_entry.o $(BUILD_DIR)/boot/switch.o $(BUILD_DIR)/boot/userspace_exit_stub.o
