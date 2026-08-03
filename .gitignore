@@ -6,7 +6,6 @@
 /.vscode/
 
 # Limine bootloader
-/limine/
 /limine.zip
 
 # Node.js
