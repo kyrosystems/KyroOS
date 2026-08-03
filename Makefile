@@ -31,8 +31,8 @@ K_OBJS = $(patsubst src/kernel/%.c, $(BUILD_DIR)/kernel/%.o, $(K_SRCS))
 # QEMU Flags
 QEMU_FLAGS = -cdrom $(ISO_FILENAME) -serial stdio -no-reboot \
              -device e1000,netdev=net0 \
-             -netdev user,id=net0,hostname=kyroos,dnssearch=8.8.8.8 \
-             -display gtk -vga std
+             -netdev user,id=net0,hostname=kyroos,dns=8.8.8.8 \
+             -display sdl
 
 .PHONY: all clean run iso userspace
 
@@ -41,7 +41,7 @@ all: userspace $(BUILD_DIR)/kernel/kyroos.elf iso
 userspace:
 	@make -C userspace all
 
-run: all
+run: 
 	@qemu-system-x86_64 $(QEMU_FLAGS)
 
 iso:

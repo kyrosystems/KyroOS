@@ -129,7 +129,7 @@ void ip_handle_packet(net_dev_t *net_dev, const uint8_t *packet, size_t size) {
     if (ip->version != 4) return;
 
     uint32_t dip = __builtin_bswap32(ip->dest_ip);
-    if (dip != local_ip && dip != 0xFFFFFFFF) return;
+    if (local_ip != 0 && dip != local_ip && dip != 0xFFFFFFFF) return;
 
     size_t        hlen   = ip->ihl * 4;
     const uint8_t *payload = packet + hlen;
