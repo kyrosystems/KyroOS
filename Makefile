@@ -3,7 +3,7 @@ CC = $(TOOLCHAIN_PREFIX)gcc
 LD = ld
 AS = nasm
 
-# Increment build number on every make invocation
+# inc build
 _BUILD_INC := $(shell \
 	current_build=$$(grep "#define KYROOS_VERSION_BUILD" src/include/version.h | sed 's/[^0-9]//g'); \
 	new_build=$$((current_build + 1)); \
@@ -12,8 +12,10 @@ _BUILD_INC := $(shell \
 )
 
 OS_VERSION = 26.03.12-Beryllium
+# cflags
 K_CFLAGS = -Wall -Wextra -std=c11 -ffreestanding -O2 -Isrc/include \
            -mcmodel=kernel -mno-red-zone -m64 -nostdlib -fno-stack-protector \
+           -D_FORTIFY_SOURCE=0 -fno-builtin \
            -isystem /usr/lib64/gcc/x86_64-suse-linux/15/include \
            -mno-sse -mno-sse2 -mno-mmx -mno-80387 -fno-pic -fno-pie \
            -DOS_VERSION="\"$(OS_VERSION)\""
@@ -23,14 +25,14 @@ VERSION_TAG = $(shell grep "#define KYROOS_VERSION_MAJOR" src/include/version.h 
 BUILD_NUM = $(shell grep "#define KYROOS_VERSION_BUILD" src/include/version.h | sed 's/[^0-9]//g')
 ISO_FILENAME = KyroOS-$(VERSION_TAG)-$(BUILD_NUM).iso
 
+# boot objs
 K_BOOT_OBJS = $(BUILD_DIR)/boot/boot.o $(BUILD_DIR)/boot/gdt_flush.o $(BUILD_DIR)/boot/isr_stubs.o \
               $(BUILD_DIR)/boot/long_mode_entry.o $(BUILD_DIR)/boot/switch.o $(BUILD_DIR)/boot/userspace_exit_stub.o
 
 K_SRCS = $(wildcard src/kernel/*.c)
 K_OBJS = $(patsubst src/kernel/%.c, $(BUILD_DIR)/kernel/%.o, $(K_SRCS))
 
-
-# QEMU Flags
+# qemu flags
 QEMU_FLAGS = -cdrom $(ISO_FILENAME) -serial stdio -no-reboot \
              -device e1000,netdev=net0 \
              -netdev user,id=net0,hostname=kyroos,dns=8.8.8.8 \
