@@ -3,14 +3,17 @@ CC = $(TOOLCHAIN_PREFIX)gcc
 LD = ld
 AS = nasm
 
-# inc build
+# skip inc on run/clean
+ifeq ($(filter run clean,$(MAKECMDGOALS)),)
 _BUILD_INC := $(shell \
 	current_build=$$(grep "#define KYROOS_VERSION_BUILD" src/include/version.h | sed 's/[^0-9]//g'); \
 	new_build=$$((current_build + 1)); \
 	sed "s/\#define KYROOS_VERSION_BUILD \".*\"/\#define KYROOS_VERSION_BUILD \"$$new_build\"/" src/include/version.h > src/include/version.h.tmp && \
 	mv src/include/version.h.tmp src/include/version.h \
 )
+endif
 
+LDFLAGS = -T linker.ld -nostdlib -z noexecstack -z separate-code
 OS_VERSION = 26.03.12-Beryllium
 # cflags
 K_CFLAGS = -Wall -Wextra -std=c11 -ffreestanding -O2 -Isrc/include \
@@ -52,15 +55,18 @@ iso:
 	@mkdir -p $(BUILD_DIR)/isodir/boot/limine
 	@cp $(BUILD_DIR)/kernel/kyroos.elf $(BUILD_DIR)/isodir/boot/kernel.elf
 	@cp limine.conf $(BUILD_DIR)/isodir/boot/limine/
+	@for f in $(BUILD_DIR)/isodir/bin/*; do \
+		echo "    module_path: boot():/bin/$$(basename $$f)" >> $(BUILD_DIR)/isodir/boot/limine/limine.conf; \
+	done
 	@cp limine/BOOTX64.EFI limine/limine-bios.sys limine/limine-bios-cd.bin limine/limine-uefi-cd.bin $(BUILD_DIR)/isodir/boot/limine/
 	@rm -rf /tmp/kyroos_build
 	@cp -r $(BUILD_DIR)/isodir /tmp/kyroos_build
 	@xorriso -as mkisofs -R -J -iso-level 3 -volid "KYROOS" \
-	   -b boot/limine/limine-bios-cd.bin \
-	   -no-emul-boot -boot-load-size 4 -boot-info-table \
-	   --efi-boot boot/limine/BOOTX64.EFI \
-	   -efi-boot-part --efi-boot-image --protective-msdos-label \
-	   /tmp/kyroos_build -o $(ISO_FILENAME)
+		-b boot/limine/limine-bios-cd.bin \
+		-no-emul-boot -boot-load-size 4 -boot-info-table \
+		--efi-boot boot/limine/BOOTX64.EFI \
+		-efi-boot-part --efi-boot-image --protective-msdos-label \
+		/tmp/kyroos_build -o $(ISO_FILENAME)
 	@limine/limine bios-install $(ISO_FILENAME) 2>/dev/null || true
 	@rm -rf /tmp/kyroos_build
 	@echo "ISO created: $(ISO_FILENAME)"

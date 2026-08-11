@@ -292,103 +292,8 @@ static void cmd_ps() {
 static void cmd_exec_bin(const char *name, int argc, char **argv) {
     char path[256];
     ksprintf(path, "/bin/%s", name);
-
-    vfs_node_t *node = vfs_resolve_path(vfs_root, path);
-    if (!node) {
+    if (elf_exec_as_thread(path, argc, argv) != 0)
         kprintf("%s: command not found\n", name);
-        return;
-    }
-
-    // Read ELF header
-    uint8_t elf_header[64];
-    if (vfs_read(node, 0, 64, elf_header) != 64) {
-        kprintf("%s: failed to read ELF header\n", name);
-        return;
-    }
-
-    // Verify ELF magic
-    if (elf_header[0] != 0x7F || elf_header[1] != 'E' || 
-        elf_header[2] != 'L' || elf_header[3] != 'F') {
-        kprintf("%s: not a valid ELF file\n", name);
-        return;
-    }
-
-    // Load entire file into memory
-    uint8_t *elf_data = (uint8_t *)kmalloc(node->length);
-    if (!elf_data) {
-        kprintf("%s: failed to allocate memory\n", name);
-        return;
-    }
-
-    if (vfs_read(node, 0, node->length, elf_data) != node->length) {
-        kprintf("%s: failed to read ELF file\n", name);
-        kfree(elf_data);
-        return;
-    }
-
-    // Parse ELF
-    Elf64_Ehdr *ehdr = (Elf64_Ehdr *)elf_data;
-    Elf64_Phdr *phdr = (Elf64_Phdr *)(elf_data + ehdr->e_phoff);
-
-    // Allocate new PML4
-    pml4_t *new_pml4 = vmm_create_address_space();
-    if (!new_pml4) {
-        kprintf("%s: failed to create address space\n", name);
-        kfree(elf_data);
-        return;
-    }
-
-    // Load program headers
-    uint64_t entry_point = 0;
-    for (int i = 0; i < ehdr->e_phnum; i++) {
-        if (phdr[i].p_type == PT_LOAD) {
-            uint64_t vaddr = phdr[i].p_vaddr & ~0xFFF;
-            uint64_t end_vaddr = (phdr[i].p_vaddr + phdr[i].p_memsz + 0xFFF) & ~0xFFF;
-
-            for (uint64_t addr = vaddr; addr < end_vaddr; addr += PAGE_SIZE) {
-                void *phys = pmm_alloc_page();
-                if (!phys) {
-                    kprintf("%s: failed to allocate page\n", name);
-                    vmm_destroy_address_space(new_pml4);
-                    kfree(elf_data);
-                    return;
-                }
-                memset(phys, 0, PAGE_SIZE);
-                vmm_map_page(new_pml4, (void *)(addr + kernel_hhdm_offset), phys, PAGE_PRESENT | PAGE_WRITE | PAGE_USER);
-            }
-
-            uint8_t *vaddr_ptr = (uint8_t *)(phdr[i].p_vaddr + kernel_hhdm_offset);
-            memcpy(vaddr_ptr, elf_data + phdr[i].p_offset, phdr[i].p_filesz);
-
-            if (i == 0) entry_point = ehdr->e_entry;
-        }
-    }
-
-    // Allocate user stack
-    uint64_t stack_top = 0x8000000000;
-    for (uint64_t addr = stack_top - (8 * PAGE_SIZE); addr < stack_top; addr += PAGE_SIZE) {
-        void *phys = pmm_alloc_page();
-        if (!phys) {
-            kprintf("%s: failed to allocate stack\n", name);
-            vmm_destroy_address_space(new_pml4);
-            kfree(elf_data);
-            return;
-        }
-        memset(phys, 0, PAGE_SIZE);
-        vmm_map_page(new_pml4, (void *)(addr + kernel_hhdm_offset), phys, PAGE_PRESENT | PAGE_WRITE | PAGE_USER);
-    }
-
-    kfree(elf_data);
-
-    // Create thread
-    thread_t *new_thread = thread_create_userspace(entry_point, new_pml4, 0, 0, NULL);
-    if (!new_thread) {
-        kprintf("%s: failed to create thread\n", name);
-        vmm_destroy_address_space(new_pml4);
-        return;
-    }
-
-    kprintf("Started: %s (PID: %d)\n", name, (int)new_thread->id);
 }
 
 static void cmd_lsmod() {
@@ -530,7 +435,7 @@ static void execute_command(char *cmd) {
     }
     else if (strcmp(argv[0], "dhcp") == 0) { dhcp_client_start(); kprintf("DHCP Sent.\n"); }
     else if (strcmp(argv[0], "reboot") == 0) outb(0x64, 0xFE);
-    else kprintf("Unknown command: %s\n", argv[0]);
+    else cmd_exec_bin(argv[0], argc, argv); 
     flush_out();
 }
 

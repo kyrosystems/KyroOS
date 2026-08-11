@@ -251,12 +251,12 @@ int kyrofs_add_file(const char *full_path, void *data, uint32_t size) {
 }
 
 void kyrofs_init(struct limine_module_response *mod_resp) {
-    (void)mod_resp;
     root_node = (kyrofs_ino_dirent_t *)kmalloc(sizeof(kyrofs_ino_dirent_t));
     if (!root_node) panic("kyrofs_init: kmalloc failed", NULL);
     memset(root_node, 0, sizeof(kyrofs_ino_dirent_t));
     strncpy(root_node->node.name, "/", 2);
     root_node->node.flags = VFS_DIRECTORY;
+    root_node->node.inode = vfs_get_next_inode();
     root_node->node.finddir = kyrofs_finddir;
     root_node->node.readdir = kyrofs_readdir;
     root_node->node.mkdir = kyrofs_mkdir;
@@ -266,6 +266,25 @@ void kyrofs_init(struct limine_module_response *mod_resp) {
     root_node->node.stat = kyrofs_stat;
     root_node->node.ioctl = kyrofs_ioctl;
     root_node->parent = NULL;
+
+    vfs_root = &root_node->node;
+
+    kyrofs_create_dir_recursive(vfs_root, "/bin");
+    kyrofs_create_dir_recursive(vfs_root, "/dev");
+    kyrofs_create_dir_recursive(vfs_root, "/tmp");
+
+    if (mod_resp) {
+        for (uint64_t i = 0; i < mod_resp->module_count; i++) {
+            struct limine_file *mod = mod_resp->modules[i];
+            const char *path = mod->path;
+            const char *colon = strchr(path, ':');
+            if (colon) path = colon + 1;
+            if (kyrofs_add_file(path, mod->address, (uint32_t)mod->size) == 0)
+                klog(LOG_INFO, "KyroFS: module %s (%u bytes)", path, (uint32_t)mod->size);
+            else
+                klog(LOG_ERROR, "KyroFS: failed to add %s", path);
+        }
+    }
 }
 
 vfs_node_t *get_kyrofs_root(void) { return root_node ? &root_node->node : NULL; }

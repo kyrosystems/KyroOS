@@ -2,6 +2,10 @@ section .text
 global thread_switch
 global userspace_trampoline
 global thread_starter
+global userspace_thread_starter
+
+userspace_thread_starter:
+    iretq
 
 extern kernel_hhdm_offset
 extern thread_entry
@@ -19,11 +23,9 @@ thread_switch:
     push r15
     
     ; Save old stack pointer
-    mov [rdi + 32], rsp ; old_thread->rsp = rsp
-
-    ; Check if we need to switch address space
-    mov rax, [rdi + 40] ; rax = old_thread->pml4
-    mov rbx, [rsi + 40] ; rbx = new_thread->pml4
+    mov [rdi + 40], rsp   ; old_thread->rsp = rsp
+    mov rax, [rdi + 32]   ; rax = old_thread->pml4
+    mov rbx, [rsi + 32]   ; rbx = new_thread->pml4
     cmp rax, rbx
     je .no_cr3_switch
 

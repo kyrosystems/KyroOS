@@ -2,11 +2,10 @@
 #define ELF_H
 
 #include <stdint.h>
-#include "vmm.h" // For pml4_t
+#include "vmm.h"
 
 #define EI_NIDENT 16
 
-// ELF Header
 typedef struct {
     unsigned char e_ident[EI_NIDENT];
     uint16_t      e_type;
@@ -24,7 +23,6 @@ typedef struct {
     uint16_t      e_shstrndx;
 } Elf64_Ehdr;
 
-// Program Header
 typedef struct {
     uint32_t p_type;
     uint32_t p_flags;
@@ -36,35 +34,29 @@ typedef struct {
     uint64_t p_align;
 } Elf64_Phdr;
 
-// e_ident[] indexes
-#define EI_MAG0       0
-#define EI_MAG1       1
-#define EI_MAG2       2
-#define EI_MAG3       3
-#define EI_CLASS      4
-#define EI_DATA       5
-#define EI_VERSION    6
+#define EI_MAG0        0
+#define EI_MAG1        1
+#define EI_MAG2        2
+#define EI_MAG3        3
+#define EI_CLASS       4
+#define EI_DATA        5
+#define EI_VERSION     6
 
-// e_ident[] values
-#define ELFMAG0       0x7f
-#define ELFMAG1       'E'
-#define ELFMAG2       'L'
-#define ELFMAG3       'F'
-#define ELFCLASS64    2
+#define ELFMAG0        0x7f
+#define ELFMAG1        'E'
+#define ELFMAG2        'L'
+#define ELFMAG3        'F'
+#define ELFCLASS64     2
 
-// e_type values
-#define ET_EXEC       2
-#define ET_REL        1
+#define ET_EXEC        2
+#define ET_REL         1
 
-// p_type values
-#define PT_LOAD       1
+#define PT_LOAD        1
 
-// p_flags values
-#define PF_X          1 // Execute
-#define PF_W          2 // Write
-#define PF_R          4 // Read
+#define PF_X           1
+#define PF_W           2
+#define PF_R           4
 
-// Section Header
 typedef struct {
     uint32_t sh_name;
     uint32_t sh_type;
@@ -78,7 +70,6 @@ typedef struct {
     uint64_t sh_entsize;
 } Elf64_Shdr;
 
-// Symbol Table Entry
 typedef struct {
     uint32_t st_name;
     uint8_t  st_info;
@@ -88,29 +79,27 @@ typedef struct {
     uint64_t st_size;
 } Elf64_Sym;
 
-// Relocation Entry (Addend)
 typedef struct {
     uint64_t r_offset;
     uint64_t r_info;
     int64_t  r_addend;
 } Elf64_Rela;
 
-// ELF64_R_SYM and ELF64_R_TYPE macros
-#define ELF64_R_SYM(info) ((info) >> 32)
+#define ELF64_R_SYM(info)  ((info) >> 32)
 #define ELF64_R_TYPE(info) ((info) & 0xFFFFFFFF)
 
-// Relocation types for x86-64
-#define R_X86_64_64       1
-#define R_X86_64_PC32     2
-#define R_X86_64_32       10
-#define R_X86_64_32S      11
+#define R_X86_64_64        1
+#define R_X86_64_PC32      2
+#define R_X86_64_32        10
+#define R_X86_64_32S       11
 
 typedef struct {
     uint64_t entry_point;
     uint64_t program_break;
+    int      success;
 } elf_load_result_t;
 
 elf_load_result_t elf_load(pml4_t* pml4, const uint8_t* elf_data);
 int elf_exec_as_thread(const char* path, int argc, char* argv[]);
 
-#endif // ELF_H
+#endif

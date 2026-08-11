@@ -29,6 +29,7 @@
 #include "tcp.h"
 #include "dhcp.h"
 #include "dns.h"
+#include "vmm.h"
 
 __attribute__((used, section(".limine_reqs"))) static volatile struct limine_hhdm_request hhdm_request = {.id = LIMINE_HHDM_REQUEST, .revision = 0};
 __attribute__((used, section(".limine_reqs"))) static volatile struct limine_framebuffer_request framebuffer_request = {.id = LIMINE_FRAMEBUFFER_REQUEST, .revision = 0};
@@ -43,6 +44,7 @@ void kmain_x64(void) {
     log_init();
     pmm_init(memmap_request.response, kernel_hhdm_offset);
     heap_init();
+    vmm_init();
     // Initialize the framebuffer if available
     if (framebuffer_request.response != NULL && framebuffer_request.response->framebuffer_count > 0) {
         fb_init(framebuffer_request.response->framebuffers[0]);

@@ -62,74 +62,69 @@ void vmm_switch_address_space(pml4_t *pml4) {
 }
 
 pml4_t *vmm_create_address_space() {
-  pml4_t *new_pml4_virt = (pml4_t *)vmm_phys_to_virt(pmm_alloc_page());
-  if (!new_pml4_virt) {
-    klog(LOG_ERROR, "VMM: Failed to allocate page for new PML4.");
-    return NULL;
-  }
+    pml4_t *new_pml4_virt = (pml4_t *)vmm_phys_to_virt(pmm_alloc_page());
+    if (!new_pml4_virt) {
+        klog(LOG_ERROR, "VMM: Failed to allocate page for new PML4.");
+        return NULL;
+    }
 
-  // Clear the lower (user) half of the new page map
-  memset(new_pml4_virt, 0, 256 * sizeof(uint64_t));
+    memset(new_pml4_virt, 0, 256 * sizeof(uint64_t));
 
-  // Copy the upper (kernel) half of the page map
-  memcpy(&new_pml4_virt->entries[256], &kernel_pml4->entries[256],
-         256 * sizeof(uint64_t));
+    pml4_t *src = kernel_pml4 ? kernel_pml4 : vmm_get_current_pml4();
+    memcpy(&new_pml4_virt->entries[256], &src->entries[256], 256 * sizeof(uint64_t));
 
-  return new_pml4_virt;
+    return new_pml4_virt;
 }
-
 void vmm_map_page(pml4_t *pml4_virt, void *virt, void *phys, uint64_t flags) {
-  uint64_t virt_addr = (uint64_t)virt;
-  uint64_t pml4_index = (virt_addr >> 39) & 0x1FF;
-  uint64_t pdpt_index = (virt_addr >> 30) & 0x1FF;
-  uint64_t pd_index = (virt_addr >> 21) & 0x1FF;
-  uint64_t pt_index = (virt_addr >> 12) & 0x1FF;
+    uint64_t virt_addr = (uint64_t)virt;
+    uint64_t pml4_index = (virt_addr >> 39) & 0x1FF;
+    uint64_t pdpt_index = (virt_addr >> 30) & 0x1FF;
+    uint64_t pd_index   = (virt_addr >> 21) & 0x1FF;
+    uint64_t pt_index   = (virt_addr >> 12) & 0x1FF;
 
-  pdpt_t *pdpt_virt;
-  if (!(pml4_virt->entries[pml4_index] & PAGE_PRESENT)) {
-    void *new_table_phys = pmm_alloc_page();
-    if (!new_table_phys)
-      panic("VMM: Out of memory for PDPT!", NULL);
-    pdpt_virt = (pdpt_t *)vmm_phys_to_virt((void *)new_table_phys);
-    memset(pdpt_virt, 0, PAGE_SIZE);
-    pml4_virt->entries[pml4_index] =
-        (uint64_t)new_table_phys | PAGE_PRESENT | PAGE_WRITE; // Removed PAGE_USER
-  } else {
-    pdpt_virt = (pdpt_t *)vmm_phys_to_virt(
-        (void *)(pml4_virt->entries[pml4_index] & PHYSICAL_ADDR_MASK));
-  }
+    uint64_t table_flags = PAGE_PRESENT | PAGE_WRITE | (flags & PAGE_USER);
 
-  pd_t *pd_virt;
-  if (!(pdpt_virt->entries[pdpt_index] & PAGE_PRESENT)) {
-    void *new_table_phys = pmm_alloc_page();
-    if (!new_table_phys)
-      panic("VMM: Out of memory for PD!", NULL);
-    pd_virt = (pd_t *)vmm_phys_to_virt((void *)new_table_phys);
-    memset(pd_virt, 0, PAGE_SIZE);
-    pdpt_virt->entries[pdpt_index] =
-        (uint64_t)new_table_phys | PAGE_PRESENT | PAGE_WRITE; // Removed PAGE_USER
-  } else {
-    pd_virt = (pd_t *)vmm_phys_to_virt(
-        (void *)(pdpt_virt->entries[pdpt_index] & PHYSICAL_ADDR_MASK));
-  }
+    pdpt_t *pdpt_virt;
+    if (!(pml4_virt->entries[pml4_index] & PAGE_PRESENT)) {
+        void *new_table_phys = pmm_alloc_page();
+        if (!new_table_phys) panic("VMM: Out of memory for PDPT!", NULL);
+        pdpt_virt = (pdpt_t *)vmm_phys_to_virt(new_table_phys);
+        memset(pdpt_virt, 0, PAGE_SIZE);
+        pml4_virt->entries[pml4_index] = (uint64_t)new_table_phys | table_flags;
+    } else {
+        pml4_virt->entries[pml4_index] |= (flags & PAGE_USER);
+        pdpt_virt = (pdpt_t *)vmm_phys_to_virt(
+            (void *)(pml4_virt->entries[pml4_index] & PHYSICAL_ADDR_MASK));
+    }
 
-  pt_t *pt_virt;
-  if (!(pd_virt->entries[pd_index] & PAGE_PRESENT)) {
-    void *new_table_phys = pmm_alloc_page();
-    if (!new_table_phys)
-      panic("VMM: Out of memory for PT!", NULL);
-    pt_virt = (pt_t *)vmm_phys_to_virt((void *)new_table_phys);
-    memset(pt_virt, 0, PAGE_SIZE);
-    pd_virt->entries[pd_index] =
-        (uint64_t)new_table_phys | PAGE_PRESENT | PAGE_WRITE; // Removed PAGE_USER
-  } else {
-    pt_virt = (pt_t *)vmm_phys_to_virt(
-        (void *)(pd_virt->entries[pd_index] & PHYSICAL_ADDR_MASK));
-  }
+    pd_t *pd_virt;
+    if (!(pdpt_virt->entries[pdpt_index] & PAGE_PRESENT)) {
+        void *new_table_phys = pmm_alloc_page();
+        if (!new_table_phys) panic("VMM: Out of memory for PD!", NULL);
+        pd_virt = (pd_t *)vmm_phys_to_virt(new_table_phys);
+        memset(pd_virt, 0, PAGE_SIZE);
+        pdpt_virt->entries[pdpt_index] = (uint64_t)new_table_phys | table_flags;
+    } else {
+        pdpt_virt->entries[pdpt_index] |= (flags & PAGE_USER);
+        pd_virt = (pd_t *)vmm_phys_to_virt(
+            (void *)(pdpt_virt->entries[pdpt_index] & PHYSICAL_ADDR_MASK));
+    }
 
-  pt_virt->entries[pt_index] = (uint64_t)phys | flags;
+    pt_t *pt_virt;
+    if (!(pd_virt->entries[pd_index] & PAGE_PRESENT)) {
+        void *new_table_phys = pmm_alloc_page();
+        if (!new_table_phys) panic("VMM: Out of memory for PT!", NULL);
+        pt_virt = (pt_t *)vmm_phys_to_virt(new_table_phys);
+        memset(pt_virt, 0, PAGE_SIZE);
+        pd_virt->entries[pd_index] = (uint64_t)new_table_phys | table_flags;
+    } else {
+        pd_virt->entries[pd_index] |= (flags & PAGE_USER);
+        pt_virt = (pt_t *)vmm_phys_to_virt(
+            (void *)(pd_virt->entries[pd_index] & PHYSICAL_ADDR_MASK));
+    }
 
-  __asm__ __volatile__("invlpg (%0)" ::"r"(virt_addr) : "memory");
+    pt_virt->entries[pt_index] = (uint64_t)phys | flags;
+    __asm__ __volatile__("invlpg (%0)" :: "r"(virt_addr) : "memory");
 }
 
 void vmm_map_page_current(void *virt, void *phys, uint64_t flags) {
