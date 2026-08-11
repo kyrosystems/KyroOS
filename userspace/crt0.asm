@@ -7,7 +7,8 @@ section .text
 _start:
     ; The stack expects argc and argv to be passed in registers RDI and RSI
     ; which are preserved/set by the kernel's iretq frame or trampoline.
-
+    pop rdi         ; argc
+    mov rsi, rsp    ; argv
     call main
 
     ; Exit syscall (0 for KyroOS)

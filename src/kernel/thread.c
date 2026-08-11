@@ -170,19 +170,13 @@ thread_t *thread_create_userspace(uint64_t entry_point, pml4_t *pml4,
 
   thread->user_stack_base = user_stack_vaddr_start;
 
-  // Also allocate a kernel stack for syscalls/interrupts
   thread->stack = kmalloc(KERNEL_STACK_SIZE);
   if (!thread->stack) {
     klog(LOG_ERROR, "Failed to allocate kernel stack for userspace thread.");
-
-    // The user stack is part of the address space, which we are about to
-    // destroy. We just need to free the physical pages.
     for (uint64_t i = 0; i < USER_STACK_SIZE; i += PAGE_SIZE) {
       void *vaddr = (void *)((uint64_t)user_stack_vaddr_start + i);
       void *phys_addr = vmm_unmap_page(thread->pml4, vaddr);
-      if (phys_addr) {
-        pmm_free_page(phys_addr);
-      }
+      if (phys_addr) pmm_free_page(phys_addr);
     }
     vmm_destroy_address_space(thread->pml4);
     kfree(thread);
@@ -195,19 +189,9 @@ thread_t *thread_create_userspace(uint64_t entry_point, pml4_t *pml4,
   thread->program_break = program_break;
   thread->initial_program_break = program_break;
 
-  // Initialize FD table
-  // Pre-allocate 0, 1, 2 for stdin, stdout, stderr
-  // We try to find a suitable device node
+  // Initialize FD table (stdin/stdout/stderr → /dev/console)
   vfs_node_t *console_node = vfs_resolve_path(vfs_root, "/dev/console");
-  if (!console_node)
-    console_node = vfs_resolve_path(vfs_root, "/dev/tty");
-
-  // If we still don't have a console node, implies system is not fully ready or
-  // VFS unpopulated But we need to let the thread run. If console_node is NULL,
-  // sys_write will fail for these FDs. However, for debugging, we might assume
-  // there's a kernel fallback if we pass a special node or flags? No, sys_write
-  // needs a valid node. Let's rely on finding /dev/console or tty. If missing,
-  // we log a warning.
+  if (!console_node) console_node = vfs_resolve_path(vfs_root, "/dev/tty");
 
   if (console_node) {
     for (int i = 0; i < 3; i++) {
@@ -217,15 +201,9 @@ thread_t *thread_create_userspace(uint64_t entry_point, pml4_t *pml4,
       thread->fd_table[i].data.file.flags = (i == 0) ? O_RDONLY : O_WRONLY;
     }
   } else {
-    klog(LOG_WARN, "Thread Create: Could not find /dev/console or /dev/tty for "
-                   "standard FDs.");
-    // Initialize as NONE, so userspace prints will fail silently
-    for (int i = 0; i < 3; i++) {
-      thread->fd_table[i].type = FD_TYPE_NONE;
-    }
+    klog(LOG_WARN, "Thread Create: Could not find /dev/console or /dev/tty.");
+    for (int i = 0; i < 3; i++) thread->fd_table[i].type = FD_TYPE_NONE;
   }
-
-  // Initialize the rest as empty
   for (int i = 3; i < MAX_FILES; i++) {
     thread->fd_table[i].type = FD_TYPE_NONE;
     thread->fd_table[i].data.file.node = NULL;
@@ -234,12 +212,46 @@ thread_t *thread_create_userspace(uint64_t entry_point, pml4_t *pml4,
     thread->fd_table[i].data.sock = NULL;
   }
 
-  // Open stdin, stdout, stderr
-  // FDs 0, 1, 2 initialized above if console found.
+  // --- Setup Userspace Stack with argc and argv ---
+  // User stack grows downwards. USER_STACK_TOP is the highest address.
+  uint64_t user_stack_current = USER_STACK_TOP;
 
-  // Set up the initial KERNEL stack for the new userspace thread.
-  // This stack is what `thread_switch` will restore. It needs to be
-  // crafted to eventually `iretq` to userspace.
+  // 1. Copy argv strings to userspace stack
+  uint64_t argv_pointers_on_user_stack[argc + 1];
+  for (int i = 0; i < argc; i++) {
+    size_t len = strlen(argv[i]) + 1;
+    user_stack_current -= len;
+    user_stack_current &= ~0xF;
+    vmm_memcpy_to_userspace(pml4, (void *)user_stack_current, argv[i], len);
+    argv_pointers_on_user_stack[i] = user_stack_current;
+  }
+  argv_pointers_on_user_stack[argc] = 0;
+
+  // 2. Copy argv array (pointers to strings) to userspace stack
+  user_stack_current -= ((argc + 1) * sizeof(uint64_t));
+  user_stack_current &= ~0xF;
+  vmm_memcpy_to_userspace(pml4, (void *)user_stack_current,
+                          argv_pointers_on_user_stack,
+                          (argc + 1) * sizeof(uint64_t));
+  uint64_t argv_ptr_for_userspace = user_stack_current;
+
+  // 3. Push argv pointer and argc onto the userspace stack.
+  //    Standard SysV AMD64 _start expects:
+  //      [RSP]     = argc
+  //      [RSP+8]   = argv
+  //      [RSP+16]  = envp (NULL)
+  user_stack_current -= sizeof(uint64_t);
+  user_stack_current &= ~0xF;
+  vmm_memcpy_to_userspace(pml4, (void *)user_stack_current,
+                          &argv_ptr_for_userspace, sizeof(uint64_t));
+
+  user_stack_current -= sizeof(uint64_t);
+  user_stack_current &= ~0xF;
+  uint64_t argc_u64 = (uint64_t)argc;
+  vmm_memcpy_to_userspace(pml4, (void *)user_stack_current,
+                          &argc_u64, sizeof(uint64_t));
+
+  // --- Set up the initial KERNEL stack for the new userspace thread ---
   uint64_t *kernel_stack_ptr =
       (uint64_t *)((uint64_t)thread->stack + KERNEL_STACK_SIZE);
 
@@ -247,81 +259,25 @@ thread_t *thread_create_userspace(uint64_t entry_point, pml4_t *pml4,
        "Userspace IRETQ frame setup: entry_point = %p, USER_STACK_TOP = %p",
        (void *)entry_point, (void *)USER_STACK_TOP);
 
-  // --- Setup Userspace Stack with argc and argv ---
-  // User stack grows downwards. USER_STACK_TOP is the highest address.
-  uint64_t user_stack_current = USER_STACK_TOP;
-
-  // 1. Copy argv strings to userspace stack
-  //    We need to copy the strings and then pointers to those strings.
-  //    The strings themselves should be at higher addresses (lower on stack)
-  //    and the argv array of pointers at lower addresses (higher on stack).
-
-  // Store actual argv strings
-  uint64_t argv_pointers_on_user_stack[argc + 1]; // Array to hold the VIRTUAL
-                                                  // addresses of the strings
-                                                  // (+1 for NULL)
-  for (int i = 0; i < argc; i++) {
-    size_t len = strlen(argv[i]) + 1; // +1 for null terminator
-    user_stack_current -= len;
-    // Align to 16 bytes (x86_64 stack alignment requirement before call)
-    user_stack_current &= ~0xF;
-
-    // Copy string to userspace stack
-    vmm_memcpy_to_userspace(pml4, (void *)user_stack_current, argv[i], len);
-    argv_pointers_on_user_stack[i] = user_stack_current;
-  }
-  argv_pointers_on_user_stack[argc] = 0; // Null terminate the argv array
-
-  // 2. Copy argv array (pointers to strings) to userspace stack
-  user_stack_current -=
-      ((argc + 1) * sizeof(uint64_t)); // Space for argc pointers + NULL
-  user_stack_current &= ~0xF;          // Align again
-  vmm_memcpy_to_userspace(pml4, (void *)user_stack_current,
-                          argv_pointers_on_user_stack,
-                          (argc + 1) * sizeof(uint64_t));
-  uint64_t argv_ptr_for_userspace = user_stack_current;
-
-  // 3. Push argc and argv pointer onto the userspace stack
-  //    The userspace_trampoline will set RDI = argc, RSI =
-  //    argv_ptr_for_userspace The IRETQ frame will restore RSP to
-  //    user_stack_current (which now points to the location of argc on stack)
-
-  // The arguments to main are passed in RDI (argc) and RSI (argv)
-  // The userspace_trampoline will pop these from the stack and put them into
-  // registers. So, we need to push argv_ptr_for_userspace, then argc, then the
-  // return address (which is main's entry_point). The stack looks like:
-  // ...
-  // argv[...strings...]
-  // NULL
-  // argv[0] -> string0
-  // argv[1] -> string1
-  // ...
-  // argv[argc-1] -> string(argc-1)
-  // argv_ptr_for_userspace
-  // argc
-  // entry_point (main) <-- this is what userspace_trampoline expects to pop
-  // first
-
   // --- IRETQ frame (survives thread_switch) ---
-  *--kernel_stack_ptr = 0x23;               // SS
-  *--kernel_stack_ptr = user_stack_current; // RSP
-  *--kernel_stack_ptr = 0x202;              // RFLAGS
-  *--kernel_stack_ptr = 0x1B;               // CS
-  *--kernel_stack_ptr = (uint64_t)entry_point;
+  *--kernel_stack_ptr = 0x23;               // SS  (Ring 3 data selector)
+  *--kernel_stack_ptr = user_stack_current; // RSP (points to argc)
+  *--kernel_stack_ptr = 0x202;              // RFLAGS (IF set)
+  *--kernel_stack_ptr = 0x1B;               // CS  (Ring 3 code selector)
+  *--kernel_stack_ptr = (uint64_t)entry_point; // RIP
 
   // --- Return address for thread_switch ---
-  // The `ret` in thread_switch will pop this value into RIP.
   *--kernel_stack_ptr = (uint64_t)userspace_thread_starter;
 
   // --- Callee-saved registers for thread_switch ---
   // thread_switch pops: r15, r14, r13, r12, rbx, rbp
-  // So we push them in order: rbp, rbx, r12, r13, r14, r15
-  *--kernel_stack_ptr = 0;                      // rbp
-  *--kernel_stack_ptr = (uint64_t)argc;         // rbx
-  *--kernel_stack_ptr = argv_ptr_for_userspace; // r12
-  *--kernel_stack_ptr = 0;                      // r13
-  *--kernel_stack_ptr = 0;                      // r14
-  *--kernel_stack_ptr = 0;                      // r15
+  // On first run these are just zero / dummy values.
+  *--kernel_stack_ptr = 0; // rbp
+  *--kernel_stack_ptr = 0; // rbx
+  *--kernel_stack_ptr = 0; // r12
+  *--kernel_stack_ptr = 0; // r13
+  *--kernel_stack_ptr = 0; // r14
+  *--kernel_stack_ptr = 0; // r15
 
   klog(LOG_INFO, "thread_create_userspace: thread ID %d created successfully",
        thread->id);
