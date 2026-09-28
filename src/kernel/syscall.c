@@ -1309,6 +1309,7 @@ static void sys_proc_list(struct registers *regs) {
     }
     do {
       if (count >= max_entries) break;
+      if (cur == t) { cur = cur->next; continue; } // caller already emitted
       if (cur->state == THREAD_DEAD) { cur = cur->next; continue; }
       buf[count].pid = cur->id;
       buf[count].uid = cur->uid;

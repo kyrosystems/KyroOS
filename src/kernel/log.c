@@ -48,7 +48,36 @@ void log_set_fg_color(uint32_t color) {
   current_fg_color = color;
 }
 
+/* Minimal ANSI CSI state for userspace TUIs (sysmon/editor):
+ * handles ESC [ 2 J (clear) and ESC [ H (home); other CSI sequences
+ * are consumed silently instead of printing garbage. */
+static int ansi_state = 0; /* 0=text, 1=seen ESC, 2=in CSI */
+
+static void ansi_consume(char c) {
+  if (ansi_state == 1) {
+    if (c == '[') { ansi_state = 2; return; }
+    ansi_state = 0;
+    if (c == 0x1B) ansi_state = 1;
+    return;
+  }
+  /* ansi_state == 2: collecting CSI until a final byte (@-~) */
+  if (c >= '@' && c <= '~') {
+    if (c == 'J') console_clear();
+    else if (c == 'H') { console_x = 0; console_y = 0; }
+    ansi_state = 0;
+    return;
+  }
+  /* parameter bytes (digits, ';', etc.) — ignore */
+}
+
 void klog_putchar(char c) {
+  if (ansi_state != 0) { ansi_consume(c); return; }
+
+  if (c == 0x1B) {
+    ansi_state = 1;
+    return;
+  }
+
   if (c == '\n') {
     console_x = 0;
     console_y++;
