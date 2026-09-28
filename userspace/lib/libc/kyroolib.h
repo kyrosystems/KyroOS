@@ -223,6 +223,7 @@ static inline int close(int fd) {
   return (int)syscall(SYS_CLOSE, (uint64_t)fd, 0, 0);
 }
 static inline int read(int fd, void *buf, size_t size) {
+  print_flush(); /* console prompts must be visible before blocking on input */
   return (int)syscall(SYS_READ, (uint64_t)fd, (uint64_t)buf, (uint64_t)size);
 }
 

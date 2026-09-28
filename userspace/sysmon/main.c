@@ -215,6 +215,7 @@ int main(int argc, char **argv) {
                     case 'k': {
                         move_to(27, 1);
                         print("kill pid> ");
+                        print_flush(); /* prompt has no newline */
                         char cmdbuf[12];
                         cmdbuf[0] = '\0';
                         int got = 0;

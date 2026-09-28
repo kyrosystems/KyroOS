@@ -11,4 +11,9 @@ uint64_t timer_get_ticks(); // From isr.h/timer.c but declared here for convenie
 
 void scheduler_print_threads(); // New function for 'ps' command
 
+// Keyboard-event focus: while a userspace program runs, the shell must not
+// consume console events (it would steal e.g. 'q' from sysmon). Set by
+// thread_create_userspace, cleared by the scheduler reaper on exit.
+extern thread_t *console_focus;
+
 #endif // SCHEDULER_H

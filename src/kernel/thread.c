@@ -186,6 +186,7 @@ thread_t *thread_create_userspace(uint64_t entry_point, pml4_t *pml4,
   *--sp = (uint64_t)userspace_thread_starter;
   for (int i = 0; i < 6; i++) *--sp = 0;
   thread->rsp = (uint64_t)sp;
+  console_focus = thread; // userspace program owns the console while it runs
   klog(LOG_INFO, "thread_create_userspace: thread ID %d created successfully",
        thread->id);
   scheduler_add_thread(thread);

@@ -43,8 +43,9 @@ static void selftest_thread(void *arg) {
         self->name[sizeof(self->name) - 1] = '\0'; }
     klog(LOG_INFO, "SELFTEST: starting (%d checks)", 8);
 
-    /* T1: debugmode default is enabled */
-    st_report("debugmode_default_on", epstein == 1, NULL);
+    /* T1: debugmode defaults OFF (debug logging floods the console and
+       costs a framebuffer flush per syscall; enable via `debugmode on`). */
+    st_report("debugmode_default_off", epstein == 0, NULL);
 
     /* T2: debugmode set/get round-trip (this thread runs as root/uid 0) */
     {

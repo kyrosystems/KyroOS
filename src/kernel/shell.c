@@ -451,6 +451,12 @@ void shell_main(void *arg) {
     (void)arg; if (vfs_root) { cwd_node = vfs_root; strncpy(cwd_path, "/", 2); }
     console_clear(); cmd_kyrofetch();
     while (1) {
+        /* While a userspace program owns the console (input focus), the
+           shell must neither print its prompt nor touch keyboard events. */
+        while (console_focus && console_focus != get_current_thread()) {
+            net_poll_all();
+            schedule(); // yield until the program exits (reaper clears focus)
+        }
         net_poll_all();
         // Green '>' prompt using direct log functions
         log_set_fg_color(COLOR_GREEN);
@@ -459,6 +465,9 @@ void shell_main(void *arg) {
         kprintf(" %s $ ", cwd_path);
         flush_out(); fb_flush();
         while(1) {
+            if (console_focus && console_focus != get_current_thread()) {
+                net_poll_all(); continue; // a child program took over the console
+            }
             net_poll_all(); event_t ev; if (event_pop(&ev)) {
                 if (ev.type == EVENT_KEY_DOWN) {
                     char c = (char)ev.data1; uint8_t sc = (uint8_t)ev.data2;

@@ -843,6 +843,13 @@ static void sys_input_poll_event(struct registers *regs) {
       return;
   }
 
+  /* Keyboard focus: while a userspace program runs, the shell thread must
+     not race it for console events (that made e.g. sysmon unable to see 'q'). */
+  {
+    thread_t *self = get_current_thread();
+    if (console_focus && console_focus != self) { regs->rax = 0; return; }
+  }
+
   if (event_pop(user_event))
     regs->rax = 1;
   else

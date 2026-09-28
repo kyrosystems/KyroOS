@@ -10,7 +10,8 @@
 #include "kstring.h"
 #include "socket.h"
 
-static thread_t *ready_queue = NULL; 
+static thread_t *ready_queue = NULL;
+thread_t *console_focus = NULL; // keyboard focus owner (see scheduler.h) 
 thread_t *current_thread = NULL;
 
 void scheduler_init() {
@@ -64,6 +65,7 @@ static void scheduler_reap_dead(thread_t *guard) {
       if (ready_queue == cur) {
         ready_queue = (cur->next == cur) ? NULL : cur->next;
       }
+      if (console_focus == cur) console_focus = NULL;
       kfree(cur);
       klog(LOG_DEBUG, "REAPER: reaped dead thread (address space freed)");
     } else {
