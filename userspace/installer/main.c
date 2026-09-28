@@ -1,5 +1,6 @@
 #include <kyroolib.h>
 #include <tui/tui.h>
+#include <ide.h>
 
 #define BG_COLOR        0x0000AA
 #define TITLE_BG_COLOR  0xAAAAAA
@@ -33,11 +34,40 @@ static void draw_footer(fb_info_t *fb) {
 }
 
 static void detect_disks() {
+    /* Real detection: enumerate /dev, query IDE geometry via ioctl.
+       No hardcoded sizes - unknown devices are skipped, not faked. */
     disk_count = 0;
-    strcpy(disks[0].name, "/dev/sda");
-    disks[0].size_mb = 8192;
-    disks[0].has_partitions = 0;
-    disk_count++;
+
+    int dev_fd = open("/dev", O_RDONLY);
+    if (dev_fd < 0) {
+        strcpy(status_msg, "Error: cannot open /dev");
+        return;
+    }
+
+    struct dirent dir_entry;
+    int index = 0;
+    while (readdir(dev_fd, index++, &dir_entry) > 0 && disk_count < 4) {
+        char dev_path[256];
+        sprintf(dev_path, "/dev/%s", dir_entry.name);
+
+        int fd = open(dev_path, O_RDONLY);
+        if (fd < 0) continue;
+
+        ide_disk_info_t info;
+        if (ioctl(fd, IDE_IOCTL_GET_DISK_INFO, &info) == 0 &&
+            info.total_sectors > 0) {
+            strcpy(disks[disk_count].name, dev_path);
+            disks[disk_count].size_mb =
+                (uint32_t)((info.total_sectors * info.bytes_per_sector)
+                           / (1024 * 1024));
+            disks[disk_count].has_partitions = 0;
+            disk_count++;
+        }
+        close(fd);
+    }
+    close(dev_fd);
+
+    if (disk_count == 0) strcpy(status_msg, "No installable disks detected");
 }
 
 static void draw_step_welcome(fb_info_t *fb) {

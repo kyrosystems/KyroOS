@@ -8,6 +8,7 @@
 #include "vmm.h"    
 #include <stddef.h> 
 #include "kstring.h"
+#include "socket.h"
 
 static thread_t *ready_queue = NULL; 
 thread_t *current_thread = NULL;
@@ -31,6 +32,47 @@ void scheduler_add_thread(thread_t *thread) {
 }
 
 thread_t *get_current_thread() { return current_thread; }
+
+// Reap THREAD_DEAD threads: free kernel stack, fd table (sockets) and the
+// user address space. Without this every exited process leaked its whole
+// address space (~MBs per command). Called from schedule() after a context
+// switch, in the resumed thread's context, with interrupts disabled.
+static void scheduler_reap_dead(thread_t *guard) {
+  if (!ready_queue) return;
+  /* Count nodes once so the ring walk is always bounded. */
+  int count = 0;
+  thread_t *c = ready_queue;
+  do { count++; c = c->next; } while (c && c != ready_queue && count < 1024);
+  if (count >= 1024) return; /* ring corrupt: refuse to walk */
+  thread_t *prev = ready_queue;
+  thread_t *cur = ready_queue->next;
+  for (int i = 0; i < count && cur && ready_queue; i++) {
+    thread_t *next = cur->next;
+    if (cur->state == THREAD_DEAD && cur != guard) {
+      for (int f = 0; f < MAX_FILES; f++) {
+        if (cur->fd_table[f].type == FD_TYPE_SOCKET && cur->fd_table[f].data.sock) {
+          sock_close(cur->fd_table[f].data.sock);
+          cur->fd_table[f].type = FD_TYPE_NONE;
+        }
+      }
+      /* Destroy the user address space unless it is the active CR3
+         (kernel threads share the kernel pml4 and must never free it). */
+      if (cur->pml4 && cur->pml4 != vmm_get_current_pml4()) {
+        vmm_destroy_address_space(cur->pml4);
+      }
+      if (cur->stack) kfree(cur->stack);
+      prev->next = cur->next;
+      if (ready_queue == cur) {
+        ready_queue = (cur->next == cur) ? NULL : cur->next;
+      }
+      kfree(cur);
+      klog(LOG_DEBUG, "REAPER: reaped dead thread (address space freed)");
+    } else {
+      prev = cur;
+    }
+    cur = next;
+  }
+}
 
 void schedule() {
   disable_interrupts();
@@ -66,6 +108,9 @@ void schedule() {
     current_thread = next_thread;
     if (next_thread->stack) tss_set_stack((uint64_t)next_thread->stack + KERNEL_STACK_SIZE);
     thread_switch(old_thread, next_thread);
+    /* Running again in next_thread's context: safe to free abandoned
+       dead threads (old_thread included if it exited). */
+    scheduler_reap_dead(get_current_thread());
   }
   enable_interrupts();
 }
