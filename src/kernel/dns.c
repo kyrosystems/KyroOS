@@ -125,12 +125,13 @@ uint32_t dns_resolve(const char *hostname) {
     size_t total = (size_t)(qptr - buf);
     udp_send_packet(dns_server_ip, DNS_LOCAL_PORT, DNS_PORT, buf, total);
 
-    /* Block until reply */
-    int timeout = DNS_TIMEOUT;
-    while (!dns_got_reply && timeout-- > 0) {
-        waitqueue_add(&dns_wq, get_current_thread());
-        get_current_thread()->state = THREAD_BLOCKED;
-        schedule();
+    /* Wait for reply with a deadline. A permanently blocked thread is
+       never woken to re-check its timeout, so use poll-yield with a
+       tick deadline instead (same pattern as sock_recvfrom). */
+    uint64_t deadline_ticks = timer_get_ticks() + (DNS_TIMEOUT / 10000);
+    while (!dns_got_reply) {
+        if (timer_get_ticks() >= deadline_ticks) break;
+        schedule(); /* yield CPU; DNS replies arrive via UDP poll path */
     }
 
     if (!dns_got_reply) {

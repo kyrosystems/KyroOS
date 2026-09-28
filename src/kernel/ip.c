@@ -45,6 +45,37 @@ static uint16_t ip_checksum(const void *data, size_t len) {
 
 void ip_send_packet(net_dev_t *net_dev, uint32_t dest_ip, uint8_t protocol,
                     const uint8_t *payload, size_t payload_size) {
+    /* Loopback traffic (127.0.0.0/8): build a full Ethernet+IP frame and
+       hand it to the lo device, which loops it back into the RX path. */
+    if ((dest_ip & 0xFF000000) == 0x7F000000) {
+        extern net_dev_t *net_get_loopback(void);
+        net_dev_t *lo = net_get_loopback();
+        if (!lo) return;
+        size_t ip_size  = sizeof(ipv4_header_t) + payload_size;
+        size_t eth_size = sizeof(ethernet_header_t) + ip_size;
+        uint8_t *buf = (uint8_t *)kmalloc(eth_size);
+        if (!buf) return;
+        memset(buf, 0, eth_size);
+        ethernet_header_t *eth = (ethernet_header_t *)buf;
+        ipv4_header_t     *ip  = (ipv4_header_t *)(buf + sizeof(ethernet_header_t));
+        uint8_t           *pld = buf + sizeof(ethernet_header_t) + sizeof(ipv4_header_t);
+        memcpy(eth->src_mac, lo->mac_addr, 6);
+        memcpy(eth->dest_mac, lo->mac_addr, 6);
+        eth->ether_type = __builtin_bswap16(0x0800);
+        ip->version        = 4;
+        ip->ihl            = 5;
+        ip->total_length   = __builtin_bswap16(ip_size);
+        ip->time_to_live   = 64;
+        ip->protocol       = protocol;
+        ip->src_ip         = __builtin_bswap32(0x7F000001);
+        ip->dest_ip        = __builtin_bswap32(dest_ip);
+        ip->header_checksum = 0;
+        ip->header_checksum = ip_checksum(ip, sizeof(ipv4_header_t));
+        memcpy(pld, payload, payload_size);
+        lo->send_packet(lo, buf, eth_size);
+        kfree(buf);
+        return;
+    }
     if (!net_dev) net_dev = network_devices;
     if (!net_dev) return;
 
@@ -129,7 +160,8 @@ void ip_handle_packet(net_dev_t *net_dev, const uint8_t *packet, size_t size) {
     if (ip->version != 4) return;
 
     uint32_t dip = __builtin_bswap32(ip->dest_ip);
-    if (local_ip != 0 && dip != local_ip && dip != 0xFFFFFFFF) return;
+    if (dip != 0x7F000001 &&
+        local_ip != 0 && dip != local_ip && dip != 0xFFFFFFFF) return;
 
     size_t        hlen   = ip->ihl * 4;
     const uint8_t *payload = packet + hlen;

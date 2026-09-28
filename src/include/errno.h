@@ -48,6 +48,7 @@
 #define EADDRINUSE  98  /* Address already in use */
 #define ENETDOWN    100 /* Network is down */
 #define ENETUNREACH 101 /* Network is unreachable */
+#define ENOTSOCK     88 /* Socket operation on non-socket */
 #define ENETRESET   102 /* Network dropped connection because of reset */
 #define ECONNABORTED 103 /* Software caused connection abort */
 #define ECONNRESET  104 /* Connection reset by peer */
@@ -60,6 +61,11 @@
 #define ECONNREFUSED 111 /* Connection refused */
 #define EHOSTDOWN   112 /* Host is down */
 #define EHOSTUNREACH 113 /* No route to host */
+#define ENOTSOCK    88 /* Socket operation on non-socket */
+#define EDESTADDRREQ 55 /* Destination address required */
+#define ENOPROTOOPT  92 /* Protocol not available */
+#define EOPNOTSUPP   95 /* Operation not supported */
+#define EAFNOSUPPORT 97 /* Address family not supported by protocol */
 #define EALREADY    114 /* Operation already in progress */
 #define EINPROGRESS 115 /* Operation now in progress */
 #define ESTALE      116 /* Stale NFS file handle */

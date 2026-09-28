@@ -1,5 +1,8 @@
 #include "socket.h"
+#include "errno.h"
 #include "heap.h"
+#include "isr.h" // timer_get_ticks
+#include "ip.h"
 #include "kstring.h"
 #include "log.h"
 #include "net.h"
@@ -11,10 +14,18 @@
 
 socket_t *active_sockets = NULL;
 
+/* Full network service tick from blocking receive paths: drain NIC RX
+ * rings and drive ARP/DHCP retransmissions, so a ping (or any datagram
+ * wait) makes progress even when every other thread is blocked. */
+static void sockets_poll_nics(void) {
+    extern void net_poll(void);
+    net_poll();
+}
+
 /* ── UDP receive handler (called from UDP layer) ─────────────────────────── */
 void sock_udp_receive_packet_handler(net_dev_t *net_dev, const ipv4_header_t *ip_hdr,
                                      udp_header_t *udp_hdr, const uint8_t *data, size_t len) {
-    (void)net_dev; (void)ip_hdr;
+    (void)net_dev;
 
     uint16_t dst_port = __builtin_bswap16(udp_hdr->dest_port);
 
@@ -32,13 +43,42 @@ void sock_udp_receive_packet_handler(net_dev_t *net_dev, const ipv4_header_t *ip
                          - sock->proto_data.udp_data.recv_data_len;
             if (len > space) {
                 klog(LOG_WARN, "SOCKET: UDP recv buffer overflow, dropping.");
+                sock->rx_dropped_ctr++;
                 return;
             }
+            /* Record datagram source for recvfrom() */
+            if (ip_hdr)
+                sock->recv_src_ip = __builtin_bswap32(ip_hdr->src_ip);
+            sock->recv_src_port = __builtin_bswap16(udp_hdr->src_port);
             memcpy(sock->proto_data.udp_data.recv_buffer
                    + sock->proto_data.udp_data.recv_data_len, data, len);
             sock->proto_data.udp_data.recv_data_len += len;
             waitqueue_wakeup_all(&sock->waiting_threads);
             return;
+        }
+        sock = sock->next;
+    }
+}
+
+/* ── RAW (ICMP) delivery: route echo replies to raw ICMP sockets ─────────── */
+void sock_raw_icmp_receive(net_dev_t *net_dev, const ipv4_header_t *ip_hdr,
+                           const uint8_t *data, size_t len) {
+    (void)net_dev;
+    socket_t *sock = active_sockets;
+    while (sock) {
+        if (sock->type == SOCK_RAW && sock->protocol == IPPROTO_ICMP) {
+            size_t space = sock->proto_data.udp_data.recv_buffer_size
+                         - sock->proto_data.udp_data.recv_data_len;
+            if (len > space) {
+                sock = sock->next;
+                continue;
+            }
+            sock->recv_src_ip = __builtin_bswap32(ip_hdr ? ip_hdr->src_ip : 0);
+            sock->recv_src_port = 0;
+            memcpy(sock->proto_data.udp_data.recv_buffer
+                   + sock->proto_data.udp_data.recv_data_len, data, len);
+            sock->proto_data.udp_data.recv_data_len += len;
+            waitqueue_wakeup_all(&sock->waiting_threads);
         }
         sock = sock->next;
     }
@@ -71,8 +111,10 @@ socket_t *sock_create(int domain, int type, int protocol) {
         klog(LOG_ERROR, "SOCKET: Unsupported domain %d", domain);
         return NULL;
     }
-    if ((type != SOCK_STREAM && type != SOCK_DGRAM) ||
-        (protocol != IPPROTO_UDP && protocol != IPPROTO_TCP)) {
+    int is_udp = (type == SOCK_DGRAM && (protocol == IPPROTO_UDP || protocol == 0));
+    int is_tcp = (type == SOCK_STREAM && (protocol == IPPROTO_TCP || protocol == 0));
+    int is_raw = (type == SOCK_RAW && protocol == IPPROTO_ICMP);
+    if (!is_udp && !is_tcp && !is_raw) {
         klog(LOG_ERROR, "SOCKET: Unsupported type/protocol %d/%d", type, protocol);
         return NULL;
     }
@@ -87,21 +129,23 @@ socket_t *sock_create(int domain, int type, int protocol) {
     sock->state    = SOCK_STATE_CLOSED;
     waitqueue_init(&sock->waiting_threads);
 
-    if (protocol == IPPROTO_UDP) {
+    if (is_udp || is_raw) {
+        /* Datagram buffer shared by UDP and RAW (ICMP) sockets */
         sock->proto_data.udp_data.recv_buffer_size = 4096;
         sock->proto_data.udp_data.recv_buffer =
             (uint8_t *)kmalloc(sock->proto_data.udp_data.recv_buffer_size);
         if (!sock->proto_data.udp_data.recv_buffer) { kfree(sock); return NULL; }
         sock->proto_data.udp_data.recv_data_len = 0;
         sock->proto_data.udp_data.recv_read_idx = 0;
-    } else if (protocol == IPPROTO_TCP) {
+    } else if (is_tcp) {
         sock->proto_data.tcp_tcb = tcp_create_tcb();
         if (!sock->proto_data.tcp_tcb) { kfree(sock); return NULL; }
     }
 
     sock->next    = active_sockets;
     active_sockets = sock;
-    klog(LOG_INFO, "SOCKET: Created (%s).", protocol == IPPROTO_UDP ? "UDP" : "TCP");
+    klog(LOG_INFO, "SOCKET: Created (%s).",
+         is_tcp ? "TCP" : (is_raw ? "RAW/ICMP" : "UDP"));
     return sock;
 }
 
@@ -126,7 +170,7 @@ int sock_bind(socket_t *sock, const sockaddr_in_t *addr) {
         klog(LOG_INFO, "SOCKET: UDP bound to port %d.", __builtin_bswap16(addr->sin_port));
         return 0;
     }
-    /* TCP bind */
+    /* TCP / RAW bind */
     memcpy(&sock->local_addr, addr, sizeof(sockaddr_in_t));
     sock->state = SOCK_STATE_BOUND;
     return 0;
@@ -153,7 +197,10 @@ int sock_connect(socket_t *sock, const sockaddr_in_t *addr) {
         }
         return ret;
     }
-    return -1;
+    /* RAW (ICMP): record default destination, like unconnected UDP */
+    memcpy(&sock->remote_addr, addr, sizeof(sockaddr_in_t));
+    sock->state = SOCK_STATE_CONNECTED;
+    return 0;
 }
 
 /* ── sock_send ───────────────────────────────────────────────────────────── */
@@ -183,6 +230,8 @@ int sock_recv(socket_t *sock, void *buf, size_t len, int flags) {
 
     if (sock->protocol == IPPROTO_UDP) {
         while (sock->proto_data.udp_data.recv_data_len == 0) {
+            sockets_poll_nics();
+            if (sock->proto_data.udp_data.recv_data_len != 0) break;
             waitqueue_add(&sock->waiting_threads, get_current_thread());
             get_current_thread()->state = THREAD_BLOCKED;
             schedule();
@@ -203,6 +252,125 @@ int sock_recv(socket_t *sock, void *buf, size_t len, int flags) {
         return tcp_recv_tcb(sock->proto_data.tcp_tcb, buf, len);
     }
     return -1;
+}
+
+/* ── Datagram send with explicit destination (sendto) ─────────────────── */
+int sock_sendto(socket_t *sock, const void *buf, size_t len, int flags,
+                const sockaddr_in_t *dest_addr) {
+    if (!sock || !buf || len == 0) return -EINVAL;
+    (void)flags;
+
+    if (sock->protocol == IPPROTO_UDP) {
+        uint32_t dest = dest_addr ? dest_addr->sin_addr : sock->remote_addr.sin_addr;
+        uint16_t dport = dest_addr ? dest_addr->sin_port : sock->remote_addr.sin_port;
+        if (dest == 0) return -EDESTADDRREQ;
+        if (!network_devices) return -ENETDOWN;
+        udp_send_packet(dest,
+                        sock->local_addr.sin_port,
+                        dport,
+                        (const uint8_t *)buf, len);
+        return (int)len;
+    }
+    if (sock->type == SOCK_RAW && sock->protocol == IPPROTO_ICMP) {
+        uint32_t dest = dest_addr ? dest_addr->sin_addr : sock->remote_addr.sin_addr;
+        if (dest == 0) return -EDESTADDRREQ;
+        if (!network_devices) return -ENETDOWN;
+        /* ping builds the full ICMP message (header + checksum) itself;
+         * raw ICMP send is an IP datagram pass-through */
+        ip_send_packet(network_devices, dest, IP_PROTOCOL_ICMP,
+                       (const uint8_t *)buf, len);
+        return (int)len;
+    }
+    if (sock->protocol == IPPROTO_TCP) return sock_send(sock, buf, len, flags);
+    return -EINVAL;
+}
+
+/* ── Datagram receive with source (recvfrom) ───────────────────────────── */
+int sock_recvfrom(socket_t *sock, void *buf, size_t len, int flags,
+                  sockaddr_in_t *src_addr, socklen_t *addrlen) {
+    if (!sock || !buf || len == 0) return -EINVAL;
+    (void)flags;
+
+    if (sock->type == SOCK_RAW || sock->protocol == IPPROTO_UDP) {
+        uint64_t deadline_ticks = 0;
+        if (sock->recv_timeout_ms)
+            deadline_ticks = timer_get_ticks() + sock->recv_timeout_ms / 10;
+        while (sock->proto_data.udp_data.recv_data_len == 0) {
+            if (sock->state == SOCK_STATE_CLOSED) return -EBADF;
+            sockets_poll_nics(); /* deliver pending packets before waiting */
+            if (sock->proto_data.udp_data.recv_data_len != 0) break;
+            if (deadline_ticks) {
+                /* With a timeout we cannot block permanently: a blocked
+                   thread is never woken to re-check its deadline (no
+                   timer-based wakeup). Yield instead, staying runnable.
+                   MUST mark ourselves READY: schedule() only scans for
+                   READY threads, a RUNNING thread would starve. */
+                if (timer_get_ticks() >= deadline_ticks) return -EAGAIN;
+                get_current_thread()->state = THREAD_READY;
+                schedule();
+            } else {
+                /* No timeout: proper block until packet/shutdown wake */
+                waitqueue_add(&sock->waiting_threads, get_current_thread());
+                get_current_thread()->state = THREAD_BLOCKED;
+                schedule();
+            }
+        }
+        size_t to_copy = len < sock->proto_data.udp_data.recv_data_len
+                         ? len : sock->proto_data.udp_data.recv_data_len;
+        memcpy(buf,
+               sock->proto_data.udp_data.recv_buffer
+               + sock->proto_data.udp_data.recv_read_idx,
+               to_copy);
+        sock->proto_data.udp_data.recv_read_idx  += to_copy;
+        sock->proto_data.udp_data.recv_data_len  -= to_copy;
+        if (sock->proto_data.udp_data.recv_data_len == 0)
+            sock->proto_data.udp_data.recv_read_idx = 0;
+
+        if (src_addr) {
+            memset(src_addr, 0, sizeof(sockaddr_in_t));
+            src_addr->sin_family = AF_INET;
+            src_addr->sin_port   = __builtin_bswap16(sock->recv_src_port);
+            src_addr->sin_addr   = sock->recv_src_ip;
+        }
+        if (addrlen) *addrlen = sizeof(sockaddr_in_t);
+        return (int)to_copy;
+    }
+    if (sock->protocol == IPPROTO_TCP) return sock_recv(sock, buf, len, flags);
+    return -EINVAL;
+}
+
+/* ── sock_shutdown ─────────────────────────────────────────────────────── */
+int sock_shutdown(socket_t *sock, int how) {
+    if (!sock) return -EBADF;
+    if (how != 0 && how != 1 && how != 2) return -EINVAL;
+    if (sock->protocol == IPPROTO_TCP && sock->proto_data.tcp_tcb)
+        tcp_close_tcb(sock->proto_data.tcp_tcb);
+    sock->state = SOCK_STATE_CLOSED;
+    waitqueue_wakeup_all(&sock->waiting_threads);
+    return 0;
+}
+
+/* ── sock_getsockname ─────────────────────────────────────────────────── */
+int sock_getsockname(socket_t *sock, sockaddr_in_t *addr, socklen_t *addrlen) {
+    if (!sock || !addr) return -EBADF;
+    memcpy(addr, &sock->local_addr, sizeof(sockaddr_in_t));
+    if (addrlen) *addrlen = sizeof(sockaddr_in_t);
+    return 0;
+}
+
+/* ── sock_setsockopt ─────────────────────────────────────────────────── */
+int sock_setsockopt(socket_t *sock, int level, int optname,
+                    const void *optval, socklen_t optlen) {
+    if (!sock) return -EBADF;
+    if (level != SOL_SOCKET) return -ENOPROTOOPT;
+    if (optlen < sizeof(struct timeval) || !optval) return -EINVAL;
+    const struct timeval *tv = (const struct timeval *)optval;
+    uint32_t ms = (uint32_t)tv->tv_sec * 1000 + (uint32_t)tv->tv_usec / 1000;
+    switch (optname) {
+        case SO_RCVTIMEO: sock->recv_timeout_ms = ms; return 0;
+        case SO_SNDTIMEO: sock->snd_timeout_ms = ms; return 0;
+        default: return -ENOPROTOOPT;
+    }
 }
 
 /* ── sock_listen / sock_accept (TCP server — stub, not needed for client) ── */

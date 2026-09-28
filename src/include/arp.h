@@ -45,6 +45,8 @@ typedef struct arp_pending_entry {
     uint8_t  data[ARP_PENDING_MAX_PKT_LEN];
     size_t   len;
     int      used;
+    uint64_t last_req_ticks; // last ARP request sent (100 Hz ticks)
+    uint8_t  retries;
 } arp_pending_entry_t;
 
 void     arp_init();
@@ -54,5 +56,6 @@ uint8_t *arp_lookup_mac(uint32_t ip_addr);
 void     arp_queue_packet(uint32_t dest_ip, const uint8_t *data, size_t len);
 void     arp_flush_pending(uint32_t resolved_ip, const uint8_t *mac);
 void     arp_update_cache(uint32_t ip_addr, const uint8_t mac_addr[6]);
+void     arp_poll(); // retransmit pending ARP requests (call from main loop)
 
 #endif // ARP_H

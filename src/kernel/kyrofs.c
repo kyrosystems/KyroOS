@@ -100,6 +100,16 @@ int kyrofs_create_node(vfs_node_t *parent, char *name, uint32_t flags) {
     new_de->node.name[MAX_FILENAME_LEN - 1] = '\0';
     new_de->node.flags = flags;
     new_de->node.inode = vfs_get_next_inode();
+    // ownership + mode: creator's creds, default mode minus umask
+    {
+        extern thread_t *get_current_thread(void);
+        thread_t *ct = get_current_thread();
+        uint32_t base = (flags & VFS_DIRECTORY) ? DEFAULT_DIR_MODE : DEFAULT_FILE_MODE;
+        uint16_t fmode = base & ~(ct ? ct->umask : 022);
+        new_de->node.uid = ct ? ct->euid : 0;
+        new_de->node.gid = ct ? ct->egid : 0;
+        new_de->node.mode = fmode;
+    }
 
     if (flags & VFS_FILE) {
         kyrofs_file_content_t *content = (kyrofs_file_content_t *)kmalloc(sizeof(kyrofs_file_content_t));
@@ -187,7 +197,9 @@ static int kyrofs_stat(vfs_node_t *node, struct stat *stat_buf) {
     if (node->flags & VFS_FILE) stat_buf->st_mode |= S_IFREG;
     else if (node->flags & VFS_DIRECTORY) stat_buf->st_mode |= S_IFDIR;
     else if (node->flags & VFS_CHARDEVICE) stat_buf->st_mode |= S_IFREG;
-    stat_buf->st_mode |= 0755;
+    stat_buf->st_mode |= (node->mode ? (node->mode & 0777) : 0755);
+    stat_buf->st_uid = node->uid;
+    stat_buf->st_gid = node->gid;
     return 0;
 }
 

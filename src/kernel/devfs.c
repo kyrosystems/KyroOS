@@ -24,6 +24,7 @@ uint32_t console_write(vfs_node_t *node, uint64_t offset, uint32_t size,
   memcpy(str, buffer, size);
   str[size] = '\0';
   klog_print_str(str, true); // Use klog_print_str equivalent and flush immediately
+  serial_print(str); // mirror userspace console output to COM1 (testable headless)
   kfree(str);
   return size;
 }

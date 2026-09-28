@@ -84,7 +84,9 @@ static void e1000_read_mac(e1000_t *d, uint8_t mac[6]) {
 
 static void e1000_send_packet(net_dev_t *dev, const uint8_t *data, size_t len) {
     e1000_t *d = (e1000_t *)dev;
-    if (len > E1000_TX_BUF_SIZE) len = E1000_TX_BUF_SIZE;
+    if (len > E1000_TX_BUF_SIZE) { dev->tx_errors++; len = E1000_TX_BUF_SIZE; }
+    dev->tx_packets++;
+    dev->tx_bytes += len;
 
     uint32_t i = d->tx_ptr;
     memcpy(d->tx_buffers + (i * E1000_TX_BUF_SIZE), data, len);
@@ -113,6 +115,8 @@ void e1000_poll(net_dev_t *dev, uint8_t *buffer, size_t size) {
         uint16_t len = d->rx_ring[d->rx_ptr].length;
 
         if (len >= sizeof(ethernet_header_t)) {
+            dev->rx_packets++;
+            dev->rx_bytes += len;
             ethernet_header_t *eth = (ethernet_header_t *)buf;
             uint16_t type = __builtin_bswap16(eth->ether_type);
 
@@ -121,6 +125,8 @@ void e1000_poll(net_dev_t *dev, uint8_t *buffer, size_t size) {
             } else if (type == 0x0800) {
                 ip_handle_packet(dev, buf + sizeof(ethernet_header_t), len - sizeof(ethernet_header_t));
             }
+        } else {
+            dev->rx_dropped++;
         }
 
         d->rx_ring[d->rx_ptr].status = 0;
@@ -184,6 +190,16 @@ void e1000_driver_init(pci_device_t *pdev) {
 
     d->net_dev.send_packet = e1000_send_packet;
     d->net_dev.receive_packet = (net_receive_packet_t)e1000_poll;
+    d->net_dev.mtu = 1500;
+    d->net_dev.flags = IFF_UP | IFF_RUNNING;
+    d->net_dev.ip_addr = 0;   // configured by DHCP
+    d->net_dev.netmask = 0;
+    d->net_dev.gateway = 0;
+    d->net_dev.rx_packets = d->net_dev.tx_packets = 0;
+    d->net_dev.rx_bytes = d->net_dev.tx_bytes = 0;
+    d->net_dev.rx_errors = d->net_dev.tx_errors = 0;
+    d->net_dev.rx_dropped = d->net_dev.tx_dropped = 0;
+    d->net_dev.collisions = 0;
     net_register_device(&d->net_dev);
 
     klog(LOG_INFO, "E1000: Link Up. MAC: %02x:%02x:%02x:%02x:%02x:%02x",

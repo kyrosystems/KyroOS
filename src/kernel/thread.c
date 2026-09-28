@@ -29,6 +29,12 @@ void thread_init(void) {
   current_thread->id = next_thread_id++;
   current_thread->state = THREAD_RUNNING;
   current_thread->pml4 = vmm_get_current_pml4();
+  current_thread->uid = current_thread->gid = 0;   // root
+  current_thread->euid = current_thread->egid = 0;
+  current_thread->umask = 022;
+  current_thread->start_ticks = timer_get_ticks();
+  strncpy(current_thread->name, "kernel", sizeof(current_thread->name) - 1);
+  strncpy(current_thread->cwd, "/", sizeof(current_thread->cwd) - 1);
   __asm__ __volatile__("mov %%rsp, %0" : "=r"(current_thread->rsp));
   scheduler_init();
   scheduler_add_thread(current_thread);
@@ -51,6 +57,13 @@ thread_t *thread_create(thread_func_t func, void *arg) {
   thread->pml4 = vmm_get_current_pml4();
   thread->id = next_thread_id++;
   thread->state = THREAD_READY;
+  thread->uid = thread->gid = 0;   // kernel threads run as root
+  thread->euid = thread->egid = 0;
+  thread->umask = 022;
+  thread->start_ticks = timer_get_ticks();
+  strncpy(thread->cwd, "/", sizeof(thread->cwd) - 1);
+  strncpy(thread->name, "kthread", sizeof(thread->name) - 1);
+  thread->name[sizeof(thread->name) - 1] = '\0';
   uint64_t *sp = (uint64_t *)((uint64_t)thread->stack + KERNEL_STACK_SIZE);
   *--sp = (uint64_t)arg;
   *--sp = (uint64_t)func;
@@ -63,7 +76,8 @@ thread_t *thread_create(thread_func_t func, void *arg) {
 }
 
 thread_t *thread_create_userspace(uint64_t entry_point, pml4_t *pml4,
-                                  uint64_t program_break, int argc, char *argv[]) {
+                                  uint64_t program_break, int argc, char *argv[],
+                                  const char *name) {
   klog(LOG_INFO, "thread_create_userspace: entered");
   disable_interrupts();
   if (!pml4 || argc < 0 || (argc > 0 && !argv)) {
@@ -113,6 +127,25 @@ thread_t *thread_create_userspace(uint64_t entry_point, pml4_t *pml4,
   thread->state = THREAD_READY;
   thread->program_break = program_break;
   thread->initial_program_break = program_break;
+  // Inherit credentials, umask and cwd from the creating (current) thread.
+  thread_t *parent = get_current_thread();
+  if (parent) {
+    thread->uid = parent->uid;   thread->gid = parent->gid;
+    thread->euid = parent->euid; thread->egid = parent->egid;
+    thread->umask = parent->umask;
+    strncpy(thread->cwd, parent->cwd, sizeof(thread->cwd) - 1);
+    thread->cwd[sizeof(thread->cwd) - 1] = '\0';
+  } else {
+    thread->uid = thread->gid = 0;
+    thread->euid = thread->egid = 0;
+    thread->umask = 022;
+    strncpy(thread->cwd, "/", sizeof(thread->cwd) - 1);
+  }
+  thread->start_ticks = timer_get_ticks();
+  if (name) {
+    strncpy(thread->name, name, sizeof(thread->name) - 1);
+    thread->name[sizeof(thread->name) - 1] = '\0';
+  }
   vfs_node_t *console = vfs_resolve_path(vfs_root, "/dev/console");
   if (!console) console = vfs_resolve_path(vfs_root, "/dev/tty");
   if (console) {

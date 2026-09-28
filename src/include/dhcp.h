@@ -26,5 +26,6 @@ typedef struct {
 void dhcp_init();
 void dhcp_client_start();
 void dhcp_handle_packet(dhcp_packet_t *pkt, size_t len);
+void dhcp_poll(); // retransmit DISCOVER/REQUEST until bound (call from main loop)
 
 #endif

@@ -1,5 +1,6 @@
 #include "syscall.h"
 #include "elf.h"
+#include "errno.h"
 #include "event.h"
 #include "fb.h"
 #include "heap.h"
@@ -77,6 +78,18 @@ static void sys_write(struct registers *regs) {
   }
 }
 
+static vfs_node_t *resolve_for_thread(const char *path) {
+  thread_t *t = get_current_thread();
+  const char *p = path;
+  if (t && path[0] != '/' && path[0] != '\0') {
+    static char absbuf[MAX_FILENAME_LEN];
+    const char *cwd = t->cwd[0] ? t->cwd : "/";
+    ksprintf(absbuf, "%s%s%s", cwd,
+             (cwd[strlen(cwd) - 1] == '/') ? "" : "/", path);
+    p = absbuf;
+  }
+  return vfs_resolve_path(vfs_root, p);
+}
 static void sys_open(struct registers *regs) {
   char *user_path = (char *)regs->rdi;
   int flags = (int)regs->rsi; // Get flags from rsi
@@ -93,7 +106,7 @@ static void sys_open(struct registers *regs) {
   path[MAX_FILENAME_LEN - 1] = '\0';
   klog(LOG_DEBUG, "SYSCALL_DEBUG: sys_open: Resolved path: '%s'", path);
 
-  vfs_node_t *node = vfs_resolve_path(vfs_root, path);
+  vfs_node_t *node = resolve_for_thread(path);
 
   // Handle O_CREAT flag
   if (!node && (flags & O_CREAT)) {
@@ -102,20 +115,31 @@ static void sys_open(struct registers *regs) {
     char parent_path[MAX_FILENAME_LEN];
     char filename[MAX_FILENAME_LEN];
     char *last_slash = strrchr(path, '/');
-    vfs_node_t *parent_node = vfs_root;
+    vfs_node_t *parent_node;
 
-    if (last_slash) {
+    if (last_slash && last_slash != path) {
       int parent_len = last_slash - path;
       strncpy(parent_path, path, parent_len);
       parent_path[parent_len] = '\0';
       strncpy(filename, last_slash + 1, MAX_FILENAME_LEN);
       parent_path[MAX_FILENAME_LEN - 1] = '\0'; // Ensure null-termination
       filename[MAX_FILENAME_LEN - 1] = '\0'; // Ensure null-termination
-      parent_node = vfs_resolve_path(vfs_root, parent_path);
+      parent_node = resolve_for_thread(parent_path);
     } else {
       // File in root, or current directory for relative path.
-      strncpy(filename, path, MAX_FILENAME_LEN);
-      filename[MAX_FILENAME_LEN - 1] = '\0'; // Ensure null-termination
+      if (last_slash == path) {
+        strncpy(filename, path + 1, MAX_FILENAME_LEN); // "/name"
+        filename[MAX_FILENAME_LEN - 1] = '\0';
+        parent_node = vfs_root;
+      } else {
+        strncpy(filename, path, MAX_FILENAME_LEN);
+        filename[MAX_FILENAME_LEN - 1] = '\0';
+        // Relative to the thread's cwd node
+        thread_t *tc = get_current_thread();
+        parent_node = (tc && tc->cwd[0] && strcmp(tc->cwd, "/") != 0)
+                          ? resolve_for_thread(tc->cwd) : vfs_root;
+        if (!parent_node) parent_node = vfs_root;
+      }
     }
 
     if (!parent_node || !(parent_node->flags & VFS_DIRECTORY)) {
@@ -141,6 +165,10 @@ static void sys_open(struct registers *regs) {
       return;
     }
     klog(LOG_DEBUG, "SYSCALL_DEBUG: sys_open: File '%s' created successfully.", path);
+    // Ownership + umask for the new node (POSIX-style)
+    thread_t *tc = get_current_thread();
+    vfs_node_set_owner(node, tc->euid, tc->egid,
+                       (uint16_t)vfs_default_mode_for(node->flags, tc));
   } else if (!node) {
     regs->rax = (uint64_t)-1; // File not found and O_CREAT not set
     klog(LOG_WARN, "SYSCALL_EXIT: sys_open: File not found: %s. O_CREAT not set. Returning -1.", path);
@@ -148,6 +176,13 @@ static void sys_open(struct registers *regs) {
   }
 
   // File exists or was created, now handle other flags
+  // Permission check for the requested access mode
+  {
+    int amode = (flags & O_WRONLY) ? 2 : ((flags & O_RDWR) ? 2 : 4);
+    if (flags & O_RDWR) amode = 2 | 4;
+    int ac = vfs_check_access(node, amode);
+    if (ac != 0) { regs->rax = (uint64_t)ac; return; }
+  }
   if (node->open) {
     klog(LOG_DEBUG, "SYSCALL_DEBUG: sys_open: Calling node->open for '%s' with flags %x", path, flags);
     node->open(node, flags);
@@ -526,6 +561,9 @@ static void sys_mount(struct registers *regs) {
   char *user_device_node_path = (char *)regs->rsi;
   char *user_fs_type_name = (char *)regs->rdx;
 
+  thread_t *tc = get_current_thread();
+  if (!tc || tc->euid != 0) { regs->rax = -EPERM; return; } // registry: root
+
   char mount_point_path[MAX_FILENAME_LEN];
   if (validate_user_pointer(user_mount_point_path, 1) != 0) {
     regs->rax = -1;
@@ -702,8 +740,11 @@ static void sys_exec(struct registers *regs) {
     
     kfree(elf_data);
     
+    // Derive process name from basename of the path
+    const char *base = strrchr(path, '/');
+    base = base ? base + 1 : path;
     // Use existing thread_create_userspace function
-    thread_t *new_thread = thread_create_userspace(entry_point, new_pml4, 0, 0, NULL);
+    thread_t *new_thread = thread_create_userspace(entry_point, new_pml4, 0, 0, NULL, base);
     if (!new_thread) {
         klog(LOG_ERROR, "SYSCALL_EXEC: Failed to create thread");
         vmm_destroy_address_space(new_pml4);
@@ -837,6 +878,534 @@ static void sys_sbrk(struct registers *regs) {
   regs->rax = old_brk;
 }
 
+// ---------------------------------------------------------------------
+// Syscalls 28-59 (see abi/syscalls.def). Error contract: return
+// (uint64_t)-errno; 0/non-negative on success.
+// ---------------------------------------------------------------------
+
+#include "epstein.h"
+#include "procinfo.h"
+#include "dns.h"
+#include "errno.h"
+#include "ip.h"
+#include "net.h"
+
+// Find the socket bound to fd. Returns 0 on success, -errno on failure.
+static int fd_get_socket(thread_t *t, int fd, socket_t **out) {
+  if (fd < 0 || fd >= MAX_FILES || t->fd_table[fd].type != FD_TYPE_SOCKET)
+    return -ENOTSOCK;
+  *out = t->fd_table[fd].data.sock;
+  if (!*out) return -EBADF;
+  return 0;
+}
+
+// Copy a NUL-terminated path from userspace. Returns 0 or -errno.
+static int copy_user_path(const char *user_path, char *out, size_t outsz) {
+  if (validate_user_pointer(user_path, 1) != 0) return -EFAULT;
+  size_t i = 0;
+  while (i + 1 < outsz) {
+    char c;
+    // Copy byte-by-byte; the first page may be the only valid one.
+    if (validate_user_pointer(user_path + i, 1) != 0) {
+      if (i == 0) return -EFAULT;
+      break; // ran off the end of the string into unmapped memory
+    }
+    c = user_path[i];
+    out[i] = c;
+    if (c == '\0') return 0;
+    i++;
+  }
+  out[outsz - 1] = '\0';
+  return -ENAMETOOLONG;
+}
+
+// Resolve a user path against the thread cwd. Absolute paths pass through.
+
+static void sys_sendto(struct registers *regs) {
+  int fd = (int)regs->rdi;
+  void *buf = (void *)regs->rsi;
+  size_t len = (size_t)regs->rdx;
+  int flags = (int)regs->r10;
+  sockaddr_in_t *addr = (sockaddr_in_t *)regs->r8;
+  socklen_t addrlen = (socklen_t)regs->r9;
+
+  thread_t *t = get_current_thread();
+  socket_t *sock;
+  int rc = fd_get_socket(t, fd, &sock);
+  if (rc != 0) { regs->rax = (uint64_t)rc; return; }
+  if (validate_user_pointer(buf, len) != 0) { regs->rax = -EFAULT; return; }
+  if (addr) {
+    if (addrlen < sizeof(sockaddr_in_t) ||
+        validate_user_pointer(addr, sizeof(sockaddr_in_t)) != 0) {
+      regs->rax = -EFAULT;
+      return;
+    }
+    if (addr->sin_family != AF_INET) { regs->rax = -EAFNOSUPPORT; return; }
+  }
+  regs->rax = (uint64_t)sock_sendto(sock, buf, len, flags, addr);
+}
+
+static void sys_recvfrom(struct registers *regs) {
+  int fd = (int)regs->rdi;
+  void *buf = (void *)regs->rsi;
+  size_t len = (size_t)regs->rdx;
+  int flags = (int)regs->r10;
+  sockaddr_in_t *addr = (sockaddr_in_t *)regs->r8;
+  socklen_t *addrlen = (socklen_t *)regs->r9;
+
+  thread_t *t = get_current_thread();
+  socket_t *sock;
+  int rc = fd_get_socket(t, fd, &sock);
+  if (rc != 0) { regs->rax = (uint64_t)rc; return; }
+  if (validate_user_pointer(buf, len) != 0) { regs->rax = -EFAULT; return; }
+  if (addr && validate_user_pointer(addr, sizeof(sockaddr_in_t)) != 0) {
+    regs->rax = -EFAULT;
+    return;
+  }
+  if (addrlen && validate_user_pointer(addrlen, sizeof(socklen_t)) != 0) {
+    regs->rax = -EFAULT;
+    return;
+  }
+  regs->rax = (uint64_t)sock_recvfrom(sock, buf, len, flags, addr, addrlen);
+}
+
+static void sys_setsockopt(struct registers *regs) {
+  int fd = (int)regs->rdi;
+  int level = (int)regs->rsi;
+  int optname = (int)regs->rdx;
+  const void *optval = (const void *)regs->r10;
+  socklen_t optlen = (socklen_t)regs->r8;
+
+  thread_t *t = get_current_thread();
+  socket_t *sock;
+  int rc = fd_get_socket(t, fd, &sock);
+  if (rc != 0) { regs->rax = (uint64_t)rc; return; }
+  if (optval && validate_user_pointer(optval, optlen) != 0) {
+    regs->rax = -EFAULT;
+    return;
+  }
+  regs->rax = (uint64_t)sock_setsockopt(sock, level, optname, optval, optlen);
+}
+
+static void sys_dns_resolve(struct registers *regs) {
+  const char *host = (const char *)regs->rdi;
+  char name[256];
+  int rc = copy_user_path(host, name, sizeof(name));
+  if (rc != 0) { regs->rax = (uint64_t)rc; return; }
+  uint32_t ip = dns_resolve(name);
+  regs->rax = ip; // 0 = resolution failure (documented ABI)
+}
+
+static void sys_debugmode_get(struct registers *regs) {
+  regs->rax = (uint64_t)(epstein ? 1 : 0);
+}
+
+static void sys_debugmode_set(struct registers *regs) {
+  int mode = (int)regs->rdi;
+  thread_t *t = get_current_thread();
+  if (!t || t->euid != 0) { regs->rax = -EPERM; return; }
+  epstein = mode ? 1 : 0; // atomic enough: single aligned store, IRQ-safe
+  klog(LOG_INFO, "debugmode: set to %d by uid %u", epstein, t->euid);
+  regs->rax = 0;
+}
+
+static void sys_getuid(struct registers *regs) {
+  thread_t *t = get_current_thread();
+  regs->rax = t ? t->uid : 0;
+}
+
+static void sys_geteuid(struct registers *regs) {
+  thread_t *t = get_current_thread();
+  regs->rax = t ? t->euid : 0;
+}
+
+static void sys_getgid(struct registers *regs) {
+  thread_t *t = get_current_thread();
+  regs->rax = t ? t->gid : 0;
+}
+
+static void sys_getegid(struct registers *regs) {
+  thread_t *t = get_current_thread();
+  regs->rax = t ? t->egid : 0;
+}
+
+static void sys_umask(struct registers *regs) {
+  uint32_t mask = (uint32_t)regs->rdi & 0777;
+  thread_t *t = get_current_thread();
+  uint32_t old = t ? t->umask : 022;
+  if (t) t->umask = mask;
+  regs->rax = old;
+}
+
+static void sys_chmod(struct registers *regs) {
+  const char *user_path = (const char *)regs->rdi;
+  uint32_t mode = (uint32_t)regs->rsi & 0777;
+  char path[MAX_FILENAME_LEN];
+  int rc = copy_user_path(user_path, path, sizeof(path));
+  if (rc != 0) { regs->rax = (uint64_t)rc; return; }
+  vfs_node_t *node = resolve_for_thread(path);
+  if (!node) { regs->rax = -ENOENT; return; }
+  thread_t *t = get_current_thread();
+  if (t->euid != 0 && t->euid != node->uid) { regs->rax = -EPERM; return; }
+  node->mode = mode;
+  regs->rax = 0;
+}
+
+static void sys_fchmod(struct registers *regs) {
+  int fd = (int)regs->rdi;
+  uint32_t mode = (uint32_t)regs->rsi & 0777;
+  thread_t *t = get_current_thread();
+  if (fd < 0 || fd >= MAX_FILES || t->fd_table[fd].type != FD_TYPE_FILE) {
+    regs->rax = -EBADF;
+    return;
+  }
+  vfs_node_t *node = t->fd_table[fd].data.file.node;
+  if (!node) { regs->rax = -EBADF; return; }
+  if (t->euid != 0 && t->euid != node->uid) { regs->rax = -EPERM; return; }
+  node->mode = mode;
+  regs->rax = 0;
+}
+
+static void sys_chown(struct registers *regs) {
+  const char *user_path = (const char *)regs->rdi;
+  uint32_t uid = (uint32_t)regs->rsi;
+  uint32_t gid = (uint32_t)regs->rdx;
+  char path[MAX_FILENAME_LEN];
+  int rc = copy_user_path(user_path, path, sizeof(path));
+  if (rc != 0) { regs->rax = (uint64_t)rc; return; }
+  thread_t *t = get_current_thread();
+  if (t->euid != 0) { regs->rax = -EPERM; return; } // no setuid binaries yet
+  vfs_node_t *node = resolve_for_thread(path);
+  if (!node) { regs->rax = -ENOENT; return; }
+  node->uid = uid;
+  node->gid = gid;
+  regs->rax = 0;
+}
+
+static void sys_fchown(struct registers *regs) {
+  int fd = (int)regs->rdi;
+  uint32_t uid = (uint32_t)regs->rsi;
+  uint32_t gid = (uint32_t)regs->rdx;
+  thread_t *t = get_current_thread();
+  if (t->euid != 0) { regs->rax = -EPERM; return; }
+  if (fd < 0 || fd >= MAX_FILES || t->fd_table[fd].type != FD_TYPE_FILE) {
+    regs->rax = -EBADF;
+    return;
+  }
+  vfs_node_t *node = t->fd_table[fd].data.file.node;
+  if (!node) { regs->rax = -EBADF; return; }
+  node->uid = uid;
+  node->gid = gid;
+  regs->rax = 0;
+}
+
+static void sys_setuid(struct registers *regs) {
+  uint32_t uid = (uint32_t)regs->rdi;
+  thread_t *t = get_current_thread();
+  if (t->euid != 0) { regs->rax = -EPERM; return; }
+  t->uid = t->euid = uid;
+  regs->rax = 0;
+}
+
+static void sys_setgid(struct registers *regs) {
+  uint32_t gid = (uint32_t)regs->rdi;
+  thread_t *t = get_current_thread();
+  if (t->euid != 0) { regs->rax = -EPERM; return; }
+  t->gid = t->egid = gid;
+  regs->rax = 0;
+}
+
+static void sys_seteuid(struct registers *regs) {
+  uint32_t euid = (uint32_t)regs->rdi;
+  thread_t *t = get_current_thread();
+  // Simplified saved-credentials model: root may switch to anything,
+  // others only back to their real uid.
+  if (t->euid != 0 && euid != t->uid) { regs->rax = -EPERM; return; }
+  t->euid = euid;
+  regs->rax = 0;
+}
+
+static void sys_setegid(struct registers *regs) {
+  uint32_t egid = (uint32_t)regs->rdi;
+  thread_t *t = get_current_thread();
+  if (t->egid != 0 && egid != t->gid) { regs->rax = -EPERM; return; }
+  t->egid = egid;
+  regs->rax = 0;
+}
+
+static void sys_getcwd(struct registers *regs) {
+  char *buf = (char *)regs->rdi;
+  size_t size = (size_t)regs->rsi;
+  thread_t *t = get_current_thread();
+  if (validate_user_pointer(buf, size) != 0) { regs->rax = -EFAULT; return; }
+  const char *cwd = (t && t->cwd[0]) ? t->cwd : "/";
+  size_t len = strlen(cwd) + 1;
+  if (size < len) { regs->rax = -EINVAL; return; }
+  memcpy(buf, cwd, len);
+  regs->rax = 0;
+}
+
+static void sys_chdir(struct registers *regs) {
+  const char *user_path = (const char *)regs->rdi;
+  char path[MAX_FILENAME_LEN];
+  int rc = copy_user_path(user_path, path, sizeof(path));
+  if (rc != 0) { regs->rax = (uint64_t)rc; return; }
+  vfs_node_t *node = resolve_for_thread(path);
+  if (!node) { regs->rax = -ENOENT; return; }
+  if (!(node->flags & VFS_DIRECTORY)) { regs->rax = -ENOTDIR; return; }
+  rc = vfs_check_access(node, 1); // need search permission on the directory
+  if (rc != 0) { regs->rax = (uint64_t)rc; return; }
+  thread_t *t = get_current_thread();
+  if (path[0] == '/') {
+    strncpy(t->cwd, path, sizeof(t->cwd) - 1);
+  } else {
+    const char *cwd = t->cwd[0] ? t->cwd : "/";
+    ksprintf(t->cwd, "%s%s%s", cwd,
+             (cwd[strlen(cwd) - 1] == '/') ? "" : "/", path);
+  }
+  t->cwd[sizeof(t->cwd) - 1] = '\0';
+  regs->rax = 0;
+}
+
+static void sys_getpid(struct registers *regs) {
+  thread_t *t = get_current_thread();
+  regs->rax = t ? t->id : 0;
+}
+
+static void sys_kill(struct registers *regs) {
+  uint32_t pid = (uint32_t)regs->rdi;
+  int sig = (int)regs->rsi;
+  thread_t *t = get_current_thread();
+  if (sig != 9 && sig != 15) { regs->rax = -EINVAL; return; } // SIGKILL/SIGTERM only
+  if (pid == t->id) { thread_exit(); return; } // does not return
+
+  // Walk the scheduler ring exactly once.
+  thread_t *target = NULL;
+  thread_t *start = t->next;
+  if (start) {
+    thread_t *cur = start;
+    do {
+      if (cur->id == pid && cur->state != THREAD_DEAD) { target = cur; break; }
+      cur = cur->next;
+    } while (cur != start);
+  }
+  if (!target) { regs->rax = -ESRCH; return; }
+  if (t->euid != 0 && t->euid != target->euid) { regs->rax = -EPERM; return; }
+  target->state = THREAD_DEAD;
+  regs->rax = 0;
+}
+
+static void sys_dup(struct registers *regs) {
+  int fd = (int)regs->rdi;
+  thread_t *t = get_current_thread();
+  if (fd < 0 || fd >= MAX_FILES || t->fd_table[fd].type == FD_TYPE_NONE) {
+    regs->rax = -EBADF;
+    return;
+  }
+  for (int i = 0; i < MAX_FILES; i++) {
+    if (t->fd_table[i].type == FD_TYPE_NONE) {
+      t->fd_table[i] = t->fd_table[fd];
+      regs->rax = i;
+      return;
+    }
+  }
+  regs->rax = -EMFILE;
+}
+
+static void sys_dup2(struct registers *regs) {
+  int fd = (int)regs->rdi;
+  int fd2 = (int)regs->rsi;
+  thread_t *t = get_current_thread();
+  if (fd < 0 || fd >= MAX_FILES || fd2 < 0 || fd2 >= MAX_FILES ||
+      t->fd_table[fd].type == FD_TYPE_NONE) {
+    regs->rax = -EBADF;
+    return;
+  }
+  if (fd == fd2) { regs->rax = fd2; return; }
+  if (t->fd_table[fd2].type == FD_TYPE_SOCKET && t->fd_table[fd2].data.sock)
+    sock_close(t->fd_table[fd2].data.sock);
+  t->fd_table[fd2] = t->fd_table[fd];
+  regs->rax = fd2;
+}
+
+static void sys_lseek(struct registers *regs) {
+  int fd = (int)regs->rdi;
+  int64_t offset = (int64_t)regs->rsi;
+  int whence = (int)regs->rdx;
+  thread_t *t = get_current_thread();
+  if (fd < 0 || fd >= MAX_FILES || t->fd_table[fd].type == FD_TYPE_NONE) {
+    regs->rax = -EBADF;
+    return;
+  }
+  if (t->fd_table[fd].type != FD_TYPE_FILE) { regs->rax = -ESPIPE; return; }
+  vfs_node_t *node = t->fd_table[fd].data.file.node;
+  int64_t base;
+  switch (whence) {
+    case 0: base = 0; break;
+    case 1: base = (int64_t)t->fd_table[fd].data.file.offset; break;
+    case 2: base = (int64_t)node->length; break;
+    default: regs->rax = -EINVAL; return;
+  }
+  int64_t target = base + offset;
+  if (target < 0) { regs->rax = -EINVAL; return; }
+  t->fd_table[fd].data.file.offset = (uint64_t)target;
+  regs->rax = (uint64_t)target;
+}
+
+static void fill_stat_from_node(vfs_node_t *node, struct stat *st) {
+  memset(st, 0, sizeof(struct stat));
+  st->st_size = node->length;
+  st->st_ino = node->inode;
+  st->st_uid = node->uid;
+  st->st_gid = node->gid;
+  uint32_t mode = (node->mode ? node->mode
+                   : ((node->flags & VFS_DIRECTORY) ? DEFAULT_DIR_MODE
+                                                    : DEFAULT_FILE_MODE));
+  if (node->flags & VFS_DIRECTORY) mode |= S_IFDIR;
+  else mode |= S_IFREG;
+  st->st_mode = mode;
+}
+
+static void sys_fstat(struct registers *regs) {
+  int fd = (int)regs->rdi;
+  struct stat *st = (struct stat *)regs->rsi;
+  thread_t *t = get_current_thread();
+  if (fd < 0 || fd >= MAX_FILES || t->fd_table[fd].type != FD_TYPE_FILE) {
+    regs->rax = -EBADF;
+    return;
+  }
+  if (validate_user_pointer(st, sizeof(struct stat)) != 0) {
+    regs->rax = -EFAULT;
+    return;
+  }
+  vfs_node_t *node = t->fd_table[fd].data.file.node;
+  if (!node) { regs->rax = -EBADF; return; }
+  fill_stat_from_node(node, st);
+  regs->rax = 0;
+}
+
+static void sys_proc_list(struct registers *regs) {
+  struct procinfo *buf = (struct procinfo *)regs->rdi;
+  size_t max_entries = (size_t)regs->rsi;
+  if (validate_user_pointer(buf, max_entries * sizeof(struct procinfo)) != 0) {
+    regs->rax = -EFAULT;
+    return;
+  }
+  thread_t *t = get_current_thread();
+  size_t count = 0;
+  if (t && t->next) {
+    thread_t *cur = t->next;
+    // Include the caller itself first.
+    if (t->state != THREAD_DEAD && max_entries > 0) {
+      buf[count].pid = t->id;
+      buf[count].uid = t->uid;
+      buf[count].euid = t->euid;
+      buf[count].state = (uint8_t)t->state;
+      strncpy(buf[count].name, t->name, sizeof(buf[count].name) - 1);
+      buf[count].name[sizeof(buf[count].name) - 1] = '\0';
+      buf[count].cpu_ticks = t->cpu_ticks;
+      buf[count].start_ticks = t->start_ticks;
+      count++;
+    }
+    do {
+      if (count >= max_entries) break;
+      if (cur->state == THREAD_DEAD) { cur = cur->next; continue; }
+      buf[count].pid = cur->id;
+      buf[count].uid = cur->uid;
+      buf[count].euid = cur->euid;
+      buf[count].state = (uint8_t)cur->state;
+      strncpy(buf[count].name, cur->name, sizeof(buf[count].name) - 1);
+      buf[count].name[sizeof(buf[count].name) - 1] = '\0';
+      buf[count].cpu_ticks = cur->cpu_ticks;
+      buf[count].start_ticks = cur->start_ticks;
+      count++;
+      cur = cur->next;
+    } while (cur != t->next);
+  }
+  regs->rax = count;
+}
+
+static void sys_sysinfo(struct registers *regs) {
+  struct sysinfo_k *out = (struct sysinfo_k *)regs->rdi;
+  if (validate_user_pointer(out, sizeof(struct sysinfo_k)) != 0) {
+    regs->rax = -EFAULT;
+    return;
+  }
+  memset(out, 0, sizeof(struct sysinfo_k));
+  out->mem_total_kb = (uint32_t)(pmm_get_total_memory() / 1024);
+  out->mem_used_kb = (uint32_t)(pmm_get_used_memory() / 1024);
+  out->uptime_ticks = timer_get_ticks();
+  out->rx_bytes = network_devices ? network_devices->rx_bytes : 0;
+  out->tx_bytes = network_devices ? network_devices->tx_bytes : 0;
+  out->rx_packets = network_devices ? network_devices->rx_packets : 0;
+  out->tx_packets = network_devices ? network_devices->tx_packets : 0;
+  regs->rax = 0;
+}
+
+static void sys_net_ifconf(struct registers *regs) {
+  struct ifinfo *buf = (struct ifinfo *)regs->rdi;
+  size_t max_entries = (size_t)regs->rsi;
+  if (validate_user_pointer(buf, max_entries * sizeof(struct ifinfo)) != 0) {
+    regs->rax = -EFAULT;
+    return;
+  }
+  size_t count = 0;
+  for (net_dev_t *dev = network_devices; dev; dev = dev->next) {
+    if (count >= max_entries) break;
+    memset(&buf[count], 0, sizeof(struct ifinfo));
+    // Device name: prefer deviceman name when available.
+    if (dev->dev && dev->dev->name)
+      strncpy(buf[count].name, dev->dev->name, sizeof(buf[count].name) - 1);
+    else
+      strncpy(buf[count].name, "eth", sizeof(buf[count].name) - 1);
+    buf[count].name[sizeof(buf[count].name) - 1] = '\0';
+    memcpy(buf[count].mac, dev->mac_addr, 6);
+    // IPv4 config is global in this stack (DHCP); report per interface.
+    buf[count].ip = dev->ip_addr ? dev->ip_addr : ip_get_local_ip();
+    buf[count].netmask = dev->netmask ? dev->netmask : ip_get_subnet_mask();
+    buf[count].gateway = dev->gateway ? dev->gateway : ip_get_default_gateway();
+    buf[count].mtu = dev->mtu;
+    buf[count].flags = dev->flags | IFIF_COUNTERS; // e1000 keeps real counters
+    buf[count].rx_bytes = dev->rx_bytes;
+    buf[count].tx_bytes = dev->tx_bytes;
+    buf[count].rx_packets = dev->rx_packets;
+    buf[count].tx_packets = dev->tx_packets;
+    buf[count].rx_errors = dev->rx_errors;
+    buf[count].tx_errors = dev->tx_errors;
+    buf[count].rx_dropped = dev->rx_dropped;
+    buf[count].tx_dropped = dev->tx_dropped;
+    buf[count].collisions = dev->collisions;
+    count++;
+  }
+  regs->rax = count;
+}
+
+static void sys_sock_shutdown(struct registers *regs) {
+  int fd = (int)regs->rdi;
+  int how = (int)regs->rsi;
+  thread_t *t = get_current_thread();
+  socket_t *sock;
+  int rc = fd_get_socket(t, fd, &sock);
+  if (rc != 0) { regs->rax = (uint64_t)rc; return; }
+  regs->rax = (uint64_t)sock_shutdown(sock, how);
+}
+
+static void sys_getsockname(struct registers *regs) {
+  int fd = (int)regs->rdi;
+  sockaddr_in_t *addr = (sockaddr_in_t *)regs->rsi;
+  socklen_t *addrlen = (socklen_t *)regs->rdx;
+  thread_t *t = get_current_thread();
+  socket_t *sock;
+  int rc = fd_get_socket(t, fd, &sock);
+  if (rc != 0) { regs->rax = (uint64_t)rc; return; }
+  if (validate_user_pointer(addr, sizeof(sockaddr_in_t)) != 0 ||
+      (addrlen && validate_user_pointer(addrlen, sizeof(socklen_t)) != 0)) {
+    regs->rax = -EFAULT;
+    return;
+  }
+  regs->rax = (uint64_t)sock_getsockname(sock, addr, addrlen);
+}
+
 void syscall_init() {
   memset(syscall_table, 0, sizeof(syscall_table));
   syscall_table[SYS_EXIT] = sys_exit;
@@ -869,16 +1438,67 @@ void syscall_init() {
   syscall_table[SYS_GFX_GET_FB_INFO] = sys_gfx_get_fb_info;
   syscall_table[SYS_INPUT_POLL_EVENT] = sys_input_poll_event;
   syscall_table[SYS_SBRK] = sys_sbrk;
+  // 28-59
+  syscall_table[SYS_SENDTO] = sys_sendto;
+  syscall_table[SYS_RECVFROM] = sys_recvfrom;
+  syscall_table[SYS_SETSOCKOPT] = sys_setsockopt;
+  syscall_table[SYS_DNS_RESOLVE] = sys_dns_resolve;
+  syscall_table[SYS_DEBUGMODE_GET] = sys_debugmode_get;
+  syscall_table[SYS_DEBUGMODE_SET] = sys_debugmode_set;
+  syscall_table[SYS_GETUID] = sys_getuid;
+  syscall_table[SYS_GETEUID] = sys_geteuid;
+  syscall_table[SYS_GETGID] = sys_getgid;
+  syscall_table[SYS_GETEGID] = sys_getegid;
+  syscall_table[SYS_UMASK] = sys_umask;
+  syscall_table[SYS_CHMOD] = sys_chmod;
+  syscall_table[SYS_FCHMOD] = sys_fchmod;
+  syscall_table[SYS_CHOWN] = sys_chown;
+  syscall_table[SYS_FCHOWN] = sys_fchown;
+  syscall_table[SYS_SETUID] = sys_setuid;
+  syscall_table[SYS_SETGID] = sys_setgid;
+  syscall_table[SYS_SETEUID] = sys_seteuid;
+  syscall_table[SYS_SETEGID] = sys_setegid;
+  syscall_table[SYS_GETCWD] = sys_getcwd;
+  syscall_table[SYS_CHDIR] = sys_chdir;
+  syscall_table[SYS_GETPID] = sys_getpid;
+  syscall_table[SYS_KILL] = sys_kill;
+  syscall_table[SYS_DUP] = sys_dup;
+  syscall_table[SYS_DUP2] = sys_dup2;
+  syscall_table[SYS_LSEEK] = sys_lseek;
+  syscall_table[SYS_FSTAT] = sys_fstat;
+  syscall_table[SYS_PROC_LIST] = sys_proc_list;
+  syscall_table[SYS_SYSINFO] = sys_sysinfo;
+  syscall_table[SYS_NET_IFCONF] = sys_net_ifconf;
+  syscall_table[SYS_SOCK_SHUTDOWN] = sys_sock_shutdown;
+  syscall_table[SYS_GETSOCKNAME] = sys_getsockname;
   klog(LOG_INFO, "Syscall handler expanded.");
+}
+
+// Registry consistency audit: every registry entry marked impl=yes/partial
+// with a number < 256 must have a dispatch entry (except send which reuses
+// the write path). Called late in boot (see kernel.c).
+void syscall_audit_table() {
+  int missing = 0;
+  for (int i = 0; i < 256; i++) {
+    if (syscall_table[i] == 0 && i <= SYS_GETSOCKNAME &&
+        i != SYS_SEND) { // send dispatches to sys_write path via SYS_SEND slot
+      // Only complain about numbers the registry declares implemented.
+      // (Reserved 60+ are intentionally absent.)
+      if (i >= SYS_SENDTO && i <= SYS_GETSOCKNAME) missing++;
+    }
+  }
+  if (missing)
+    klog(LOG_WARN, "syscall_audit: %d registry syscalls lack dispatch entries", missing);
+  else
+    klog(LOG_INFO, "syscall_audit: dispatch table covers registry range");
 }
 
 void syscall_handler(struct registers *regs) {
   uint64_t syscall_num = regs->rax;
-  klog(LOG_INFO, "SYSCALL: #%llu (rax=%llx, rdi=%llx, rsi=%llx, rdx=%llx)",
-       syscall_num, regs->rax, regs->rdi, regs->rsi, regs->rdx);
   if (syscall_num < 256 && syscall_table[syscall_num] != 0) {
     syscall_table[syscall_num](regs);
   } else {
     klog(LOG_WARN, "Unknown syscall received: %llu", syscall_num);
+    regs->rax = (uint64_t)-ENOSYS; // documented error contract
   }
 }

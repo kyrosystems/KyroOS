@@ -1,6 +1,7 @@
 #include "icmp.h"
 #include "ip.h"
 #include "net.h"
+#include "socket.h"
 #include "log.h"
 #include "heap.h"
 #include "kstring.h"
@@ -48,6 +49,8 @@ void icmp_handle_packet(net_dev_t* net_dev, const ipv4_header_t* ip_hdr, const u
             last_reply_ip = __builtin_bswap32(ip_hdr->src_ip);
             last_reply_time = timer_get_ticks();
             waiting_for_reply = false;
+            /* Deliver the full ICMP message to RAW (ICMP) sockets (ping) */
+            sock_raw_icmp_receive(net_dev, ip_hdr, payload, payload_size);
             klog(LOG_INFO, "ICMP: Ping reply from %d.%d.%d.%d", (last_reply_ip>>24)&0xFF, (last_reply_ip>>16)&0xFF, (last_reply_ip>>8)&0xFF, last_reply_ip&0xFF);
             break;
         }

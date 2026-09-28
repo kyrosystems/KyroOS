@@ -77,8 +77,8 @@ static void kprintf(const char *fmt, ...) {
 }
 
 static void net_poll_all() {
-    net_dev_t *dev = network_devices;
-    while (dev) { if (dev->receive_packet) dev->receive_packet(dev, NULL, 0); dev = dev->next; }
+    extern void net_poll(); // RX drain + ARP/DHCP retransmission ticks
+    net_poll();
 }
 
 static bool check_interrupt() {
@@ -344,7 +344,9 @@ static void execute_command(char *cmd) {
         kprintf("Info:     uname, hostname, whoami, id, groups, users, kyrofetch, lspci, free\n");
         kprintf("Shell:    echo, env, export, unset, alias, unalias, history, clear, reset\n");
         kprintf("Power:    reboot, halt, poweroff\n");
-        kprintf("Net:      ping, ifconfig, dhcp, wget\n");
+        kprintf("Net:      ping, ifconfig, dhcp, wget, curl\n");
+        kprintf("Monitor:  sysmon (htop-like), ps, kill\n");
+        kprintf("Debug:    debugmode on|off|status\n");
         kprintf("Drivers:  lsmod, insmod, rmmod\n");
         kprintf("Other:    edit, 3d, game, pwd, true, false, test, yes, sync, help\n");
     }
@@ -426,13 +428,8 @@ static void execute_command(char *cmd) {
     else if (strcmp(argv[0], "rmmod") == 0) cmd_rmmod(argc, argv);
     else if (strcmp(argv[0], "whoami") == 0) kprintf("root\n");
     else if (strcmp(argv[0], "uptime") == 0) { uint64_t s = timer_get_ticks()/100; kprintf("up %lluh %llum %llus\n", s/3600, (s%3600)/60, s%60); }
-    else if (strcmp(argv[0], "ifconfig") == 0) {
-        net_dev_t *dev = network_devices; if(!dev) kprintf("No interfaces.\n");
-        while(dev) { uint32_t ip = ip_get_local_ip(), mask = ip_get_subnet_mask(); kprintf("eth0: MAC %02x:%02x:%02x:%02x:%02x:%02x\n      IP: %d.%d.%d.%d Mask: %d.%d.%d.%d\n", dev->mac_addr[0], dev->mac_addr[1], dev->mac_addr[2], dev->mac_addr[3], dev->mac_addr[4], dev->mac_addr[5], (ip>>24)&0xFF, (ip>>16)&0xFF, (ip>>8)&0xFF, ip&0xFF, (mask>>24)&0xFF, (mask>>16)&0xFF, (mask>>8)&0xFF, mask&0xFF); dev = dev->next; }
-    }
-    else if (strcmp(argv[0], "ping") == 0 && argc > 1) {
-        uint32_t ip = parse_ip(argv[1]); if (ip) for(int i=0; i<4 && !interrupt_triggered; i++) { if(icmp_ping(ip, 1000)) kprintf("Reply from %s: time<1ms\n", argv[1]); else kprintf("Timeout\n"); check_interrupt(); flush_out(); fb_flush(); }
-    }
+    // ifconfig/ping/sysmon/debugmode are userspace binaries under /bin
+    // (fall through to cmd_exec_bin below).
     else if (strcmp(argv[0], "dhcp") == 0) { dhcp_client_start(); kprintf("DHCP Sent.\n"); }
     else if (strcmp(argv[0], "reboot") == 0) outb(0x64, 0xFE);
     else cmd_exec_bin(argv[0], argc, argv); 

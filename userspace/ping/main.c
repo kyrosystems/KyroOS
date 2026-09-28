@@ -149,39 +149,61 @@ int main(int argc, char **argv) {
         }
         sent++;
 
-        // buffer for receiving the reply (IP header + ICMP)
-        char rx_buf[sizeof(icmp_echo_t) + 40]; 
+        // The kernel delivers the full ICMP message (header + payload)
+        // to RAW/ICMP sockets — no IP header is included.
+        // Read until a reply matching (id, seq) arrives or the timeout
+        // expires: the socket may hold older/other datagrams (e.g. a
+        // reply for a previous sequence) which must be consumed, not
+        // treated as a failure for THIS sequence.
+        char rx_buf[sizeof(icmp_echo_t)]; 
         struct sockaddr_in from;
         socklen_t fromlen = sizeof(from);
-        
-        int r = recvfrom(sockfd, rx_buf, sizeof(rx_buf), 0,
-                        &from, &fromlen);
-        uint32_t rtt = uptime_ms() - t_start;
+        int matched = 0;
+        uint32_t rtt = 0;
 
-        // minimum ICMP Echo Reply size is 8 bytes (type, code, checksum, id, seq)
-        if (r >= 28) {
-            
-            int ip_hlen = (rx_buf[0] & 0x0F) * 4;
-            icmp_echo_t *reply = (icmp_echo_t *)(rx_buf + ip_hlen);
+        while (!matched) {
+            uint32_t elapsed = uptime_ms() - t_start;
+            if (elapsed >= PING_DEFAULT_TIMEOUT) break;
 
-            if (reply->type == 0 && reply->id == htons(pid) && reply->seq == htons((uint16_t)seq)) {
-                received++;
-                if (rtt < rtt_min) rtt_min = rtt;
-                if (rtt > rtt_max) rtt_max = rtt;
-                rtt_sum += rtt;
+            // Narrow the socket receive timeout to the remaining budget
+            struct timeval tv_rem;
+            uint32_t rem = PING_DEFAULT_TIMEOUT - elapsed;
+            tv_rem.tv_sec = rem / 1000;
+            tv_rem.tv_usec = (rem % 1000) * 1000;
+            setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv_rem, sizeof(tv_rem));
 
-                if (!flood) {
-                    char buf[128];
-                    sprintf(buf, "64 bytes from ");
-                    print(buf);
-                    print_ip(from.sin_addr);
-                    sprintf(buf, ": icmp_seq=%d time=%u ms\n", seq, rtt);
-                    print(buf);
-                } else {
-                    print(".");
-                }
-                continue; // successful reply, go to next iteration
+            int r = recvfrom(sockfd, rx_buf, sizeof(rx_buf), 0,
+                            &from, &fromlen);
+            if (r < 8) continue; // timeout (-1) or too-short datagram: keep waiting
+
+            icmp_echo_t *reply = (icmp_echo_t *)(rx_buf);
+            if (reply->type != 0 || reply->id != htons(pid))
+                continue; // not an echo reply for this ping instance
+
+            rtt = uptime_ms() - t_start;
+            if (reply->seq != htons((uint16_t)seq))
+                continue; // stale reply for another sequence: consume and wait
+
+            matched = 1;
+        }
+
+        if (matched) {
+            received++;
+            if (rtt < rtt_min) rtt_min = rtt;
+            if (rtt > rtt_max) rtt_max = rtt;
+            rtt_sum += rtt;
+
+            if (!flood) {
+                char buf[128];
+                sprintf(buf, "64 bytes from ");
+                print(buf);
+                print_ip(from.sin_addr);
+                sprintf(buf, ": icmp_seq=%d time=%u ms\n", seq, rtt);
+                print(buf);
+            } else {
+                print(".");
             }
+            continue; // successful reply, go to next iteration
         }
 
         // If we reach here, it means we didn't get a valid reply

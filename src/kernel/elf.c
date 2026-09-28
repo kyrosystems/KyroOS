@@ -160,7 +160,7 @@ int elf_exec_as_thread(const char *path, int argc, char *argv[]) {
         klog(LOG_INFO, "ELF Exec: Starting userspace thread at entry point %x",
              result.entry_point);
         thread_create_userspace(result.entry_point, new_pml4, result.program_break,
-                                argc, argv);
+                                argc, argv, path);
         return 0;
     }
 

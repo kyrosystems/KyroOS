@@ -103,6 +103,9 @@ void isr_handler(struct registers *regs) {
 
     if (irq_num == 0) {
       ticks++;
+      // Per-thread CPU accounting: charge the tick to whoever was preempted.
+      extern thread_t *current_thread;
+      if (current_thread) current_thread->cpu_ticks++;
     }
 
     if (irq_handlers[irq_num] != 0) {

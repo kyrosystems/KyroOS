@@ -8,7 +8,8 @@
 
 #include "vfs.h" // For O_* flags (e.g. O_RDONLY)
 #include "event.h" // For event_t
-#include "syscall.h" // For SYS_* macros
+#include "sysnum.h"
+#include "procinfo.h" // shared kernel/userspace introspection structs
 #include "socket.h" // For sockaddr_in
 
 // Standard open flags (simplified)
@@ -19,54 +20,46 @@
 #define O_TRUNC     0x0200 // Truncate size to 0
 #define O_APPEND    0x0400 // Append mode
 
-#define SYS_EXIT 0
-#define SYS_WRITE 1
-#define SYS_OPEN 2      // (const char *path, int flags)
-#define SYS_CLOSE 3     // (int fd)
-#define SYS_READ 4      // (int fd, void *buf, size_t size)
-#define SYS_STAT 5      // (const char *path, struct stat *stat_buf)
-#define SYS_MKDIR 6     // (const char *path)
-#define SYS_READDIR 7   // (int fd, int index, struct dirent *dir_entry)
-#define SYS_UNLINK 8    // (const char *path)
-#define SYS_RMDIR 9     // (const char *path)
-#define SYS_SOCKET 10   // (int domain, int type, int protocol)
-#define SYS_CONNECT 11  // (int sockfd, const struct sockaddr_in *addr, size_t addrlen)
-#define SYS_SEND 12     // (int sockfd, const void *buf, size_t len, int flags)
-#define SYS_RECV 13     // (int sockfd, void *buf, size_t len, int flags)
-#define SYS_BIND 14     // (int sockfd, const struct sockaddr_in *addr, size_t addrlen)
-#define SYS_LISTEN 15   // (int sockfd, int backlog)
-#define SYS_ACCEPT 16   // (int sockfd, struct sockaddr_in *addr, size_t *addrlen)
-#define SYS_GET_TICKS 17
-#define SYS_SHA256 18 // (const uint8_t* data, size_t len, uint8_t* hash_out)
-#define SYS_MALLOC 19 // (size_t size)
-#define SYS_FREE 20   // (void *ptr)
-#define SYS_IOCTL 21 // (int fd, int request, void* argp)
-#define SYS_MOUNT 22 // (const char* mount_point_path, const char* device_node_path, const char* fs_type_name)
-#define SYS_UNMOUNT 23 // (const char* mount_point_path)
-#define SYS_EXEC 24
-#define SYS_GFX_GET_FB_INFO 25
-#define SYS_INPUT_POLL_EVENT 26
-#define SYS_SBRK 27
 #define SYS_SENDTO    28
 #define SYS_RECVFROM  29
-#define SYS_SETSOCKOPT 30
-#define SYS_DNS_RESOLVE 31
 
 uint32_t dns_resolve(const char *host);
 
+static inline uint64_t _syscall6(uint64_t num, uint64_t a1, uint64_t a2,
+                                uint64_t a3, uint64_t a4, uint64_t a5,
+                                uint64_t a6) {
+  /* Pin every argument to its ABI register up front. Plain "r" inputs with
+   * movq chains let the allocator pick rdi/rsi/rdx/rax for later operands
+   * and earlier movqs then clobber them (classic wrapper bug). */
+  register uint64_t r_num __asm__("rax") = num;
+  register uint64_t r_a1  __asm__("rdi") = a1;
+  register uint64_t r_a2  __asm__("rsi") = a2;
+  register uint64_t r_a3  __asm__("rdx") = a3;
+  register uint64_t r_a4  __asm__("r10") = a4;
+  register uint64_t r_a5  __asm__("r8")  = a5;
+  register uint64_t r_a6  __asm__("r9")  = a6;
+  __asm__ __volatile__("int $0x80"
+                       : "+a"(r_num)
+                       : "r"(r_a1), "r"(r_a2), "r"(r_a3),
+                         "r"(r_a4), "r"(r_a5), "r"(r_a6)
+                       : "memory", "rcx", "r11");
+  return r_num;
+}
+
+/* POSIX-style wrapper: kernel returns -errno; sets errno, returns -1. */
+extern int errno;
+void __set_errno(int err_code);
+static inline long _sys(long num, long a1, long a2, long a3,
+                        long a4, long a5, long a6) {
+  long r = (long)_syscall6((uint64_t)num, (uint64_t)a1, (uint64_t)a2,
+                           (uint64_t)a3, (uint64_t)a4, (uint64_t)a5, (uint64_t)a6);
+  if (r < 0 && r >= -133) { __set_errno((int)-r); return -1; }
+  return r;
+}
+
 static inline uint64_t syscall(uint64_t num, uint64_t a1, uint64_t a2,
                                uint64_t a3) {
-  uint64_t ret;
-  __asm__ __volatile__("movq %1, %%rax\n\t"
-                       "movq %2, %%rdi\n\t"
-                       "movq %3, %%rsi\n\t"
-                       "movq %4, %%rdx\n\t"
-                       "int $0x80\n\t"
-                       "movq %%rax, %0"
-                       : "=r"(ret)
-                       : "r"(num), "r"(a1), "r"(a2), "r"(a3)
-                       : "rax", "rdi", "rsi", "rdx", "memory");
-  return ret;
+  return _syscall6(num, a1, a2, a3, 0, 0, 0);
 }
 
 static inline void exit(int status) { syscall(SYS_EXIT, (uint64_t)status, 0, 0); }
@@ -288,20 +281,17 @@ static inline int recv(int sockfd, void *buf, size_t len, int /*flags*/) {
 
 static inline int sendto(int sockfd, const void *buf, size_t len, int flags,
                          const struct sockaddr_in *addr, socklen_t addrlen) {
-    (void)flags; (void)addr; (void)addrlen;
-    return (int)syscall(SYS_SENDTO, (uint64_t)sockfd, (uint64_t)buf, (uint64_t)len);
+    return (int)_sys(SYS_SENDTO, sockfd, (long)buf, len, flags, (long)addr, addrlen);
 }
 
 static inline int recvfrom(int sockfd, void *buf, size_t len, int flags,
                             struct sockaddr_in *addr, socklen_t *addrlen) {
-    (void)flags; (void)addr; (void)addrlen;
-    return (int)syscall(SYS_RECVFROM, (uint64_t)sockfd, (uint64_t)buf, (uint64_t)len);
+    return (int)_sys(SYS_RECVFROM, sockfd, (long)buf, len, flags, (long)addr, (long)addrlen);
 }
 
 static inline int setsockopt(int sockfd, int level, int optname,
                               const void *optval, socklen_t optlen) {
-    (void)level; (void)optname; (void)optval; (void)optlen;
-    return (int)syscall(SYS_SETSOCKOPT, (uint64_t)sockfd, 0, 0);
+    return (int)_sys(SYS_SETSOCKOPT, sockfd, level, optname, (long)optval, optlen, 0);
 }
 
 
@@ -350,8 +340,12 @@ int atoi(const char *s);
 static inline uint64_t get_ticks() { return syscall(SYS_GET_TICKS, 0, 0, 0); }
 
 
+/* Timer runs at 100 Hz (see kernel.c timer_init(100)): 1 tick = 10 ms. */
+static inline uint64_t uptime_ticks(void) {
+    return get_ticks();
+}
 static inline uint32_t uptime_ms(void) {
-    return (uint32_t)(get_ticks());
+    return (uint32_t)(get_ticks() * 10u);
 }
 
 static inline void sleep_ms(uint32_t ms) {
@@ -383,6 +377,91 @@ static inline void free(void *ptr) {
 
 static inline void *sbrk(intptr_t increment) {
     return (void *)syscall(SYS_SBRK, (uint64_t)increment, 0, 0);
+}
+
+// ---- New ABI wrappers (errno-contract, 6-arg capable) ----
+static inline int debugmode_get(void) {
+  return (int)_syscall6(SYS_DEBUGMODE_GET, 0, 0, 0, 0, 0, 0);
+}
+static inline int debugmode_set(int mode) {
+  return (int)_sys(SYS_DEBUGMODE_SET, mode, 0, 0, 0, 0, 0);
+}
+static inline uint32_t getuid(void) {
+  return (uint32_t)_syscall6(SYS_GETUID, 0, 0, 0, 0, 0, 0);
+}
+static inline uint32_t geteuid(void) {
+  return (uint32_t)_syscall6(SYS_GETEUID, 0, 0, 0, 0, 0, 0);
+}
+static inline uint32_t getgid(void) {
+  return (uint32_t)_syscall6(SYS_GETGID, 0, 0, 0, 0, 0, 0);
+}
+static inline uint32_t getegid(void) {
+  return (uint32_t)_syscall6(SYS_GETEGID, 0, 0, 0, 0, 0, 0);
+}
+static inline int setuid(uint32_t uid) {
+  return (int)_sys(SYS_SETUID, uid, 0, 0, 0, 0, 0);
+}
+static inline int setgid(uint32_t gid) {
+  return (int)_sys(SYS_SETGID, gid, 0, 0, 0, 0, 0);
+}
+static inline int seteuid(uint32_t euid) {
+  return (int)_sys(SYS_SETEUID, euid, 0, 0, 0, 0, 0);
+}
+static inline int setegid(uint32_t egid) {
+  return (int)_sys(SYS_SETEGID, egid, 0, 0, 0, 0, 0);
+}
+static inline uint32_t umask(uint32_t m) {
+  return (uint32_t)_syscall6(SYS_UMASK, m, 0, 0, 0, 0, 0);
+}
+static inline int chmod(const char *path, uint32_t mode) {
+  return (int)_sys(SYS_CHMOD, (long)path, mode, 0, 0, 0, 0);
+}
+static inline int fchmod(int fd, uint32_t mode) {
+  return (int)_sys(SYS_FCHMOD, fd, mode, 0, 0, 0, 0);
+}
+static inline int chown(const char *path, uint32_t uid, uint32_t gid) {
+  return (int)_sys(SYS_CHOWN, (long)path, uid, gid, 0, 0, 0);
+}
+static inline int getcwd(char *buf, size_t size) {
+  return (int)_syscall6(SYS_GETCWD, (uint64_t)buf, size, 0, 0, 0, 0);
+}
+static inline int chdir(const char *path) {
+  return (int)_sys(SYS_CHDIR, (long)path, 0, 0, 0, 0, 0);
+}
+static inline uint32_t getpid(void) {
+  return (uint32_t)_syscall6(SYS_GETPID, 0, 0, 0, 0, 0, 0);
+}
+static inline int kill(uint32_t pid, int sig) {
+  return (int)_sys(SYS_KILL, pid, sig, 0, 0, 0, 0);
+}
+static inline int dup(int fd) {
+  return (int)_sys(SYS_DUP, fd, 0, 0, 0, 0, 0);
+}
+static inline int dup2(int fd, int fd2) {
+  return (int)_sys(SYS_DUP2, fd, fd2, 0, 0, 0, 0);
+}
+static inline int lseek(int fd, int64_t offset, int whence) {
+  return (int)_sys(SYS_LSEEK, fd, offset, whence, 0, 0, 0);
+}
+static inline int fstat(int fd, struct stat *st) {
+  return (int)_sys(SYS_FSTAT, fd, (long)st, 0, 0, 0, 0);
+}
+static inline int shutdown(int fd, int how) {
+  return (int)_sys(SYS_SOCK_SHUTDOWN, fd, how, 0, 0, 0, 0);
+}
+static inline int getsockname(int fd, struct sockaddr_in *addr, socklen_t *addrlen) {
+  return (int)_sys(SYS_GETSOCKNAME, fd, (long)addr, (long)addrlen, 0, 0, 0);
+}
+
+// Introspection (KyroOS-specific syscalls)
+static inline int proc_list(struct procinfo *buf, size_t max_entries) {
+  return (int)_sys(SYS_PROC_LIST, (long)buf, (long)max_entries, 0, 0, 0, 0);
+}
+static inline int sysinfo_k(struct sysinfo_k *out) {
+  return (int)_sys(SYS_SYSINFO, (long)out, 0, 0, 0, 0, 0);
+}
+static inline int net_ifconf(struct ifinfo *buf, size_t max_entries) {
+  return (int)_sys(SYS_NET_IFCONF, (long)buf, (long)max_entries, 0, 0, 0, 0);
 }
 
 #endif // KYROLIB_H

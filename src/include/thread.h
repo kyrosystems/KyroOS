@@ -9,6 +9,13 @@
 
 #define MAX_FILES 16
 
+// vfs.h defines MAX_FILENAME_LEN; keep thread.h decoupled from vfs.h
+// (only a forward declaration of vfs_node_t is needed here), but the
+// value must match vfs.h. Guarded so including vfs.h first wins.
+#ifndef MAX_FILENAME_LEN
+#define MAX_FILENAME_LEN 256
+#endif
+
 // Forward declare vfs_node_t to avoid circular dependency
 struct vfs_node;
 struct socket; // Forward declare socket for fd_entry_t union
@@ -51,6 +58,15 @@ typedef struct thread {
   uint64_t initial_program_break;
   fd_entry_t fd_table[MAX_FILES]; // File descriptor table
   struct thread *next; // For scheduler linked list
+
+  // Credentials (POSIX-style). Kernel threads and exec default to root (0).
+  uint32_t uid, gid;     // real
+  uint32_t euid, egid;   // effective (access checks use these)
+  uint32_t umask;        // file-creation mask
+  char name[32];         // process name (basename of exec path)
+  uint64_t cpu_ticks;    // total scheduler ticks consumed (sysmon/ps)
+  uint64_t start_ticks;  // scheduler ticks at creation
+  char cwd[MAX_FILENAME_LEN]; // current working directory (path text)
 } thread_t;
 
 // Function pointer for thread entry point
@@ -58,7 +74,7 @@ typedef void (*thread_func_t)(void*);
 
 void thread_init();
 thread_t* thread_create(thread_func_t func, void* arg); // For kernel threads
-thread_t* thread_create_userspace(uint64_t entry_point, pml4_t* pml4, uint64_t program_break, int argc, char* argv[]); // For userspace ELFs
+thread_t* thread_create_userspace(uint64_t entry_point, pml4_t* pml4, uint64_t program_break, int argc, char* argv[], const char* name); // For userspace ELFs
 void thread_exit();
 
 // Assembly function for context switching

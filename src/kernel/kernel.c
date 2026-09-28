@@ -23,6 +23,7 @@
 #include "syscall.h"
 #include "kyrofs.h"
 #include "lkm.h"
+#include "selftest.h"
 #include "ip.h"
 #include "arp.h"
 #include "udp.h"
@@ -68,11 +69,13 @@ void kmain_x64(void) {
     devfs_init();
     vfs_mount(vfs_resolve_path(vfs_root, "/dev"), NULL, "devfs");
     syscall_init();
+    syscall_audit_table(); // verify dispatch table covers the ABI registry
     // Initialize PCI and enumerate devices
     pci_enumerate();
 
     // network stack initialization
     ip_init();
+    net_register_loopback(); // lo: deterministic self-test interface
     arp_init();
     udp_init();
     tcp_init();
@@ -83,6 +86,7 @@ void kmain_x64(void) {
     lkm_manager_init(&g_lkm_manager);
     // Load the kernel modules specified in the Limine module request
     klog(LOG_INFO, "KyroOS 26.03.12 Beryllium Ready.");
+    selftest_init(); // boot-time integration tests
     // Start the shell in a new thread
     __asm__ __volatile__("sti");
     thread_create(shell_main, NULL);

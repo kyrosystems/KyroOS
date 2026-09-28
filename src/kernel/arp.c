@@ -1,6 +1,7 @@
 #include "arp.h"
 #include "heap.h"
 #include "ip.h"
+#include "isr.h" // timer_get_ticks
 #include "kstring.h"
 #include "log.h"
 #include "net.h"
@@ -49,6 +50,8 @@ void arp_queue_packet(uint32_t dest_ip, const uint8_t *data, size_t len) {
             arp_pending[i].dest_ip = dest_ip;
             arp_pending[i].len     = len;
             arp_pending[i].used    = 1;
+            arp_pending[i].retries = 0;
+            arp_pending[i].last_req_ticks = timer_get_ticks();
             memcpy(arp_pending[i].data, data, len);
             klog(LOG_INFO, "ARP: Queued packet for pending resolution.");
             return;
@@ -105,6 +108,31 @@ void arp_send_request(uint32_t target_ip) {
 
     network_devices->send_packet(network_devices, packet_buffer, packet_size);
     kfree(packet_buffer);
+}
+
+/* Retransmit ARP requests for pending packets. A single lost request
+ * (or lost reply) would otherwise stall the queue until it overflows. */
+#define ARP_RETRY_INTERVAL_TICKS 100 /* 1 s at 100 Hz */
+#define ARP_MAX_RETRIES 3
+void arp_poll() {
+    uint64_t now = timer_get_ticks();
+    for (int i = 0; i < ARP_PENDING_QUEUE_SIZE; i++) {
+        if (!arp_pending[i].used) continue;
+        if (now - arp_pending[i].last_req_ticks < ARP_RETRY_INTERVAL_TICKS)
+            continue;
+        if (arp_pending[i].retries >= ARP_MAX_RETRIES) {
+            /* Give up on this destination: drop the queued frame so the
+             * queue does not fill with dead entries. */
+            klog(LOG_WARN, "ARP: resolution timeout for %u.%u.%u.%u, dropping queued packet",
+                 (arp_pending[i].dest_ip >> 24) & 0xFF, (arp_pending[i].dest_ip >> 16) & 0xFF,
+                 (arp_pending[i].dest_ip >> 8) & 0xFF, arp_pending[i].dest_ip & 0xFF);
+            arp_pending[i].used = 0;
+            continue;
+        }
+        arp_pending[i].retries++;
+        arp_pending[i].last_req_ticks = now;
+        arp_send_request(arp_pending[i].dest_ip);
+    }
 }
 
 void arp_handle_packet(const uint8_t *packet, size_t size) {
