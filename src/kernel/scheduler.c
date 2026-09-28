@@ -39,11 +39,10 @@ thread_t *get_current_thread() { return current_thread; }
 // switch, in the resumed thread's context, with interrupts disabled.
 static void scheduler_reap_dead(thread_t *guard) {
   if (!ready_queue) return;
-  /* Count nodes once so the ring walk is always bounded. */
   int count = 0;
   thread_t *c = ready_queue;
   do { count++; c = c->next; } while (c && c != ready_queue && count < 1024);
-  if (count >= 1024) return; /* ring corrupt: refuse to walk */
+  if (count >= 1024) return; // ring corrupt: refuse to walk 
   thread_t *prev = ready_queue;
   thread_t *cur = ready_queue->next;
   for (int i = 0; i < count && cur && ready_queue; i++) {
@@ -55,8 +54,8 @@ static void scheduler_reap_dead(thread_t *guard) {
           cur->fd_table[f].type = FD_TYPE_NONE;
         }
       }
-      /* Destroy the user address space unless it is the active CR3
-         (kernel threads share the kernel pml4 and must never free it). */
+      // destroy the user address space unless it is the active CR3 (kernel threads share the kernel pml4 and must never free it).
+
       if (cur->pml4 && cur->pml4 != vmm_get_current_pml4()) {
         vmm_destroy_address_space(cur->pml4);
       }
@@ -108,8 +107,6 @@ void schedule() {
     current_thread = next_thread;
     if (next_thread->stack) tss_set_stack((uint64_t)next_thread->stack + KERNEL_STACK_SIZE);
     thread_switch(old_thread, next_thread);
-    /* Running again in next_thread's context: safe to free abandoned
-       dead threads (old_thread included if it exited). */
     scheduler_reap_dead(get_current_thread());
   }
   enable_interrupts();
