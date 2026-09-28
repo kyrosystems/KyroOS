@@ -326,7 +326,18 @@ static void sys_mkdir(struct registers *regs) {
 }
 
 static void sys_readdir(struct registers *regs) {
-  vfs_node_t *node = (vfs_node_t *)regs->rdi;
+  /* ABI: small values are fds; large values are legacy raw node pointers. */
+  vfs_node_t *node = NULL;
+  uint64_t rd = regs->rdi;
+  if (rd < MAX_FILES) {
+    thread_t *t = get_current_thread();
+    if (!t || t->fd_table[rd].type != FD_TYPE_FILE ||
+        !t->fd_table[rd].data.file.node) { regs->rax = -EBADF; return; }
+    node = t->fd_table[rd].data.file.node;
+    if (!(node->flags & VFS_DIRECTORY)) { regs->rax = -ENOTDIR; return; }
+  } else {
+    node = (vfs_node_t *)rd;
+  }
   uint32_t index = (uint32_t)regs->rsi;
   struct dirent *dir_entry =
       (struct dirent *)regs->rdx; // Third argument for dirent buffer
@@ -339,6 +350,7 @@ static void sys_readdir(struct registers *regs) {
   if (!node) {
     node = vfs_root;
   }
+
 
   regs->rax = vfs_readdir(
       node, index,

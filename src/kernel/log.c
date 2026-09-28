@@ -137,10 +137,11 @@ void klog(log_level_t level, const char *fmt, ...) {
   va_end(args);
   serial_print(buf);
   serial_print("\n");
-  if (epstein == 1 || level >= LOG_ERROR) {
+
+  if (level == LOG_DEBUG) return;
+  if (epstein == 1 || level >= LOG_WARN) {
     klog_print_str(buf, false);
     klog_putchar('\n');
-    fb_flush();
   }
 }
 

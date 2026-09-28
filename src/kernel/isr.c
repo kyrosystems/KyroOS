@@ -1,4 +1,5 @@
 #include "isr.h"
+#include "fb.h"
 #include "log.h"
 #include "port_io.h"
 #include "scheduler.h"
@@ -106,6 +107,9 @@ void isr_handler(struct registers *regs) {
       // Per-thread CPU accounting: charge the tick to whoever was preempted.
       extern thread_t *current_thread;
       if (current_thread) current_thread->cpu_ticks++;
+
+      static uint32_t flush_phase = 0;
+      if (++flush_phase >= 2) { flush_phase = 0; fb_flush_dirty(); }
     }
 
     if (irq_handlers[irq_num] != 0) {

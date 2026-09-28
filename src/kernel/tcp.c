@@ -1,5 +1,6 @@
 #include "tcp.h"
 #include "ip.h"
+#include "isr.h"
 #include "log.h"
 #include "heap.h"
 #include "net.h"
@@ -33,7 +34,7 @@ static uint16_t tcp_checksum(const void *data, size_t len,
 
     ptr = (uint16_t *)data;
     for (size_t i = 0; i < len / 2; i++) sum += ptr[i];
-    if (len % 2) sum += ((uint8_t *)data)[len - 1];
+    if (len % 2) sum += (uint32_t)((uint8_t *)data)[len - 1] << 8; // odd byte is high 
 
     while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
     return (uint16_t)~sum;
@@ -89,17 +90,31 @@ int tcp_connect_tcb(tcp_tcb_t *tcb, uint32_t remote_ip, uint16_t remote_port) {
     tcb->remote_port = remote_port;
     tcb->local_ip    = ip_get_local_ip();
     tcb->local_port  = next_local_port++;
-    tcb->snd_nxt     = 1000;
+    uint32_t isn     = 1000;
+    tcb->snd_nxt     = isn;
     tcb->state       = TCP_STATE_SYN_SENT;
 
     tcp_send_packet(tcb, TCP_FLAG_SYN, NULL, 0);
-    tcb->snd_nxt++;
+    tcb->snd_nxt = isn + 1;
 
-    /* Block until ESTABLISHED or timeout via scheduler */
-    waitqueue_add(&tcb->connect_wq, get_current_thread());
-    get_current_thread()->state = THREAD_BLOCKED;
-    schedule();
 
+    extern void net_poll(void);
+    uint64_t deadline  = timer_get_ticks() + 1500; // 15 s @ 100 Hz 
+    uint64_t next_retx = timer_get_ticks() + 30;   // 300 ms 
+    while (tcb->state == TCP_STATE_SYN_SENT && timer_get_ticks() < deadline) {
+        net_poll();
+        if (tcb->state != TCP_STATE_SYN_SENT) break;
+        if (timer_get_ticks() >= next_retx) {
+            uint32_t save = tcb->snd_nxt;
+            tcb->snd_nxt  = isn;
+            tcp_send_packet(tcb, TCP_FLAG_SYN, NULL, 0);
+            tcb->snd_nxt  = save;
+            next_retx = timer_get_ticks() + 30;
+        }
+        get_current_thread()->state = THREAD_READY;
+        schedule();
+    }
+    if (tcb->state == TCP_STATE_SYN_SENT) tcb->state = TCP_STATE_CLOSED; // timed out 
     return (tcb->state == TCP_STATE_ESTABLISHED) ? 0 : -1;
 }
 
@@ -114,9 +129,11 @@ int tcp_recv_tcb(tcp_tcb_t *tcb, void *buf, size_t len) {
     if (!tcb) return -1;
 
     while (tcb->recv_data_len == 0) {
-        if (tcb->state == TCP_STATE_CLOSED) return 0;
-        waitqueue_add(&tcb->recv_wq, get_current_thread());
-        get_current_thread()->state = THREAD_BLOCKED;
+        if (tcb->state == TCP_STATE_CLOSED || tcb->state == TCP_STATE_CLOSE_WAIT)
+            return 0;
+        extern void net_poll(void);
+        net_poll();
+        get_current_thread()->state = THREAD_READY;
         schedule();
     }
 

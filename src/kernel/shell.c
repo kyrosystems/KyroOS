@@ -288,12 +288,23 @@ static void cmd_ps() {
     scheduler_print_threads();
 }
 
+static void shell_wait_child(thread_t *child) {
+    while (child && __atomic_load_n(&child->state, __ATOMIC_ACQUIRE) != THREAD_DEAD) {
+        net_poll_all();
+        get_current_thread()->state = THREAD_READY;
+        schedule();
+    }
+}
+
 // Execute userspace binary from /bin/
 static void cmd_exec_bin(const char *name, int argc, char **argv) {
     char path[256];
     ksprintf(path, "/bin/%s", name);
-    if (elf_exec_as_thread(path, argc, argv) != 0)
+    thread_t *child = elf_exec_as_thread_handle(path, argc, argv);
+    if (!child)
         kprintf("%s: command not found\n", name);
+    else
+        shell_wait_child(child);
 }
 
 static void cmd_lsmod() {

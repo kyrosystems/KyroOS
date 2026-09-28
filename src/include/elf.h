@@ -101,5 +101,6 @@ typedef struct {
 
 elf_load_result_t elf_load(pml4_t* pml4, const uint8_t* elf_data);
 int elf_exec_as_thread(const char* path, int argc, char* argv[]);
+struct thread *elf_exec_as_thread_handle(const char* path, int argc, char* argv[]);
 
 #endif

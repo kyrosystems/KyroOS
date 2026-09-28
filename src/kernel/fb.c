@@ -6,6 +6,22 @@ static fb_info_t current_fb;
 static uint32_t *back_buffer = NULL;
 static bool back_buffer_ready = false;
 
+static uint32_t dirty_top = 0, dirty_bottom = 0; 
+static bool     dirty_valid = false;
+
+static inline void fb_mark_dirty(uint32_t y0, uint32_t y1) {
+  if (!back_buffer_ready) return;
+  if (y0 > y1) { uint32_t t = y0; y0 = y1; y1 = t; }
+  if (y0 >= current_fb.height) return;
+  if (y1 > current_fb.height) y1 = current_fb.height;
+  if (!dirty_valid) {
+    dirty_top = y0; dirty_bottom = y1; dirty_valid = true;
+  } else {
+    if (y0 < dirty_top) dirty_top = y0;
+    if (y1 > dirty_bottom) dirty_bottom = y1;
+  }
+}
+
 void fb_init(struct limine_framebuffer *fb) {
   current_fb.address = (uint64_t)fb->address;
   current_fb.width = fb->width;
@@ -28,6 +44,11 @@ bool fb_is_backbuffer_initialized() { return back_buffer_ready; }
 void fb_set_pixel(uint32_t x, uint32_t y, uint32_t color) {
   if (!back_buffer_ready || x >= current_fb.width || y >= current_fb.height) return;
   back_buffer[y * (current_fb.pitch / 4) + x] = color;
+  if (!dirty_valid) { dirty_top = y; dirty_bottom = y + 1; dirty_valid = true; }
+  else {
+    if (y < dirty_top) dirty_top = y;
+    if (y + 1 > dirty_bottom) dirty_bottom = y + 1;
+  }
 }
 
 uint32_t fb_get_pixel(uint32_t x, uint32_t y) {
@@ -43,6 +64,7 @@ void fb_clear(uint32_t color) {
   } else {
       for (uint32_t i = 0; i < current_fb.width * current_fb.height; i++) back_buffer[i] = color;
   }
+  fb_mark_all_dirty();
 }
 
 void fb_draw_bitmap(int x, int y, const uint32_t *data, int w, int h) {
@@ -81,6 +103,26 @@ void fb_draw_char(char c, uint32_t x, uint32_t y, uint32_t fg, uint32_t bg) {
 void fb_flush() {
   if (!back_buffer_ready) return;
   memcpy((void *)current_fb.address, back_buffer, current_fb.height * current_fb.pitch);
+  dirty_valid = false;
+}
+
+void fb_mark_all_dirty(void) {
+  if (!back_buffer_ready) return;
+  dirty_top = 0;
+  dirty_bottom = current_fb.height;
+  dirty_valid = true;
+}
+
+bool fb_flush_dirty(void) {
+  if (!back_buffer_ready || !dirty_valid) return false;
+  if (dirty_bottom <= dirty_top) { dirty_valid = false; return false; }
+  uint64_t off_px  = (uint64_t)dirty_top * (current_fb.pitch / 4);
+  uint64_t off_byt = (uint64_t)dirty_top * current_fb.pitch;
+  uint64_t rows    = (uint64_t)(dirty_bottom - dirty_top);
+  memcpy((uint8_t *)current_fb.address + off_byt,
+         back_buffer + off_px, (size_t)(rows * current_fb.pitch));
+  dirty_valid = false;
+  return true;
 }
 
 void fb_copy_region(uint32_t src_y, uint32_t dst_y, uint32_t h) {
@@ -88,6 +130,7 @@ void fb_copy_region(uint32_t src_y, uint32_t dst_y, uint32_t h) {
   uint32_t row_size = current_fb.pitch;
   if (src_y + h > current_fb.height || dst_y + h > current_fb.height) return;
   memcpy(back_buffer + (dst_y * row_size / 4), back_buffer + (src_y * row_size / 4), h * row_size);
+  fb_mark_all_dirty();
 }
 
 const fb_info_t *fb_get_info() { return &current_fb; }

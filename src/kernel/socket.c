@@ -396,7 +396,9 @@ int sock_close(socket_t *sock) {
         cur = &(*cur)->next;
     }
 
-    if (sock->protocol == IPPROTO_UDP && sock->proto_data.udp_data.recv_buffer)
+    if ((sock->protocol == IPPROTO_UDP ||
+         (sock->type == SOCK_RAW && sock->protocol == IPPROTO_ICMP)) &&
+        sock->proto_data.udp_data.recv_buffer)
         kfree(sock->proto_data.udp_data.recv_buffer);
 
     if (sock->protocol == IPPROTO_TCP && sock->proto_data.tcp_tcb)

@@ -130,6 +130,10 @@ elf_load_result_t elf_load(pml4_t *pml4, const uint8_t *elf_data) {
 }
 
 int elf_exec_as_thread(const char *path, int argc, char *argv[]) {
+    return elf_exec_as_thread_handle(path, argc, argv) ? 0 : -1;
+}
+
+struct thread *elf_exec_as_thread_handle(const char *path, int argc, char *argv[]) {
     klog(LOG_INFO, "elf_exec_as_thread: entered with path '%s'", path);
 
     vfs_node_t *node = vfs_resolve_path(vfs_root, path);
@@ -159,12 +163,12 @@ int elf_exec_as_thread(const char *path, int argc, char *argv[]) {
     if (result.success) {
         klog(LOG_INFO, "ELF Exec: Starting userspace thread at entry point %x",
              result.entry_point);
-        thread_create_userspace(result.entry_point, new_pml4, result.program_break,
-                                argc, argv, path);
-        return 0;
+        return thread_create_userspace(result.entry_point, new_pml4,
+                                       result.program_break,
+                                       argc, argv, path);
     }
 
     klog(LOG_ERROR, "ELF Exec: Failed to load ELF");
     vmm_destroy_address_space(new_pml4);
-    return -1;
+    return NULL;
 }
