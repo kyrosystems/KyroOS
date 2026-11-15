@@ -159,13 +159,24 @@ void ip_handle_packet(net_dev_t *net_dev, const uint8_t *packet, size_t size) {
     const ipv4_header_t *ip = (const ipv4_header_t *)packet;
     if (ip->version != 4) return;
 
+    size_t        hlen   = ip->ihl * 4;
+    if (size < hlen) return;
+    const uint8_t *payload = packet + hlen;
+    size_t        psize  = __builtin_bswap16(ip->total_length) - hlen;
+
+    // DHCP packets (ports 67/68) must always be delivered regardless of local IP configuration
+    if (ip->protocol == IP_PROTOCOL_UDP && psize >= sizeof(udp_header_t)) {
+        const udp_header_t *udp = (const udp_header_t *)payload;
+        uint16_t dport = __builtin_bswap16(udp->dest_port);
+        if (dport == 67 || dport == 68) {
+            sock_handle_incoming_packet(net_dev, ip, payload, psize, ip->protocol);
+            return;
+        }
+    }
+
     uint32_t dip = __builtin_bswap32(ip->dest_ip);
     if (dip != 0x7F000001 &&
         local_ip != 0 && dip != local_ip && dip != 0xFFFFFFFF) return;
-
-    size_t        hlen   = ip->ihl * 4;
-    const uint8_t *payload = packet + hlen;
-    size_t        psize  = __builtin_bswap16(ip->total_length) - hlen;
 
     if (ip->protocol == IP_PROTOCOL_ICMP) {
         if (ip_protocol_handlers[ip->protocol])

@@ -3,6 +3,14 @@
 #include "kstring.h"
 
 static fb_info_t current_fb;
+static uint64_t mode_capacity;
+uint64_t fb_mode_capacity(void) { return mode_capacity; }
+static uint64_t graphics_owner = 0;
+
+void fb_set_graphics_owner(uint64_t pid) { graphics_owner = pid; }
+void fb_release_graphics_owner(uint64_t pid) {
+  if (graphics_owner == pid) graphics_owner = 0;
+}
 static uint32_t *back_buffer = NULL;
 static bool back_buffer_ready = false;
 
@@ -28,6 +36,13 @@ void fb_init(struct limine_framebuffer *fb) {
   current_fb.height = fb->height;
   current_fb.pitch = fb->pitch;
   current_fb.bpp = fb->bpp;
+  mode_capacity = fb->height * fb->pitch;
+}
+
+void fb_update_mode(uint32_t width, uint32_t height, uint32_t pitch) {
+  current_fb.width = width; current_fb.height = height; current_fb.pitch = pitch;
+  dirty_valid = false;
+  fb_clear(0);
 }
 
 void fb_init_backbuffer() {
@@ -62,7 +77,9 @@ void fb_clear(uint32_t color) {
   if (color == 0) {
       memset(back_buffer, 0, current_fb.height * current_fb.pitch);
   } else {
-      for (uint32_t i = 0; i < current_fb.width * current_fb.height; i++) back_buffer[i] = color;
+      for (uint32_t y = 0; y < current_fb.height; y++)
+          for (uint32_t x = 0; x < current_fb.width; x++)
+              back_buffer[y * (current_fb.pitch / 4) + x] = color;
   }
   fb_mark_all_dirty();
 }
@@ -91,17 +108,29 @@ extern uint8_t font_bitmap[256][16];
 #define FONT_HEIGHT 16
 
 void fb_draw_char(char c, uint32_t x, uint32_t y, uint32_t fg, uint32_t bg) {
+  if (!back_buffer_ready || x + FONT_WIDTH > current_fb.width || y + FONT_HEIGHT > current_fb.height) return;
   uint8_t *glyph = font_bitmap[(uint8_t)c];
+  uint32_t pitch_px = current_fb.pitch / 4;
   for (int i = 0; i < FONT_HEIGHT; i++) {
+    uint32_t *row = back_buffer + (y + i) * pitch_px + x;
+    uint8_t bits = glyph[i];
     for (int j = 0; j < FONT_WIDTH; j++) {
-      if (glyph[i] & (1 << (7 - j))) fb_set_pixel(x + j, y + i, fg);
-      else if (bg != 0) fb_set_pixel(x + j, y + i, bg);
+      if (bits & (1 << (7 - j))) row[j] = fg;
+      else if (bg != 0) row[j] = bg;
     }
+  }
+  if (!dirty_valid) {
+    dirty_top = y;
+    dirty_bottom = y + FONT_HEIGHT;
+    dirty_valid = true;
+  } else {
+    if (y < dirty_top) dirty_top = y;
+    if (y + FONT_HEIGHT > dirty_bottom) dirty_bottom = y + FONT_HEIGHT;
   }
 }
 
 void fb_flush() {
-  if (!back_buffer_ready) return;
+  if (!back_buffer_ready || graphics_owner) return;
   memcpy((void *)current_fb.address, back_buffer, current_fb.height * current_fb.pitch);
   dirty_valid = false;
 }
@@ -114,7 +143,7 @@ void fb_mark_all_dirty(void) {
 }
 
 bool fb_flush_dirty(void) {
-  if (!back_buffer_ready || !dirty_valid) return false;
+  if (!back_buffer_ready || !dirty_valid || graphics_owner) return false;
   if (dirty_bottom <= dirty_top) { dirty_valid = false; return false; }
   uint64_t off_px  = (uint64_t)dirty_top * (current_fb.pitch / 4);
   uint64_t off_byt = (uint64_t)dirty_top * current_fb.pitch;

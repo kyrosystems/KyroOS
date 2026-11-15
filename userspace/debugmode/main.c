@@ -9,6 +9,12 @@ static void usage(void) {
 }
 
 int main(int argc, char **argv) {
+    if (argc > 1 && (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0)) {
+        print("Usage: debugmode [0|1]\n");
+        print("Get or set kernel debug mode.\n");
+        print_flush();
+        return 0;
+    }
     if (argc < 2) {
         usage();
         return 2;

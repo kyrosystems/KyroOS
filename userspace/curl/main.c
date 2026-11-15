@@ -85,12 +85,20 @@ static void print_ip_from_u32(uint32_t ip) {
     print(buf);
 }
 
+#include "libtls.h"
+
+static inline int net_write(int fd, tls_session_t *t, const void *b, size_t l) {
+    return t ? tls_send(t, b, l) : write(fd, b, l);
+}
+static inline int net_read(int fd, tls_session_t *t, void *b, size_t l) {
+    return t ? tls_recv(t, b, l) : read(fd, b, l);
+}
+
 static int do_request(curl_opts_t *opts, int redirect_depth) {
     if (redirect_depth > 10) { print("curl: Too many redirects.\n"); return 1; }
 
-    if (strcmp(opts->url.scheme,"https")==0) {
-        print("curl: HTTPS not supported (no TLS).\n"); return 1;
-    }
+    bool is_https = (strcmp(opts->url.scheme, "https") == 0);
+    tls_session_t *tls = NULL;
 
     if (opts->verbose) {
         print("* Resolving "); print(opts->url.host); print("...\n");
@@ -119,6 +127,18 @@ static int do_request(curl_opts_t *opts, int redirect_depth) {
         print("curl: connect() failed.\n"); close(sockfd); return 7;
     }
     if (opts->verbose) print("* Connected.\n");
+
+    if (is_https) {
+        if (opts->verbose) print("* Establishing TLS 1.3 handshake...\n");
+        tls = tls_create_session(sockfd, opts->url.host);
+        if (!tls || tls_handshake(tls) != 0) {
+            print("curl: TLS 1.3 handshake failed.\n");
+            if (tls) tls_destroy_session(tls);
+            close(sockfd);
+            return 35;
+        }
+        if (opts->verbose) print("* TLS 1.3 connection established.\n");
+    }
 
     static char req[REQ_BUF_SIZE];
     int pos = 0;
@@ -167,9 +187,8 @@ static int do_request(curl_opts_t *opts, int redirect_depth) {
     pos += sprintf(req+pos, "\r\n");
 
     if (opts->verbose) { print("> "); }
-
-    write(sockfd, req, pos);
-    if (body_len > 0) write(sockfd, body, body_len);
+    net_write(sockfd, tls, req, pos);
+    if (body_len > 0) net_write(sockfd, tls, body, body_len);
 
     static char hdr_buf[HDR_BUF_SIZE];
     memset(hdr_buf, 0, sizeof(hdr_buf));
@@ -178,7 +197,7 @@ static int do_request(curl_opts_t *opts, int redirect_depth) {
     int   body_preread = 0;
 
     while (hdr_total < (int)sizeof(hdr_buf)-1) {
-        int n = read(sockfd, hdr_buf+hdr_total, sizeof(hdr_buf)-1-hdr_total);
+        int n = net_read(sockfd, tls, hdr_buf+hdr_total, sizeof(hdr_buf)-1-hdr_total);
         if (n<=0) break;
         hdr_total += n; hdr_buf[hdr_total]='\0';
         char *sep = strstr(hdr_buf,"\r\n\r\n");
@@ -191,6 +210,7 @@ static int do_request(curl_opts_t *opts, int redirect_depth) {
 
     if (!body_start) {
         print("curl: Incomplete HTTP response.\n");
+        if (tls) tls_destroy_session(tls);
         close(sockfd); return 1;
     }
 
@@ -265,7 +285,7 @@ static int do_request(curl_opts_t *opts, int redirect_depth) {
     static char dl_buf[BODY_BUF_SIZE];
     while (1) {
         if (has_cl && downloaded >= content_length) break;
-        int n = read(sockfd, dl_buf, sizeof(dl_buf)-1);
+        int n = net_read(sockfd, tls, dl_buf, sizeof(dl_buf)-1);
         if (n<=0) break;
         if (out_fd >= 0) write(out_fd, dl_buf, n);
         else if (!opts->silent) { dl_buf[n]='\0'; print(dl_buf); }
@@ -280,6 +300,7 @@ static int do_request(curl_opts_t *opts, int redirect_depth) {
         }
     }
 
+    if (tls) tls_destroy_session(tls);
     close(sockfd);
     return (status >= 200 && status < 400) ? 0 : 22;
 }

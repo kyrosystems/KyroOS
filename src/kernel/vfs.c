@@ -148,13 +148,23 @@ vfs_node_t *vfs_resolve_path(vfs_node_t *root, const char *path) {
     if (!path || path[0] == '\0') return root;
     if (strcmp(path, "/") == 0) return vfs_root;
     char buf[256]; strncpy(buf, path, 255);
-    vfs_node_t *current = (path[0] == '/') ? vfs_root : root;
+    buf[255] = '\0';
+    vfs_node_t *current = (path[0] == '/') ? vfs_root : (root ? root : vfs_root);
     char *token = (path[0] == '/') ? buf + 1 : buf;
     char *next = strchr(token, '/');
     while (token) {
         if (next) *next = '\0';
-        current = vfs_finddir(current, token);
-        if (!current) return NULL;
+        if (*token != '\0') {
+            if (strcmp(token, ".") == 0) {
+                // stay at current node
+            } else if (strcmp(token, "..") == 0) {
+                vfs_node_t *p = vfs_finddir(current, "..");
+                if (p) current = p;
+            } else {
+                current = vfs_finddir(current, token);
+                if (!current) return NULL;
+            }
+        }
         if (!next) break;
         token = next + 1; next = strchr(token, '/');
     }
@@ -186,6 +196,9 @@ int vfs_remove(vfs_node_t *parent, const char *path) {
     if (ac != 0) return ac;
     vfs_node_t *victim = vfs_resolve_path(parent, path);
     if (!victim) return -ENOENT;
+    thread_t *caller = get_current_thread();
+    if ((parent->mode & 01000) && caller && caller->euid != 0 &&
+        caller->euid != parent->uid && caller->euid != victim->uid) return -EPERM;
     if (victim->flags & VFS_DIRECTORY) return -EISDIR;
     if (victim->remove) return victim->remove(victim, (char *)path);
     return -ENOSYS;
@@ -198,6 +211,9 @@ int vfs_rmdir(vfs_node_t *parent, const char *path, uint16_t mode) {
     if (ac != 0) return ac;
     vfs_node_t *victim = vfs_resolve_path(parent, path);
     if (!victim) return -ENOENT;
+    thread_t *caller = get_current_thread();
+    if ((parent->mode & 01000) && caller && caller->euid != 0 &&
+        caller->euid != parent->uid && caller->euid != victim->uid) return -EPERM;
     if (!(victim->flags & VFS_DIRECTORY)) return -ENOTDIR;
     if (victim->rmdir) return victim->rmdir(victim, (char *)path, mode);
     return -ENOSYS;

@@ -27,10 +27,30 @@
 #include "ip.h"
 #include "arp.h"
 #include "udp.h"
+#include "ide.h"
 #include "tcp.h"
+#include "smp.h"
+#include "fat32.h"
+
+static void idle_thread(void *arg) {
+    (void)arg;
+    while (1) {
+        __asm__ volatile("sti; hlt");
+        schedule();
+    }
+}
+
+static void net_worker_thread(void *arg) {
+    (void)arg;
+    while (1) {
+        net_poll();
+        thread_sleep(1);
+    }
+}
 #include "dhcp.h"
 #include "dns.h"
 #include "vmm.h"
+#include "elf.h"
 
 __attribute__((used, section(".limine_reqs"))) static volatile struct limine_hhdm_request hhdm_request = {.id = LIMINE_HHDM_REQUEST, .revision = 0};
 __attribute__((used, section(".limine_reqs"))) static volatile struct limine_framebuffer_request framebuffer_request = {.id = LIMINE_FRAMEBUFFER_REQUEST, .revision = 0};
@@ -43,6 +63,14 @@ void kmain_x64(void) {
     if (hhdm_request.response != NULL) kernel_hhdm_offset = hhdm_request.response->offset;
     // Initialize logging first to capture any early messages
     log_init();
+    // Install exception handlers before touching memory management
+    gdt_init();
+    tss_init();
+    idt_init();
+    if (!hhdm_request.response || !memmap_request.response) {
+        serial_print("BOOT: Missing required Limine memory responses.\n");
+        for (;;) __asm__ volatile("cli; hlt");
+    }
     pmm_init(memmap_request.response, kernel_hhdm_offset);
     heap_init();
     vmm_init();
@@ -52,10 +80,6 @@ void kmain_x64(void) {
         log_update_console_dimensions();
         fb_init_backbuffer();
     }
-    // Initialize GDT, IDT, and TSS
-    gdt_init();
-    idt_init();
-    tss_init();
     // Initialize event handling and timer
     event_init();
     timer_init(100);
@@ -64,10 +88,13 @@ void kmain_x64(void) {
     rtc_init();
     // Initialize threading and virtual file system
     thread_init();
+    smp_init();
     vfs_init();
+    fat32_init();
     kyrofs_init(module_request.response);
     devfs_init();
     vfs_mount(vfs_resolve_path(vfs_root, "/dev"), NULL, "devfs");
+    ide_init();
     syscall_init();
     syscall_audit_table(); // verify dispatch table covers the ABI registry
     // Initialize PCI and enumerate devices
@@ -82,14 +109,24 @@ void kmain_x64(void) {
     dhcp_init();
     dhcp_client_start();
     dns_init(0x08080808); // Google DNS server IP address in hex 
+    thread_t *idle_th = thread_create(idle_thread, NULL);
+    if (idle_th) strncpy(idle_th->name, "idle", sizeof(idle_th->name) - 1);
+    thread_create(net_worker_thread, NULL);
     // Initialize the loadable kernel module manager
     lkm_manager_init(&g_lkm_manager);
     // Load the kernel modules specified in the Limine module request
-    klog(LOG_INFO, "KyroOS 26.03.12 Beryllium Ready.");
+    klog(LOG_INFO, "KyroOS 26.11.13 Carbon Ready.");
     selftest_init(); // boot-time integration tests
-    // Start the shell in a new thread
-    __asm__ __volatile__("sti");
-    thread_create(shell_main, NULL);
+    // Start userspace init (PID 1) or shell in true Ring 3 userspace
+    struct thread *init_th = elf_exec_as_thread_handle("/bin/init", 1, (char *[]){"/bin/init", NULL});
+    if (!init_th) {
+        init_th = elf_exec_as_thread_handle("/bin/sh", 1, (char *[]){"/bin/sh", NULL});
+    }
+    if (!init_th) {
+        klog(LOG_WARN, "Userspace init not found; launching fallback emergency kernel shell.");
+        thread_create(shell_main, NULL);
+    }
     // Start the scheduler
+    __asm__ __volatile__("sti");
     while (1) { schedule(); __asm__ __volatile__("hlt"); }
 }

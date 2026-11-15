@@ -1,6 +1,12 @@
 #include <kyroolib.h>
 
 int main(int argc, char **argv) {
+    if (argc > 1 && (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0)) {
+        print("Usage: cat [FILE]...\n");
+        print("Concatenate FILE(s) to standard output.\n");
+        print_flush();
+        return 0;
+    }
     if (argc < 2) {
         print("Usage: cat <file>\n");
         return 1;

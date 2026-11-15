@@ -30,6 +30,7 @@ static const unsigned char kbd_us_shift[128] = {
 static bool ctrl_pressed = false;
 static bool shift_pressed = false;
 static bool caps_lock_on = false;
+static bool extended_key = false;
 
 bool keyboard_is_ctrl_pressed() {
     return ctrl_pressed;
@@ -64,7 +65,10 @@ static void keyboard_handler(struct registers *regs) {
   (void)regs; // Suppress unused parameter warning
 
   uint8_t scancode = inb(0x60);
-  event_t event;
+  if (scancode == 0xE0) { extended_key = true; return; }
+  bool extended = extended_key;
+  extended_key = false;
+  event_t event = {0};
 
   // Handle modifier keys
   if (scancode == 0x1D) { // Left Ctrl pressed
@@ -100,8 +104,16 @@ static void keyboard_handler(struct registers *regs) {
             c = kbd_us_shift[scancode];
         }
     }
+    if (ctrl_pressed) {
+        if (c >= 'a' && c <= 'z') {
+            c = (char)(c - 'a' + 1);
+        } else if (c >= 'A' && c <= 'Z') {
+            c = (char)(c - 'A' + 1);
+        }
+    }
     event.data1 = c;
   }
+  event.data3 = (ctrl_pressed ? 1 : 0) | (shift_pressed ? 2 : 0) | (extended ? 4 : 0);
   event.data2 = scancode; // Store raw scancode in data2
   event_push(event);
 }

@@ -29,13 +29,24 @@ static int kyrofs_rmdir(vfs_node_t *node, char *name, uint16_t mode);
 static int kyrofs_stat(vfs_node_t *node, struct stat *stat_buf);
 static int kyrofs_ioctl(vfs_node_t *node, int request, void *argp);
 
+static uint64_t g_kyrofs_total_bytes_used = 0;
+
+uint64_t kyrofs_get_total_bytes_used(void) {
+    return g_kyrofs_total_bytes_used;
+}
+
 static void kyrofs_open(vfs_node_t *node, int flags) {
     if (node->flags & VFS_FILE) {
         if (flags & O_TRUNC) {
             kyrofs_file_content_t *fc = (kyrofs_file_content_t *)node->ptr;
-            if (fc->content) kfree(fc->content);
-            fc->content = NULL;
-            fc->size = 0;
+            if (fc) {
+                if (fc->content) kfree(fc->content);
+                fc->content = NULL;
+                if (g_kyrofs_total_bytes_used >= fc->size) g_kyrofs_total_bytes_used -= fc->size;
+                else g_kyrofs_total_bytes_used = 0;
+                fc->size = 0;
+                fc->capacity = 0;
+            }
             node->length = 0;
         }
     }
@@ -52,16 +63,27 @@ static uint32_t kyrofs_read(vfs_node_t *node, uint64_t offset, uint32_t size, ui
 
 static uint32_t kyrofs_write(vfs_node_t *node, uint64_t offset, uint32_t size, uint8_t *buffer) {
     kyrofs_file_content_t *fc = (kyrofs_file_content_t *)node->ptr;
-    if (offset + size > fc->capacity) {
-        uint32_t new_cap = (offset + size) * 2;
+    if (!fc) return 0;
+    if (!fc->content || offset + size > fc->capacity) {
+        uint32_t req = (uint32_t)(offset + size);
+        uint32_t new_cap = (fc->size == 0) ? ((req + 63) & ~63) : (req * 3 / 2 + 64);
+        if (new_cap < req) new_cap = req;
         uint8_t *new_cont = (uint8_t *)kmalloc(new_cap);
         if (!new_cont) panic("kyrofs_write: kmalloc failed", NULL);
-        if (fc->content) { memcpy(new_cont, fc->content, fc->size); kfree(fc->content); }
+        if (fc->content && fc->size > 0) {
+            memcpy(new_cont, fc->content, fc->size);
+            kfree(fc->content);
+        } else if (fc->content) {
+            kfree(fc->content);
+        }
         fc->content = new_cont;
         fc->capacity = new_cap;
     }
     memcpy(fc->content + offset, buffer, size);
-    if (offset + size > fc->size) fc->size = offset + size;
+    if (offset + size > fc->size) {
+        g_kyrofs_total_bytes_used += (offset + size - fc->size);
+        fc->size = offset + size;
+    }
     node->length = fc->size;
     return size;
 }
@@ -161,8 +183,12 @@ static int kyrofs_remove(vfs_node_t *node, char *name) {
             if (prev) prev->next = cur->next; else node->ptr = cur->next;
             if (cur->node.flags & VFS_FILE) {
                 kyrofs_file_content_t *content = (kyrofs_file_content_t *)cur->node.ptr;
-                if (content->content) kfree(content->content);
-                kfree(content);
+                if (content) {
+                    if (g_kyrofs_total_bytes_used >= content->size) g_kyrofs_total_bytes_used -= content->size;
+                    else g_kyrofs_total_bytes_used = 0;
+                    if (content->content) kfree(content->content);
+                    kfree(content);
+                }
             }
             kfree(cur);
             return 0;
@@ -284,6 +310,22 @@ void kyrofs_init(struct limine_module_response *mod_resp) {
     kyrofs_create_dir_recursive(vfs_root, "/bin");
     kyrofs_create_dir_recursive(vfs_root, "/dev");
     kyrofs_create_dir_recursive(vfs_root, "/tmp");
+    kyrofs_create_dir_recursive(vfs_root, "/home");
+    kyrofs_create_dir_recursive(vfs_root, "/home/kyro");
+    kyrofs_create_dir_recursive(vfs_root, "/home/user");
+    kyrofs_create_dir_recursive(vfs_root, "/root");
+    vfs_node_t *tmp = vfs_resolve_path(vfs_root, "/tmp");
+    if (tmp) tmp->mode = 01777;
+    vfs_node_t *home = vfs_resolve_path(vfs_root, "/home/user");
+    if (home) { home->uid = 1000; home->gid = 1000; home->mode = 0755; }
+    vfs_node_t *root_home = vfs_resolve_path(vfs_root, "/root");
+    if (root_home) root_home->mode = 0700;
+    kyrofs_create_dir_recursive(vfs_root, "/proc");
+    kyrofs_create_dir_recursive(vfs_root, "/mnt");
+    kyrofs_create_dir_recursive(vfs_root, "/boot");
+    kyrofs_create_dir_recursive(vfs_root, "/boot/limine");
+    kyrofs_create_dir_recursive(vfs_root, "/EFI");
+    kyrofs_create_dir_recursive(vfs_root, "/EFI/BOOT");
 
     if (mod_resp) {
         for (uint64_t i = 0; i < mod_resp->module_count; i++) {

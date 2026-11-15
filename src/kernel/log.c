@@ -41,7 +41,10 @@ void serial_print(const char *s) {
 }
 
 void serial_print_hex(uint64_t value) {
-  (void)value;
+  static const char digits[] = "0123456789abcdef";
+  serial_print("0x");
+  for (int shift = 60; shift >= 0; shift -= 4)
+    serial_putchar(digits[(value >> shift) & 15]);
 }
 
 void log_set_fg_color(uint32_t color) {
@@ -109,7 +112,7 @@ void klog_putchar(char c) {
 
 void klog_print_str(const char *s, bool do_flush) {
   while (*s) klog_putchar(*s++);
-  if (do_flush) fb_flush();
+  if (do_flush) fb_flush_dirty();
 }
 
 void console_clear(void) {
@@ -154,6 +157,7 @@ void log_get_entries(char *entries, int *count, int num_to_get) {
 void panic(const char *message, struct registers *regs) {
   __asm__ __volatile__("cli");
   (void)regs;
+  fb_set_graphics_owner(0);
   fb_clear(0xFF770000);
   console_x = 0;
   console_y = 0;

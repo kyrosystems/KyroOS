@@ -8,6 +8,8 @@
 #define KERNEL_VIRTUAL_BASE 0xFFFFFFFF80000000
 #define PAGE_PRESENT (1 << 0)
 #define PAGE_WRITE (1 << 1)
+#define PAGE_OWNED (1 << 9) // Software bit: allocator-owned anonymous page
+#define PAGE_COW   (1ULL << 10) // Software bit: Copy-on-Write page
 #define PAGE_USER (1 << 2)
 #define PAGE_NO_CACHE (1 << 4) // Page Write-Through (PWT)
 #define PAGE_DISABLE_CACHE (1 << 7) // Page Cache Disable (PCD)
@@ -17,7 +19,10 @@
 #define PAGE_NO_EXEC (1ULL << 63) // No-Execute bit (NX)
 #define PHYSICAL_ADDR_MASK 0x000FFFFFFFFFF000ULL
 
+#include <stdbool.h>
+
 extern uint64_t kernel_hhdm_offset; // Defined in kernel.c
+extern bool vmm_nx_supported;
 
 // Function declarations for P_TO_V and V_TO_P equivalents
 void *vmm_phys_to_virt(void *phys_addr);
@@ -47,7 +52,7 @@ typedef struct {
 
 // Userspace stack definitions
 #define USER_STACK_TOP 0x00007FFFFFFFF000ULL
-#define USER_STACK_SIZE (256 * PAGE_SIZE) // 1MB userspace stack
+#define USER_STACK_SIZE (32 * PAGE_SIZE) // 128KB userspace stack (optimized RAM)
 
 extern pml4_t *kernel_pml4; // Declared here, defined in vmm.c
 
@@ -57,6 +62,8 @@ void *vmm_unmap_page(pml4_t *pml4, void *virt);
 void vmm_map_page_current(void *virt, void *phys, uint64_t flags);
 void *vmm_unmap_page_current(void *virt);
 pml4_t *vmm_create_address_space();
+pml4_t *vmm_clone_address_space(pml4_t *src_pml4);
+bool vmm_handle_page_fault(uint64_t fault_addr, uint64_t err_code);
 void vmm_destroy_address_space(pml4_t *pml4);
 void vmm_switch_address_space(pml4_t *pml4);
 pml4_t *vmm_get_current_pml4();

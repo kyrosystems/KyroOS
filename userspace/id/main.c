@@ -1,28 +1,22 @@
-#include <kyroolib.h>
-#include <errno.h>
+#include "kyroolib.h"
 
-/*
- * id - print real/effective UID/GID of the current process.
- * Group supplementary list is not yet supported by the kernel credential
- * model (documented limitation); only the primary gid is reported.
- */
-static void print_u(const char *label, uint32_t v) {
-    char b[64];
-    sprintf(b, "%s=%u", label, v);
-    print(b);
-}
+int main(int argc, char *argv[]) {
+    if (argc > 1 && (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0)) {
+        print("Usage: id [USER]\n");
+        print("Print user and group IDs.\n");
+        print_flush();
+        return 0;
+    }
+    (void)argc; (void)argv;
+    uint32_t uid = getuid();
+    uint32_t euid = geteuid();
+    uint32_t gid = getgid();
+    uint32_t egid = getegid();
 
-int main(int argc, char **argv) {
-    (void)argc;
-    (void)argv;
+    const char *uname = (uid == 0) ? "root" : "user";
+    const char *gname = (gid == 0) ? "root" : "users";
 
-    uint32_t uid = getuid(), euid = geteuid();
-    uint32_t gid = getgid(), egid = getegid();
-
-    print_u("uid", uid);
-    print_u(" gid", gid);
-    if (euid != uid) { print_u(" euid", euid); }
-    if (egid != gid) { print_u(" egid", egid); }
-    print("\n");
+    printf("uid=%u(%s) gid=%u(%s) euid=%u egid=%u\n", uid, uname, gid, gname, euid, egid);
+    print_flush();
     return 0;
 }

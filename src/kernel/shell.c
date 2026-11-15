@@ -149,17 +149,25 @@ static void cmd_ls(int argc, char **argv) {
 }
 
 static void cmd_cat(int argc, char **argv) {
-    if (argc < 2) return;
+    if (argc < 2 || !argv[1]) { kprintf("Usage: cat <file>\n"); return; }
+    if (!cwd_node) cwd_node = vfs_root;
+    if (!cwd_node) { kprintf("cat: root fs unavailable\n"); return; }
     vfs_node_t *n = vfs_resolve_path(cwd_node, argv[1]);
     if (n) { char b[1024]; uint32_t r, o=0; while((r=vfs_read(n, o, 1023, (uint8_t*)b))>0){b[r]='\0'; klog_print_str(b, false); o+=r;} klog_putchar('\n'); }
-    else kprintf("cat: file not found\n");
+    else kprintf("cat: file not found: %s\n", argv[1]);
 }
 
 static void cmd_edit(int argc, char **argv) {
-    if (argc < 2) return;
+    if (argc < 2 || !argv[1]) { kprintf("Usage: edit <filename>\n"); return; }
+    if (!cwd_node) cwd_node = vfs_root;
+    if (!cwd_node) { kprintf("edit: root fs unavailable\n"); return; }
     char *filename = argv[1]; vfs_node_t *node = vfs_resolve_path(cwd_node, filename);
     if (!node) { vfs_create(cwd_node, filename, 0); node = vfs_resolve_path(cwd_node, filename); }
-    char *buffer = (char*)kmalloc(8192); memset(buffer, 0, 8192); vfs_read(node, 0, 8191, (uint8_t*)buffer);
+    if (!node) { kprintf("edit: could not open or create '%s'\n", filename); return; }
+    char *buffer = (char*)kmalloc(8192);
+    if (!buffer) { kprintf("edit: out of memory\n"); return; }
+    memset(buffer, 0, 8192);
+    vfs_read(node, 0, 8191, (uint8_t*)buffer);
     int pos = strlen(buffer);
     auto void redraw() { console_clear(); klog_print_str(buffer, false); log_set_fg_color(COLOR_CYAN); klog_print_str("\n--- NanoEdit: ^O Save, ^X Exit ---\n", true); log_set_fg_color(COLOR_RESET); };
     redraw();
@@ -341,7 +349,8 @@ static void execute_command(char *cmd) {
     else { for(int i=0; i<HISTORY_MAX-1; i++) memcpy(history[i], history[i+1], SHELL_BUFFER_SIZE); strncpy(history[HISTORY_MAX-1], cmd, SHELL_BUFFER_SIZE); }
     history_index = history_count;
     char *argv[MAX_ARGS]; int argc = 0; char *p = cmd;
-    while (*p && argc < MAX_ARGS) { while (*p == ' ') p++; if (!*p) break; argv[argc++] = p; while (*p && *p != ' ') p++; if (*p) *p++ = '\0'; }
+    while (*p && argc < MAX_ARGS - 1) { while (*p == ' ') p++; if (!*p) break; argv[argc++] = p; while (*p && *p != ' ') p++; if (*p) *p++ = '\0'; }
+    argv[argc] = NULL;
     if (argc == 0) {
         return;
     }
@@ -365,7 +374,14 @@ static void execute_command(char *cmd) {
     else if (strcmp(argv[0], "cat") == 0) cmd_cat(argc, argv);
     else if (strcmp(argv[0], "cd") == 0) {
         char target[256]; if (argc<2) strncpy(target, "/", 256); else canonicalize_path(argv[1], target);
-        vfs_node_t *n = vfs_resolve_path(vfs_root, target); if (n) { cwd_node = n; strncpy(cwd_path, target, 256); } else kprintf("cd: no such directory\n");
+        vfs_node_t *n = vfs_resolve_path(vfs_root, target);
+        if (n && (n->flags & VFS_DIRECTORY)) {
+            cwd_node = n; strncpy(cwd_path, target, 256);
+        } else if (n) {
+            kprintf("cd: %s: not a directory\n", target);
+        } else {
+            kprintf("cd: %s: no such directory\n", target);
+        }
     }
     // File operations - execute from /bin/
     else if (strcmp(argv[0], "touch") == 0) cmd_exec_bin("touch", argc, argv);

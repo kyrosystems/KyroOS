@@ -86,6 +86,10 @@ typedef struct socket {
     // For blocking calls (common to both UDP and TCP recv)
     wait_queue_t waiting_threads;
 
+    // For listening server sockets
+    struct socket *backlog_queue[16];
+    int backlog_count;
+
     // Socket options + datagram source tracking (host-readable IP order)
     uint32_t recv_timeout_ms; // 0 = block forever (SO_RCVTIMEO)
     uint32_t snd_timeout_ms;  // 0 = block forever (SO_SNDTIMEO)

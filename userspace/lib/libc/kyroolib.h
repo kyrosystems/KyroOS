@@ -11,6 +11,7 @@
 #include "sysnum.h"
 #include "procinfo.h" // shared kernel/userspace introspection structs
 #include "socket.h" // For sockaddr_in
+#include "signal.h"
 
 // Standard open flags (simplified)
 #define O_RDONLY    0x0001 // Open for reading only
@@ -59,11 +60,15 @@ static inline long _sys(long num, long a1, long a2, long a3,
 
 static inline uint64_t syscall(uint64_t num, uint64_t a1, uint64_t a2,
                                uint64_t a3) {
-  return _syscall6(num, a1, a2, a3, 0, 0, 0);
+  return (uint64_t)_sys((long)num, (long)a1, (long)a2, (long)a3, 0, 0, 0);
 }
 
-static inline void exit(int status) { syscall(SYS_EXIT, (uint64_t)status, 0, 0); }
-void print(const char *s);
+void print(const char *str);
+void print_flush(void);
+static inline void exit(int status) {
+  print_flush();
+  syscall(SYS_EXIT, (uint64_t)status, 0, 0);
+}
 void print_u32(uint32_t n);
 void print_u64(uint64_t n);
 void print_hex(uint32_t n);
@@ -216,6 +221,21 @@ static inline int sprintf(char *buffer, const char *format, ...) {
   return ret;
 }
 
+#define snprintf(buf, sz, fmt, ...) sprintf(buf, fmt, ##__VA_ARGS__)
+
+static inline int printf(const char *format, ...) {
+  char buf[1024];
+  va_list args;
+  va_start(args, format);
+  int ret = vsprintf(buf, format, args);
+  va_end(args);
+  print(buf);
+  print_flush();
+  return ret;
+}
+
+int puts(const char *s);
+
 static inline int open(const char *path, int flags) {
   return (int)syscall(SYS_OPEN, (uint64_t)path, (uint64_t)flags, 0);
 }
@@ -308,6 +328,8 @@ static int strncmp(const char *a, const char *b, size_t n) {
     return 0;
 }
 
+#ifndef _USER_FB_INFO_T_
+#define _USER_FB_INFO_T_
 typedef struct {
     uint32_t width;
     uint32_t height;
@@ -315,6 +337,7 @@ typedef struct {
     uint32_t bpp;
     void* buffer;
 } user_fb_info_t;
+#endif
 
 static inline int gfx_get_fb_info(user_fb_info_t *info_ptr) {
     return (int)syscall(SYS_GFX_GET_FB_INFO, (uint64_t)info_ptr, 0, 0);
@@ -350,8 +373,12 @@ static inline uint32_t uptime_ms(void) {
 }
 
 static inline void sleep_ms(uint32_t ms) {
-    uint32_t end = uptime_ms() + ms;
-    while (uptime_ms() < end) {}
+    _sys(SYS_SLEEP, ms, 0, 0, 0, 0, 0);
+}
+
+static inline unsigned int sleep(unsigned int seconds) {
+    _sys(SYS_SLEEP, (uint64_t)seconds * 1000, 0, 0, 0, 0, 0);
+    return 0;
 }
 
 // Minimal string/memory functions
@@ -367,14 +394,10 @@ char *strncpy(char *dest, const char *src, size_t n);
 void *memcpy(void *dest, const void *src, size_t n);
 void *memset(void *s, int c, size_t n);
 int atoi(const char *s);
-
-static inline void *malloc(size_t size) {
-    return (void*)syscall(SYS_MALLOC, (uint64_t)size, 0, 0);
-}
-
-static inline void free(void *ptr) {
-    syscall(SYS_FREE, (uint64_t)ptr, 0, 0);
-}
+void *malloc(size_t size);
+void free(void *ptr);
+void *calloc(size_t num, size_t nsize);
+void *realloc(void *ptr, size_t size);
 
 static inline void *sbrk(intptr_t increment) {
     return (void *)syscall(SYS_SBRK, (uint64_t)increment, 0, 0);
@@ -432,8 +455,17 @@ static inline int chdir(const char *path) {
 static inline uint32_t getpid(void) {
   return (uint32_t)_syscall6(SYS_GETPID, 0, 0, 0, 0, 0, 0);
 }
+static inline int fork(void) {
+  return (int)_sys(SYS_FORK, 0, 0, 0, 0, 0, 0);
+}
 static inline int kill(uint32_t pid, int sig) {
   return (int)_sys(SYS_KILL, pid, sig, 0, 0, 0, 0);
+}
+static inline int sigaction(int sig, const struct sigaction *act, struct sigaction *oldact) {
+  return (int)_sys(SYS_SIGACTION, sig, (long)act, (long)oldact, 0, 0, 0);
+}
+static inline int sigprocmask(int how, const uint32_t *set, uint32_t *oldset) {
+  return (int)_sys(SYS_SIGPROCMASK, how, (long)set, (long)oldset, 0, 0, 0);
 }
 static inline int dup(int fd) {
   return (int)_sys(SYS_DUP, fd, 0, 0, 0, 0, 0);
@@ -441,6 +473,12 @@ static inline int dup(int fd) {
 static inline int dup2(int fd, int fd2) {
   return (int)_sys(SYS_DUP2, fd, fd2, 0, 0, 0, 0);
 }
+#ifndef SEEK_SET
+#define SEEK_SET 0
+#define SEEK_CUR 1
+#define SEEK_END 2
+#endif
+
 static inline int lseek(int fd, int64_t offset, int whence) {
   return (int)_sys(SYS_LSEEK, fd, offset, whence, 0, 0, 0);
 }
@@ -463,6 +501,73 @@ static inline int sysinfo_k(struct sysinfo_k *out) {
 }
 static inline int net_ifconf(struct ifinfo *buf, size_t max_entries) {
   return (int)_sys(SYS_NET_IFCONF, (long)buf, (long)max_entries, 0, 0, 0, 0);
+}
+
+typedef struct pci_dev_info {
+  uint8_t bus;
+  uint8_t slot;
+  uint8_t func;
+  uint16_t vendor_id;
+  uint16_t device_id;
+  uint8_t class_code;
+  uint8_t subclass;
+  uint8_t prog_if;
+} __attribute__((packed)) pci_dev_info_t;
+
+static inline int pci_list(struct pci_dev_info *buf, size_t max_entries) {
+  return (int)_sys(SYS_PCI_LIST, (long)buf, (long)max_entries, 0, 0, 0, 0);
+}
+
+// POSIX extensions (waitpid, execve, pipe, mmap, munmap, gethostname, sethostname)
+#define WNOHANG 1
+#define WIFEXITED(status) (((status) & 0x7F) == 0)
+#define WEXITSTATUS(status) (((status) >> 8) & 0xFF)
+
+static inline int waitpid(int32_t pid, int *status, int options) {
+  return (int)_sys(SYS_WAITPID, pid, (long)status, options, 0, 0, 0);
+}
+
+static inline int execve(const char *path, char *const argv[], char *const envp[]) {
+  return (int)_sys(SYS_EXECVE, (long)path, (long)argv, (long)envp, 0, 0, 0);
+}
+
+static inline int pipe(int fds[2]) {
+  return (int)_sys(SYS_PIPE, (long)fds, 0, 0, 0, 0, 0);
+}
+
+#define PROT_NONE  0x0
+#define PROT_READ  0x1
+#define PROT_WRITE 0x2
+#define PROT_EXEC  0x4
+#define MAP_SHARED 0x01
+#define MAP_PRIVATE 0x02
+#define MAP_ANONYMOUS 0x20
+#define MAP_FAILED ((void *)-1)
+
+static inline void *mmap(void *addr, size_t len, int prot, int flags, int fd, int64_t off) {
+  long r = _sys(SYS_MMAP, (long)addr, (long)len, prot, flags, fd, off);
+  if (r < 0) return MAP_FAILED;
+  return (void *)r;
+}
+
+static inline int mprotect(void *addr, size_t len, int prot) {
+  return (int)_sys(SYS_MPROTECT, (long)addr, (long)len, prot, 0, 0, 0);
+}
+
+static inline int munmap(void *addr, size_t len) {
+  return (int)_sys(SYS_MUNMAP, (long)addr, (long)len, 0, 0, 0, 0);
+}
+
+static inline int gethostname(char *name, size_t len) {
+  return (int)_sys(SYS_GETHOSTNAME, (long)name, (long)len, 0, 0, 0, 0);
+}
+
+static inline int sethostname(const char *name, size_t len) {
+  return (int)_sys(SYS_SETHOSTNAME, (long)name, (long)len, 0, 0, 0, 0);
+}
+
+static inline int get_gpu_info(gpu_info_t *info) {
+  return (int)_sys(SYS_GET_GPU_INFO, (long)info, 0, 0, 0, 0, 0);
 }
 
 #endif // KYROLIB_H

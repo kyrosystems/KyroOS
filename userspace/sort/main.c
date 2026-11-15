@@ -4,6 +4,12 @@
 #define MAX_LINE_LEN 256
 
 int main(int argc, char **argv) {
+    if (argc > 1 && (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0)) {
+        print("Usage: sort [FILE]...\n");
+        print("Sort lines of text files.\n");
+        print_flush();
+        return 0;
+    }
     if (argc < 2) {
         print("Usage: sort [file]\n");
         return 1;

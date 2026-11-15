@@ -3,6 +3,12 @@
 #define MAX_LINE 1024
 
 int main(int argc, char **argv) {
+    if (argc > 1 && (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0)) {
+        print("Usage: wc [-l] [-w] [-c] [FILE]...\n");
+        print("Print newline, word, and byte counts for each FILE.\n");
+        print_flush();
+        return 0;
+    }
     if (argc < 2) {
         print("Usage: wc <file>\n");
         return 1;

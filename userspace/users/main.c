@@ -5,10 +5,16 @@
  * login session (the boot shell), so this reports the effective user of
  * the system session, resolved via /etc/passwd.
  */
-int main(void) {
-    uint32_t euid = geteuid();
+int main(int argc, char **argv) {
+    if (argc > 1 && (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0)) {
+        print("Usage: users\n");
+        print("Print the user names of users currently logged in to the system.\n");
+        print_flush();
+        return 0;
+    }
 
     int fd = open("/etc/passwd", O_RDONLY);
+    int printed = 0;
     if (fd >= 0) {
         char buf[4096];
         int n = read(fd, buf, sizeof(buf) - 1);
@@ -21,17 +27,11 @@ int main(void) {
                 if (nl) *nl = '\0';
                 char *f1 = strchr(line, ':');
                 if (f1) {
-                    char *f2 = strchr(f1 + 1, ':');
-                    if (f2) {
-                        uint32_t uid = 0;
-                        for (const char *q = f2 + 1; *q && *q != ':'; q++)
-                            if (*q >= '0' && *q <= '9') uid = uid * 10 + (uint32_t)(*q - '0');
-                        if (uid == euid) {
-                            *f1 = '\0';
-                            print(line);
-                            print("\n");
-                            return 0;
-                        }
+                    *f1 = '\0';
+                    if (line[0] != '#' && line[0] != '\0') {
+                        if (printed > 0) print(" ");
+                        print(line);
+                        printed++;
                     }
                 }
                 line = nl ? nl + 1 : NULL;
@@ -39,8 +39,17 @@ int main(void) {
         }
     }
 
-    char b[32];
-    sprintf(b, "uid %u\n", euid);
-    print(b);
+    if (printed > 0) {
+        print("\n");
+    } else {
+        uint32_t euid = geteuid();
+        if (euid == 0) print("root\n");
+        else {
+            char b[32];
+            sprintf(b, "user%u\n", euid);
+            print(b);
+        }
+    }
+    print_flush();
     return 0;
 }

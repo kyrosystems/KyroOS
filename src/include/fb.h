@@ -15,6 +15,8 @@ typedef struct {
 
 void fb_init(struct limine_framebuffer *fb);
 void fb_init_backbuffer();
+uint64_t fb_mode_capacity(void);
+void fb_update_mode(uint32_t width, uint32_t height, uint32_t pitch);
 bool fb_is_backbuffer_initialized();
 void fb_clear(uint32_t color);
 void fb_set_pixel(uint32_t x, uint32_t y, uint32_t color);
@@ -27,5 +29,8 @@ bool fb_flush_dirty(void); // copy only dirty rows; returns true if copied
 void fb_copy_region(uint32_t src_y, uint32_t dst_y, uint32_t h);
 void fb_draw_bitmap(int x, int y, const uint32_t *data, int w, int h);
 const fb_info_t *fb_get_info();
+
+void fb_set_graphics_owner(uint64_t pid);
+void fb_release_graphics_owner(uint64_t pid);
 
 #endif

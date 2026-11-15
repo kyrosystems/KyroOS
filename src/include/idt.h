@@ -22,5 +22,6 @@ struct idt_ptr_struct {
 
 
 void idt_init();
+void idt_load_ap(void);
 
 #endif // IDT_H

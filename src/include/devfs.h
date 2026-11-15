@@ -10,6 +10,9 @@ void devfs_init();
 // Mount function for devfs
 int devfs_mount(vfs_node_t *mount_point, vfs_node_t *device_node);
 
+// Register a device node into devfs (e.g. sda, sda1, null, zero)
+int devfs_register_device(const char *name, vfs_node_t *node);
+
 // Specific read function for /dev/urandom
 uint32_t urandom_read(vfs_node_t *node, uint64_t offset, uint32_t size, uint8_t *buffer);
 

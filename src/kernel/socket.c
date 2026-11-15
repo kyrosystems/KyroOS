@@ -35,6 +35,9 @@ void sock_udp_receive_packet_handler(net_dev_t *net_dev, const ipv4_header_t *ip
         return;
     }
 
+    /* Hand off to kernel UDP protocol handlers (e.g. DNS client on port 5300) */
+    udp_handle_packet(net_dev, ip_hdr, (const uint8_t *)udp_hdr, len + sizeof(udp_header_t));
+
     socket_t *sock = active_sockets;
     while (sock) {
         if (sock->protocol == IPPROTO_UDP &&
@@ -373,17 +376,39 @@ int sock_setsockopt(socket_t *sock, int level, int optname,
     }
 }
 
-/* ── sock_listen / sock_accept (TCP server — stub, not needed for client) ── */
+/* ── sock_listen / sock_accept (TCP server) ─────────────────────────────── */
 int sock_listen(socket_t *sock, int backlog) {
-    (void)sock; (void)backlog;
-    klog(LOG_WARN, "SOCKET: listen() not yet implemented.");
-    return -1;
+    if (!sock || sock->protocol != IPPROTO_TCP) return -1;
+    (void)backlog;
+    sock->state = SOCK_STATE_LISTENING;
+    sock->backlog_count = 0;
+    klog(LOG_INFO, "SOCKET: TCP listening on port %d.", __builtin_bswap16(sock->local_addr.sin_port));
+    return 0;
 }
 
 socket_t *sock_accept(socket_t *sock, sockaddr_in_t *addr) {
-    (void)sock; (void)addr;
-    klog(LOG_WARN, "SOCKET: accept() not yet implemented.");
-    return NULL;
+    if (!sock || sock->protocol != IPPROTO_TCP || sock->state != SOCK_STATE_LISTENING) {
+        return NULL;
+    }
+
+    while (sock->backlog_count == 0) {
+        sockets_poll_nics();
+        if (sock->backlog_count > 0) break;
+        waitqueue_add(&sock->waiting_threads, get_current_thread());
+        get_current_thread()->state = THREAD_BLOCKED;
+        schedule();
+    }
+
+    socket_t *client_sock = sock->backlog_queue[0];
+    for (int i = 0; i < sock->backlog_count - 1; i++) {
+        sock->backlog_queue[i] = sock->backlog_queue[i + 1];
+    }
+    sock->backlog_count--;
+
+    if (addr) {
+        memcpy(addr, &client_sock->remote_addr, sizeof(sockaddr_in_t));
+    }
+    return client_sock;
 }
 
 /* ── sock_close ──────────────────────────────────────────────────────────── */

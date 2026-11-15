@@ -21,16 +21,6 @@ thread_switch:
 
     mov [rdi + 32], rsp
     
-    push rdi
-    push rsi
-    
-    mov rdi, [rsi + 16]       ; new_thread->stack
-    add rdi, 8192             ; KERNEL_STACK_SIZE = 8192
-    call tss_set_stack
-    
-    pop rsi
-    pop rdi
-    
     ; Check if we need to switch address space
     mov rax, [rdi + 40]       ; rax = old_thread->pml4
     mov rbx, [rsi + 40]       ; rbx = new_thread->pml4

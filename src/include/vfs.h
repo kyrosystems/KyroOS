@@ -112,6 +112,7 @@ uint32_t vfs_default_mode_for(uint32_t flags, struct thread *t); // umask applie
 #define VFS_DIRECTORY 0x02
 #define VFS_MOUNTPOINT 0x04
 #define VFS_CHARDEVICE 0x08
+#define VFS_BLOCKDEVICE 0x10
 
 // Standard open flags (simplified from POSIX)
 #define O_RDONLY    0x0001 // Open for reading only

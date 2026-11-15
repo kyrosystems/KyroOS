@@ -1,75 +1,28 @@
 #include <kyroolib.h>
-#include <string.h>
-#include <stdint.h>
-#include <stdbool.h>
-
-// Max length for FPS string output
-#define FPS_STR_LEN 32
-
-// Placeholder function for gradient (no-op as framebuffer is disabled)
-static void draw_gradient_serial_only(uint32_t frame_count) {
-    (void)frame_count; // Suppress unused warning
-    // In a graphical context, this would draw the gradient.
-    // For serial-only, it's a no-op for now.
-}
+#include <kyroos_gfx.h>
 
 int main(int argc, char **argv) {
-    (void)argc;
-    (void)argv;
-
-    // user_fb_info_t fb_info; // Not needed for serial only
-    // if (gfx_get_fb_info(&fb_info) != 0) { // Not needed for serial only
-    //     print("gradient_demo: Failed to get framebuffer info (as expected in serial mode).\n");
-    //     // Continue anyway, as we are doing serial output
-    // }
-    
-    // if (fb_info.buffer == NULL) { // Not needed for serial only
-    //     print("gradient_demo: Framebuffer buffer is NULL (as expected in serial mode).\n");
-    //     // Continue anyway
-    // }
-
-    uint32_t frame_count = 0;
-    uint64_t last_tick = get_ticks();
-    uint32_t frames_this_second = 0;
-    uint32_t fps = 0;
-
-    char fps_buf[FPS_STR_LEN]; // Buffer for FPS string
-
-    print("gradient_demo: Starting gradient simulation. Press Ctrl+C to exit (serial console).\n");
-
-    while (true) {
-        draw_gradient_serial_only(frame_count++); // Call placeholder
-        
-        // FPS calculation
-        uint64_t current_tick = get_ticks();
-        frames_this_second++;
-        if (current_tick - last_tick >= 100) { // Assuming 100 ticks per second (10ms per tick)
-            fps = frames_this_second;
-            frames_this_second = 0;
-            last_tick = current_tick;
-            
-            // Print FPS to serial
-            sprintf(fps_buf, "FPS: %u\n", fps);
-            print(fps_buf);
-        }
-
-        // Event handling for Ctrl+C
-        event_t ev;
-        // Check if there's an event without blocking
-        int event_available = input_poll_event(&ev); 
-        if (event_available) {
-            if (ev.type == EVENT_KEY_DOWN) {
-                // Left Ctrl scancode: 0x1D
-                // 'c' scancode: 0x2E
-                if (ev.data3 == 1 && ev.data2 == 0x2E) { // ev.data3 == 1 means Ctrl is pressed
-                    print("gradient_demo: Exiting on Ctrl+C.\n");
-                    exit(0);
-                }
-            }
-        }
-        // Minimal delay to prevent busy-waiting
-        // thread_yield(); // If thread_yield() syscall is available
+    if (argc > 1 && (!strcmp(argv[1], "--help") || !strcmp(argv[1], "-h"))) {
+        print("Usage: gradient_demo\nAnimated color gradient; Esc or q exits.\n");
+        print_flush();
+        return 0;
     }
-
-    return 0;
+    if (gfx_init() != 0) return 1;
+    uint32_t phase = 0;
+    for (;;) {
+        gfx_event_t event;
+        while (gfx_poll_event(&event))
+            if (event.type == GFX_EVENT_KEY_DOWN &&
+                (event.data1 == 27 || event.data1 == 'q' || event.data1 == 3)) return 0;
+        uint32_t *pixels = gfx_get_buffer();
+        uint32_t stride = gfx_get_pitch() / 4;
+        for (uint32_t y = 0; y < gfx_get_height(); y++)
+            for (uint32_t x = 0; x < gfx_get_width(); x++)
+                pixels[y * stride + x] = 0xff000000 | (((x + phase) & 255) << 16) |
+                    (((y + phase) & 255) << 8) | ((x + y + phase) & 255);
+        gfx_draw_string(12, 12, "Color cycling - Esc / q to close", 0xffffffff, 0xff18202a);
+        gfx_flip();
+        phase += 2;
+        sleep_ms(20);
+    }
 }

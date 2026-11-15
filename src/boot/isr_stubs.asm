@@ -80,8 +80,12 @@ section .text
 ; This is the common stub for all ISRs (exceptions and IRQs)
 isr_common_stub:
     PUSH_REGS
+    cld
     mov rdi, rsp ; Pass pointer to struct registers to C handler
+    mov rbx, rsp ; Preserve the interrupt frame across the aligned C call
+    and rsp, -16
     call isr_handler
+    mov rsp, rbx
     POP_REGS
     add rsp, 16 ; Pop int_no and err_code
     iretq
@@ -94,11 +98,14 @@ isr128:
     push 0  ; Dummy error code
     push 128; Interrupt number (for consistency, though not strictly needed)
     PUSH_REGS
+    cld
     mov rdi, rsp ; Pass pointer to struct registers to C handler
+    mov rbx, rsp
+    and rsp, -16
     call syscall_handler
+    mov rsp, rbx
     POP_REGS
     add rsp, 16 ; Pop int_no and err_code
-    sti
     iretq
 
 ; Define all ISRs
@@ -131,8 +138,8 @@ ISR_NO_ERR 25
 ISR_NO_ERR 26
 ISR_NO_ERR 27
 ISR_NO_ERR 28
-ISR_NO_ERR 29
-ISR_NO_ERR 30
+ISR_ERR 29
+ISR_ERR 30
 ISR_NO_ERR 31
 
 ; Define all IRQs

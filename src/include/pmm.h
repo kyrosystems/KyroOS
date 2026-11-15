@@ -21,6 +21,11 @@ void *pmm_alloc_pages(size_t count);
 // Free a single physical page
 void pmm_free_page(void *p);
 
+// Page reference counting for Copy-on-Write (COW)
+void pmm_page_ref(void *p);
+void pmm_page_unref(void *p);
+uint16_t pmm_page_get_ref(void *p);
+
 // Convert physical to virtual using HHDM
 void *p_to_v(void *p);
 

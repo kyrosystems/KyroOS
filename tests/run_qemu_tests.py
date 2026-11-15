@@ -1,110 +1,82 @@
 #!/usr/bin/env python3
-"""KyroOS integration test runner.
-
-Boots the newest KyroOS ISO headless in QEMU, waits for boot + selftest
-completion, and parses the serial log for SELFTEST lines:
-
-    SELFTEST: <name>: PASS|FAIL
-    SELFTEST_SUMMARY: <passed>/<total>
-
-Usage:  python3 tests/run_qemu_tests.py [--iso <path>] [--timeout 120]
-
-Exit code: 0 = all PASS, 1 = failures, 2 = environment error.
-"""
+"""Boot the latest ISO and require a complete passing SELFTEST summary."""
 import argparse
-import glob
 import os
 import re
-import signal
-import socket
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def find_qemu():
-    for cand in ("qemu-system-x86_64", str(Path.home() / "tools/usr/bin/qemu-system-x86_64")):
-        if subprocess.run(["which", cand] if "/" not in cand else ["test", "-x", cand],
-                          capture_output=True).returncode == 0:
-            return cand
-    sys.exit(2)
-
-
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--iso", default=None)
-    ap.add_argument("--timeout", type=int, default=120)
+    ap.add_argument('--iso', type=Path)
+    ap.add_argument('--timeout', type=int, default=120)
+    ap.add_argument('--qemu', default=shutil.which('qemu-system-x86_64'))
     args = ap.parse_args()
-
-    qemu = find_qemu()
+    candidates = [args.qemu, str(Path.home() / 'tools/usr/bin/qemu-system-x86_64'),
+                  r'C:\Program Files\qemu\qemu-system-x86_64.exe']
+    qemu = next((p for p in candidates if p and Path(p).is_file()), None)
+    if not qemu:
+        print('QEMU not found; specify --qemu <executable>.')
+        return 2
+    isos = list(ROOT.glob('KyroOS-*.iso'))
+    if not args.iso and not isos:
+        print('No ISO found; build with make first.')
+        return 2
+    iso = args.iso or max(isos, key=lambda p: p.stat().st_mtime)
+    print(f'Testing ISO: {iso}')
     env = dict(os.environ)
-    qdata = Path.home() / "tools/usr/share/qemu"
-    if qdata.exists():
-        env["QEMU_MODULE_DIR"] = str(Path.home() / "tools/usr/lib/x86_64-linux-gnu/qemu")
-        env["LD_LIBRARY_PATH"] = str(Path.home() / "tools/usr/lib/x86_64-linux-gnu") + ":" + env.get("LD_LIBRARY_PATH", "")
-
-    iso = args.iso
-    if not iso:
-        isos = sorted(glob.glob(str(ROOT / "KyroOS-*.iso")), key=os.path.getmtime)
-        if not isos:
-            print("No ISO found; build with `make iso` first.")
-            return 2
-        iso = isos[-1]
-    print(f"Testing ISO: {iso}")
-
-    work = Path("/tmp") / f"kyroos-test-{os.getpid()}"
-    work.mkdir(exist_ok=True)
-    log = work / "boot.log"
-    mon = work / "mon.sock"
-
-    cmd = [qemu, "-L", str(qdata) if qdata.exists() else "", "-cdrom", iso,
-           "-serial", f"file:{log}", "-display", "none", "-no-reboot", "-m", "128M",
-           "-device", "e1000,netdev=net0",
-           "-netdev", "user,id=net0,hostname=kyroos,dns=8.8.8.8",
-           "-monitor", f"unix:{mon},server,nowait"]
-    cmd = [c for c in cmd if c]
-
-    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
-                            cwd=str(ROOT), env=env, preexec_fn=os.setsid)
-    results = []
-    summary = None
-    try:
-        deadline = time.time() + args.timeout
-        while time.time() < deadline:
-            if log.exists():
-                text = log.read_text(errors="replace")
-                for m in re.finditer(r"SELFTEST: ([a-z0-9_]+): (PASS|FAIL)(?: \(([^)]*)\))?", text):
-                    name, ok, detail = m.groups()
-                    if not any(r[0] == name for r in results):
-                        results.append((name, ok, detail))
-                        print(f"  {ok:4} {name} {('(' + detail + ')') if detail else ''}")
-                sm = re.search(r"SELFTEST_SUMMARY: (\d+)/(\d+)", text)
-                if sm:
-                    summary = sm.groups()
-                    break
-            if proc.poll() is not None:
-                break
-            time.sleep(1)
-    finally:
+    qdata = Path.home() / 'tools/usr/share/qemu'
+    cmd = [qemu, '-cdrom', str(iso.resolve()), '-display', 'none', '-no-reboot',
+           '-m', '128M', '-device', 'e1000,netdev=net0', '-netdev', 'user,id=net0']
+    if qdata.exists() and os.name != 'nt':
+        cmd += ['-L', str(qdata)]
+        libs = Path.home() / 'tools/usr/lib/x86_64-linux-gnu'
+        env['QEMU_MODULE_DIR'] = str(libs / 'qemu')
+        env['LD_LIBRARY_PATH'] = str(libs) + ':' + env.get('LD_LIBRARY_PATH', '')
+    with tempfile.TemporaryDirectory(prefix='kyroos-test-') as work:
+        log = Path(work) / 'boot.log'
+        cmd += ['-serial', f'file:{log}']
+        proc = subprocess.Popen(cmd, cwd=ROOT, env=env)
+        text = ''
+        summary = None
         try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except Exception:
-            pass
+            deadline = time.monotonic() + args.timeout
+            while time.monotonic() < deadline:
+                if log.exists():
+                    text = log.read_text(errors='replace')
+                    summary = re.search(r'SELFTEST_SUMMARY: (\d+)/(\d+)', text)
+                    if summary:
+                        break
+                if proc.poll() is not None:
+                    break
+                time.sleep(.2)
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        results = re.findall(r'SELFTEST: ([a-z0-9_]+): (PASS|FAIL)', text)
+        for name, result in results:
+            print(f'  {result}: {name}')
+        if not summary:
+            print('FAIL: incomplete boot/selftest; last serial output:')
+            print(text[-4000:])
+            return 1
+        passed, total = map(int, summary.groups())
+        ok = total > 0 and passed == total and len(results) == total and all(r == 'PASS' for _, r in results)
+        print(f'RESULT: {"PASS" if ok else "FAIL"} ({passed}/{total})')
+        return 0 if ok else 1
 
-    if not results:
-        print("FAIL: no SELFTEST output found in serial log (boot failed?)")
-        return 1
 
-    failed = [r for r in results if r[1] != "PASS"]
-    if failed or (summary and summary[0] != summary[1]):
-        print(f"\nRESULT: FAIL ({len(failed)} failed of {len(results)})")
-        return 1
-    print(f"\nRESULT: PASS ({len(results)}/{len(results)} checks passed)")
-    return 0
-
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     sys.exit(main())

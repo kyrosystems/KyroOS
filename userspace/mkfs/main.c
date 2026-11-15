@@ -1,6 +1,12 @@
 #include <kyroolib.h>
 
 int main(int argc, char **argv) {
+    if (argc > 1 && (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0)) {
+        print("Usage: mkfs [DEVICE]\n");
+        print("Build a KyroFS filesystem on a device.\n");
+        print_flush();
+        return 0;
+    }
     if (argc < 3) {
         print("Usage: mkfs [-t fstype] <device>\n");
         print("  -t fstype: filesystem type (default: kyrofs)\n");

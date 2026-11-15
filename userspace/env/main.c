@@ -7,6 +7,12 @@ static char env_vars[MAX_ENV][MAX_ENV_LEN];
 static int env_count = 0;
 
 int main(int argc, char **argv) {
+    if (argc > 1 && (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0)) {
+        print("Usage: env\n");
+        print("Print environment variables.\n");
+        print_flush();
+        return 0;
+    }
     (void)argc;
     (void)argv;
 

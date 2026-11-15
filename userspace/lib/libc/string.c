@@ -110,3 +110,14 @@ void *memset(void *s, int c, size_t n) {
     *p++ = (uint8_t)c;
   return s;
 }
+
+void *memmove(void *dest, const void *source, size_t count) {
+    unsigned char *d = dest;
+    const unsigned char *s = source;
+    if ((uintptr_t)d < (uintptr_t)s) {
+        for (size_t i = 0; i < count; i++) d[i] = s[i];
+    } else if (d != s) {
+        while (count) { count--; d[count] = s[count]; }
+    }
+    return dest;
+}

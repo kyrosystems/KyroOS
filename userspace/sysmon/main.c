@@ -112,8 +112,10 @@ static void draw(void) {
     print("s   ");
     uint32_t mem_total = g.si.mem_total_kb ? g.si.mem_total_kb : 1;
     uint32_t pct = g.si.mem_used_kb * 100 / mem_total;
-    sprintf(b, "Mem %u/%u MB (%u%%)   procs: %d",
-            g.si.mem_used_kb / 1024, mem_total / 1024, pct, g.nprocs);
+    uint64_t total_ticks = g.si.cpu_busy_ticks + g.si.cpu_idle_ticks;
+    uint32_t cpu_load = total_ticks ? (uint32_t)((g.si.cpu_busy_ticks * 100) / total_ticks) : 0;
+    sprintf(b, "Mem %u/%u MB (%u%%)  CPU: %u%%  procs: %d",
+            g.si.mem_used_kb / 1024, mem_total / 1024, pct, cpu_load, g.nprocs);
     print(b);
     print("   [sort:");
     print(g.sort_key == 0 ? "pid" : g.sort_key == 1 ? "cpu" :
@@ -175,6 +177,12 @@ static void show_help(void) {
 }
 
 int main(int argc, char **argv) {
+    if (argc > 1 && (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0)) {
+        print("Usage: sysmon\n");
+        print("Interactive system and performance monitor.\n");
+        print_flush();
+        return 0;
+    }
     (void)argc;
     (void)argv;
 

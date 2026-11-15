@@ -96,5 +96,7 @@ typedef struct {
 } hba_cmd_tbl_t;
 
 void ahci_init(pci_device_t *dev);
+int ahci_read_sectors(uint8_t port_no, uint64_t lba, uint32_t count, void *buf);
+int ahci_write_sectors(uint8_t port_no, uint64_t lba, uint32_t count, const void *buf);
 
 #endif

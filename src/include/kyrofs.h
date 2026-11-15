@@ -86,7 +86,7 @@ typedef struct {
     uint32_t payload_crc32;
     uint8_t  committed;
     uint8_t  applied;
-    uint8_t  reserved[4078];
+    uint8_t  reserved[4074];
 } __attribute__((packed)) kyrofs_journal_header_t;
 
 typedef struct {
@@ -107,5 +107,6 @@ int kyrofs_unmount(vfs_node_t *mount_point);
 int kyrofs_journal_write(uint64_t target_block, const void *data);
 int kyrofs_journal_replay(void);
 void kyrofs_register(void);
+uint64_t kyrofs_get_total_bytes_used(void);
 
 #endif // KYROFS_H

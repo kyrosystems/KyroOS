@@ -143,6 +143,12 @@ static int upsert_entry(const char *file, const char *user, const char *value) {
 }
 
 int main(int argc, char **argv) {
+    if (argc > 1 && (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0)) {
+        print("Usage: passwd [USER]\n");
+        print("Change user password.\n");
+        print_flush();
+        return 0;
+    }
     uint32_t euid = geteuid();
     const char *target = NULL;
 

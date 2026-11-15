@@ -6,6 +6,8 @@
 #include "kstring.h"
 #include "log.h" // For klog_putchar, klog_print_str
 #include "vfs.h"
+#include "thread.h"
+#include "signal.h"
 #include <stdint.h>
 #include <string.h>
 
@@ -28,6 +30,23 @@ uint32_t tty_read(vfs_node_t *node, uint64_t offset, uint32_t size,
     if (event_pop(&ev)) {
       if (ev.type == EVENT_KEY_DOWN) {
         char c = (char)ev.data1;
+        if (c == 3) { // Ctrl+C: Send SIGINT
+          extern thread_t *console_focus;
+          thread_t *target = console_focus ? console_focus : get_current_thread();
+          if (target && target->id > 1) {
+            if (target->sig_handlers[2] != SIG_IGN) {
+              if (target->sig_handlers[2] != SIG_DFL) {
+                target->sig_pending |= (1 << 2);
+              } else {
+                target->exit_status = 130;
+                target->state = THREAD_DEAD;
+              }
+            }
+          }
+          klog_print_str("^C\n", false);
+          buffer[0] = c;
+          return 1;
+        }
         if (c) {
           buffer[0] = c;
           return 1;

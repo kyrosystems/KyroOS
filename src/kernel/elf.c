@@ -86,7 +86,7 @@ elf_load_result_t elf_load(pml4_t *pml4, const uint8_t *elf_data) {
         uint64_t page_flags = PAGE_PRESENT | PAGE_USER;
         if (p_header->p_flags & PF_W)
             page_flags |= PAGE_WRITE;
-        if (!(p_header->p_flags & PF_X))
+        if (!(p_header->p_flags & PF_X) && vmm_nx_supported)
             page_flags |= PAGE_NO_EXEC;
 
 
@@ -139,22 +139,53 @@ struct thread *elf_exec_as_thread_handle(const char *path, int argc, char *argv[
     vfs_node_t *node = vfs_resolve_path(vfs_root, path);
     if (!node) {
         klog(LOG_ERROR, "ELF Exec: File not found");
-        return -1;
+        return NULL;
     }
 
     uint8_t *buffer = kmalloc(node->length);
     if (!buffer) {
         klog(LOG_ERROR, "ELF Exec: Could not allocate buffer for file");
-        return -1;
+        return NULL;
     }
 
     vfs_read(node, 0, node->length, buffer);
+
+    // Shebang (#!...) interpreter support for scripts
+    if (node->length >= 2 && buffer[0] == '#' && buffer[1] == '!') {
+        char interp[128];
+        int idx = 0;
+        uint32_t p = 2;
+        while (p < node->length && (buffer[p] == ' ' || buffer[p] == '\t')) p++;
+        while (p < node->length && buffer[p] != '\n' && buffer[p] != '\r' && buffer[p] != ' ' && idx < (int)sizeof(interp) - 1) {
+            interp[idx++] = (char)buffer[p++];
+        }
+        interp[idx] = '\0';
+        kfree(buffer);
+
+        if (interp[0] == '\0') {
+            strncpy(interp, "/bin/sh", sizeof(interp) - 1);
+        }
+
+        int new_argc = argc + 1;
+        char **new_argv = (char **)kmalloc((new_argc + 1) * sizeof(char *));
+        if (!new_argv) return NULL;
+        new_argv[0] = interp;
+        new_argv[1] = (char *)path;
+        for (int i = 1; i < argc; i++) {
+            new_argv[i + 1] = argv[i];
+        }
+        new_argv[new_argc] = NULL;
+
+        struct thread *th = elf_exec_as_thread_handle(interp, new_argc, new_argv);
+        kfree(new_argv);
+        return th;
+    }
 
     pml4_t *new_pml4 = vmm_create_address_space();
     if (!new_pml4) {
         klog(LOG_ERROR, "ELF Exec: Could not create new address space");
         kfree(buffer);
-        return -1;
+        return NULL;
     }
 
     elf_load_result_t result = elf_load(new_pml4, buffer);

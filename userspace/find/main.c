@@ -40,6 +40,12 @@ static void find_recursive(const char *path, const char *name) {
 }
 
 int main(int argc, char **argv) {
+    if (argc > 1 && (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0)) {
+        print("Usage: find [PATH] [EXPRESSION]\n");
+        print("Search for files in a directory hierarchy.\n");
+        print_flush();
+        return 0;
+    }
     if (argc < 3) {
         print("Usage: find <path> -name <pattern>\n");
         return 1;

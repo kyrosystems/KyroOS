@@ -1,6 +1,12 @@
 #include <kyroolib.h>
 
 int main(int argc, char **argv) {
+    if (argc > 1 && (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0)) {
+        print("Usage: sleep NUMBER[s]\n");
+        print("Pause for NUMBER seconds.\n");
+        print_flush();
+        return 0;
+    }
     if (argc < 2) {
         print("Usage: sleep <seconds>\n");
         return 1;
@@ -15,18 +21,7 @@ int main(int argc, char **argv) {
         }
     }
 
-    // Simple busy-wait delay (would need proper sleep syscall)
-    print("sleep: sleeping for ");
-    print_u32(seconds);
-    print(" seconds\n");
-
-    // Approximate delay (assuming ~100 ticks per second)
-    uint64_t start = syscall(SYS_GET_TICKS, 0, 0, 0);
-    uint64_t target = start + (seconds * 100);
-
-    while (syscall(SYS_GET_TICKS, 0, 0, 0) < target) {
-        // Busy wait
-    }
+    sleep(seconds);
 
     return 0;
 }

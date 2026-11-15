@@ -3,6 +3,12 @@
 #define MAX_LINE 1024
 
 int main(int argc, char **argv) {
+    if (argc > 1 && (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0)) {
+        print("Usage: grep [PATTERN] [FILE]...\n");
+        print("Search for PATTERN in each FILE.\n");
+        print_flush();
+        return 0;
+    }
     if (argc < 3) {
         print("Usage: grep <pattern> <file>\n");
         return 1;

@@ -55,4 +55,8 @@ static inline void outsw(uint16_t port, const void *addr, uint32_t count) {
 
 
 
+static inline void io_wait(void) {
+    outb(0x80, 0);
+}
+
 #endif // PORT_IO_H

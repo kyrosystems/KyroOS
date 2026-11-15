@@ -17,25 +17,43 @@ void random_init(void) {
         klog(LOG_ERROR, "RNG: RDRAND unavailable; secure random output disabled.");
 }
 
+static uint64_t prng_state = 0x853c49e6748fea9bULL;
+
+static inline uint64_t rdtsc_fallback(void) {
+    uint32_t lo, hi;
+    __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
+
 void random_add_entropy(uint64_t entropy_value) {
-    (void)entropy_value;
+    prng_state ^= (entropy_value * 0x9e3779b97f4a7c15ULL) ^ rdtsc_fallback();
+}
+
+static uint64_t splitmix64_next(void) {
+    prng_state += 0x9e3779b97f4a7c15ULL;
+    uint64_t z = prng_state;
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+    return z ^ (z >> 31);
 }
 
 static uint64_t random_word(void) {
     if (rng_available < 0) random_init();
-    if (!rng_available)
-        panic("RNG: no cryptographic hardware RNG available", NULL);
 
-    for (unsigned int attempt = 0; attempt < 16; attempt++) {
-        uint64_t value;
-        unsigned char ok;
-        __asm__ __volatile__("rdrand %0; setc %1"
-                             : "=r"(value), "=qm"(ok));
-        if (ok) return value;
-        __asm__ __volatile__("pause");
+    if (rng_available) {
+        for (unsigned int attempt = 0; attempt < 16; attempt++) {
+            uint64_t value;
+            unsigned char ok;
+            __asm__ __volatile__("rdrand %0; setc %1"
+                                 : "=r"(value), "=qm"(ok));
+            if (ok) return value;
+            __asm__ __volatile__("pause");
+        }
     }
-    panic("RNG: RDRAND failed", NULL);
-    __builtin_unreachable();
+
+    // Software fallback using TSC + SplitMix64
+    random_add_entropy(rdtsc_fallback());
+    return splitmix64_next();
 }
 
 uint64_t random_get_uint64(void) {

@@ -43,10 +43,24 @@ void heap_init() {
   serial_print("Heap: freelist setup in heap_init().\n"); // Use serial_print here to avoid kmalloc before it's ready
 }
 
+static inline uint64_t heap_lock(void) {
+  uint64_t flags;
+  __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags));
+  return flags;
+}
+
+static inline void heap_unlock(uint64_t flags) {
+  if (flags & 0x200) {
+    __asm__ volatile("sti");
+  }
+}
+
 void *kmalloc(size_t nbytes) {
   if (nbytes == 0) {
     return NULL;
   }
+
+  uint64_t iflags = heap_lock();
 
   // Calculate number of header-sized units required
   size_t nunits = (nbytes + sizeof(header_t) - 1) / sizeof(header_t) + 1;
@@ -56,6 +70,7 @@ void *kmalloc(size_t nbytes) {
 
   if (!freelist) { // Should not happen after heap_init
     klog(LOG_ERROR, "Heap: kmalloc called with uninitialized freelist!");
+    heap_unlock(iflags);
     return NULL;
   }
 
@@ -69,11 +84,13 @@ void *kmalloc(size_t nbytes) {
         p->size = nunits;
       }
       freelist = prevp;
+      heap_unlock(iflags);
       return (void *)(p + 1);
     }
     if (p == freelist) { // Wrapped around free list, need more memory
       if ((p = morecore(nunits)) == NULL) {
         klog(LOG_WARN, "Heap: out of memory from morecore!");
+        heap_unlock(iflags);
         return NULL; // No memory left
       }
     }
@@ -85,11 +102,14 @@ void kfree(void *ap) {
     return;
   }
 
+  uint64_t iflags = heap_lock();
+
   header_t *bp = (header_t *)ap - 1; // Point to block header
   header_t *p;
 
   if (!freelist) { // Should not happen, implies heap corruption or uninitialized
     klog(LOG_ERROR, "Heap: kfree called with uninitialized freelist or corrupt heap!");
+    heap_unlock(iflags);
     return;
   }
 
@@ -113,6 +133,7 @@ void kfree(void *ap) {
     p->next = bp;
   }
   freelist = p;
+  heap_unlock(iflags);
 }
 
 void *krealloc(void *ptr, size_t new_size) {

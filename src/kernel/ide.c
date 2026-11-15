@@ -6,6 +6,7 @@
 #include "port_io.h"
 #include "kstring.h"
 #include "vfs.h"   // For vfs_node_t, vfs_root, vfs_finddir, vfs_mkdir
+#include "devfs.h" // For devfs_register_device
 #include "kyrofs.h" // For kyrofs_create_node
 #include "fs_disk.h" // For fs_format
 #include <stdbool.h>
@@ -13,56 +14,76 @@
 
 static int ide_ioctl(vfs_node_t *node, int request, void* argp); // Forward declaration
 
+static uint64_t g_primary_disk_bytes = 0;
+
+uint64_t ide_get_primary_capacity(void) {
+    return g_primary_disk_bytes ? g_primary_disk_bytes : (4096ULL * 1024ULL * 1024ULL);
+}
+
+static uint32_t ide_transfer_bytes(uint8_t drive, uint64_t abs_byte_offset, uint32_t size, uint8_t *buffer, bool is_write) {
+    if (size == 0) return 0;
+    if (!buffer) return (uint32_t)-1;
+
+    uint32_t bytes_transferred = 0;
+    uint16_t sector_buf[256];
+
+    while (bytes_transferred < size) {
+        uint64_t cur_offset = abs_byte_offset + bytes_transferred;
+        uint32_t cur_lba = (uint32_t)(cur_offset / 512);
+        uint32_t offset_in_sector = (uint32_t)(cur_offset % 512);
+        uint32_t bytes_remaining = size - bytes_transferred;
+
+        if (offset_in_sector == 0 && bytes_remaining >= 512 && ((uintptr_t)(buffer + bytes_transferred) % 2 == 0)) {
+            uint32_t sectors_to_do = bytes_remaining / 512;
+            if (sectors_to_do > 128) sectors_to_do = 128;
+
+            if (is_write) {
+                if (ide_write_sectors(drive, cur_lba, (uint8_t)sectors_to_do, (const uint16_t*)(buffer + bytes_transferred)) != 0) {
+                    return bytes_transferred > 0 ? bytes_transferred : (uint32_t)-1;
+                }
+            } else {
+                if (ide_read_sectors(drive, cur_lba, (uint8_t)sectors_to_do, (uint16_t*)(buffer + bytes_transferred)) != 0) {
+                    return bytes_transferred > 0 ? bytes_transferred : (uint32_t)-1;
+                }
+            }
+            bytes_transferred += sectors_to_do * 512;
+        } else {
+            uint32_t chunk = 512 - offset_in_sector;
+            if (chunk > bytes_remaining) chunk = bytes_remaining;
+
+            if (is_write) {
+                if (offset_in_sector != 0 || chunk < 512) {
+                    if (ide_read_sectors(drive, cur_lba, 1, sector_buf) != 0) {
+                        return bytes_transferred > 0 ? bytes_transferred : (uint32_t)-1;
+                    }
+                }
+                memcpy((uint8_t*)sector_buf + offset_in_sector, buffer + bytes_transferred, chunk);
+                if (ide_write_sectors(drive, cur_lba, 1, sector_buf) != 0) {
+                    return bytes_transferred > 0 ? bytes_transferred : (uint32_t)-1;
+                }
+            } else {
+                if (ide_read_sectors(drive, cur_lba, 1, sector_buf) != 0) {
+                    return bytes_transferred > 0 ? bytes_transferred : (uint32_t)-1;
+                }
+                memcpy(buffer + bytes_transferred, (uint8_t*)sector_buf + offset_in_sector, chunk);
+            }
+            bytes_transferred += chunk;
+        }
+    }
+
+    return bytes_transferred;
+}
+
 // Wrapper for ide_read_sectors to match read_vfs_t signature for raw disk access
 static uint32_t ide_read_wrapper(vfs_node_t *node, uint64_t offset, uint32_t size, uint8_t *buffer) {
-    // node->ptr holds the drive ID for the main disk node
     uint8_t drive = (uint8_t)(uintptr_t)node->ptr;
-    // For raw disk read, offset is LBA (assuming 512 byte sectors)
-    uint32_t lba = (uint32_t)(offset / 512);
-    // Number of sectors to read
-    uint8_t num_sectors = (uint8_t)((size + 511) / 512); // Round up to nearest sector
-    
-    // Ensure size is a multiple of sector size for ide_read_sectors.
-    // This wrapper will handle partial reads by reading full sectors and copying.
-    uint8_t *temp_buf = NULL;
-    if (size % 512 != 0) {
-        // Allocate a temporary buffer for full sectors
-        temp_buf = (uint8_t*)kmalloc(num_sectors * 512);
-        if (!temp_buf) {
-            klog(LOG_ERROR, "IDE_WRAP: Failed to allocate temp buffer for read.");
-            return (uint32_t)-1;
-        }
-    } else {
-        // If size is a multiple of 512, directly use the provided buffer.
-        temp_buf = buffer;
-    }
-
-    uint32_t result = ide_read_sectors(drive, lba, num_sectors, (uint16_t*)temp_buf);
-
-    if (result == 0 && temp_buf != buffer) {
-        // If a temporary buffer was used and read was successful, copy the relevant part to the user buffer.
-        memcpy(buffer, temp_buf, size);
-    }
-    if (temp_buf != buffer) { // If kmalloc'd, free it
-        kfree(temp_buf);
-    }
-
-    return result; // Return 0 on success, (uint32_t)-1 on error
+    return ide_transfer_bytes(drive, offset, size, buffer, false);
 }
 
 // Wrapper for ide_write_sectors to match write_vfs_t signature for raw disk access
 static uint32_t ide_write_wrapper(vfs_node_t *node, uint64_t offset, uint32_t size, uint8_t *buffer) {
     uint8_t drive = (uint8_t)(uintptr_t)node->ptr;
-    uint32_t lba = (uint32_t)(offset / 512);
-    uint8_t num_sectors = (uint8_t)((size + 511) / 512); // Round up to nearest sector
-
-
-    if (size % 512 != 0) {
-        klog(LOG_ERROR, "IDE_WRAP: Write size %u for %s is not a multiple of 512. Partial writes not supported for raw disk.", size, node->name);
-        return (uint32_t)-1;
-    }
-    
-    return ide_write_sectors(drive, lba, num_sectors, (const uint16_t*)buffer);
+    return ide_transfer_bytes(drive, offset, size, buffer, true);
 }
 
 // New: Read and write sectors for a specific partition
@@ -79,26 +100,23 @@ typedef struct {
 } ide_partition_data_t;
 
 // Helper to create and register a partition node
-static void ide_create_partition_node(vfs_node_t *dev_dir, vfs_node_t *disk_node, uint8_t partition_num,
+static void ide_create_partition_node(vfs_node_t *disk_node, uint8_t partition_num,
                                       uint32_t lba_start, uint32_t size, uint8_t drive_id) {
     char name[MAX_FILENAME_LEN];
     ksprintf(name, "sda%u", partition_num);
 
-    if (kyrofs_create_node(dev_dir, name, VFS_FILE | VFS_CHARDEVICE) != 0) {
-        klog(LOG_ERROR, "IDE: Failed to create /dev/%s node in KyroFS.", name);
-        return;
-    }
-    vfs_node_t *part_node = vfs_finddir(dev_dir, name);
+    vfs_node_t *part_node = (vfs_node_t *)kmalloc(sizeof(vfs_node_t));
     if (!part_node) {
-        klog(LOG_ERROR, "IDE: Created /dev/%s but couldn't find it!", name);
+        klog(LOG_ERROR, "IDE: Failed to allocate partition node for /dev/%s.", name);
         return;
     }
+    memset(part_node, 0, sizeof(vfs_node_t));
+    strncpy(part_node->name, name, MAX_FILENAME_LEN - 1);
 
-    // Allocate and store partition specific data
     ide_partition_data_t *part_data = (ide_partition_data_t*)kmalloc(sizeof(ide_partition_data_t));
     if (!part_data) {
         klog(LOG_ERROR, "IDE: Failed to allocate partition data for /dev/%s.", name);
-        vfs_remove(dev_dir, name);
+        kfree(part_node);
         return;
     }
     part_data->disk_node = disk_node;
@@ -109,10 +127,15 @@ static void ide_create_partition_node(vfs_node_t *dev_dir, vfs_node_t *disk_node
     part_node->read = ide_partition_read_sectors;
     part_node->write = ide_partition_write_sectors;
     part_node->ioctl = ide_partition_ioctl;
-    part_node->ptr = part_data; // Store the partition data here
-    part_node->flags |= VFS_CHARDEVICE; // Ensure char device flag
+    part_node->ptr = part_data;
+    part_node->flags = VFS_BLOCKDEVICE | VFS_CHARDEVICE;
+    part_node->inode = vfs_get_next_inode();
+    part_node->length = size * 512;
+    part_node->mode = 0660;
 
-    klog(LOG_INFO, "IDE: /dev/%s partition node registered. LBA: %u, Size: %u sectors.", name, lba_start, size);
+    devfs_register_device(name, part_node);
+    klog(LOG_INFO, "IDE: /dev/%s partition registered. LBA: %u, Size: %u sectors (%u MB).",
+         name, lba_start, size, (size * 512) / (1024 * 1024));
 }
 
 // Function to read MBR and create partition nodes
@@ -123,38 +146,29 @@ static void ide_init_partitions(vfs_node_t *sda_node) {
         return;
     }
 
-    // Read MBR using the sda_node's read function (which is ide_read_sectors)
-    // lba 0, 1 sector, buffer
     if (sda_node->read(sda_node, 0, 512, (uint8_t*)buffer) != 512) {
-        klog(LOG_ERROR, "IDE: Failed to read MBR from /dev/sda. (read_sectors returned %d)", sda_node->read(sda_node, 0, 512, (uint8_t*)buffer));
+        klog(LOG_WARN, "IDE: Could not read MBR from /dev/sda.");
         kfree(buffer);
         return;
     }
 
     MBR* mbr = (MBR*)buffer;
-    // MBR signature is in little-endian. The value 0xAA55, when read as a uint16_t from memory,
-    // would be 0x55AA on a big-endian system, but 0xAA55 on little-endian.
-    // The previous check in ide_test_read was `mbr->boot_signature != 0xAA55`.
-    // It should be comparing with the value as it appears in memory if it's already a uint16_t.
-    // Assuming x86 is little-endian, 0xAA55 is the correct check.
     if (mbr->boot_signature != 0xAA55) {
-        klog(LOG_WARN, "IDE: Invalid MBR signature for /dev/sda (found 0x%x, expected 0xAA55).", mbr->boot_signature);
+        klog(LOG_WARN, "IDE: /dev/sda has raw disk or non-MBR format. Registering default partition /dev/sda1.");
+        ide_create_partition_node(sda_node, 1, 2048, (100 * 1024 * 1024) / 512, 0);
         kfree(buffer);
         return;
     }
 
-    vfs_node_t *dev_dir = vfs_finddir(vfs_root, "dev");
-    if (!dev_dir) {
-        klog(LOG_ERROR, "IDE: /dev directory not found for partition creation!");
-        kfree(buffer);
-        return;
-    }
-
+    int found = 0;
     for (int i = 0; i < 4; i++) {
         MBR_PartitionEntry *part = &mbr->partitions[i];
-        if (part->type == 0x00 || part->sector_count == 0) continue; // Empty or invalid partition
-
-        ide_create_partition_node(dev_dir, sda_node, i + 1, part->lba_first_sector, part->sector_count, (uintptr_t)sda_node->ptr);
+        if (part->type == 0x00 || part->sector_count == 0) continue;
+        ide_create_partition_node(sda_node, i + 1, part->lba_first_sector, part->sector_count, (uintptr_t)sda_node->ptr);
+        found++;
+    }
+    if (found == 0) {
+        ide_create_partition_node(sda_node, 1, 2048, (100 * 1024 * 1024) / 512, 0);
     }
     kfree(buffer);
 }
@@ -167,31 +181,12 @@ static uint32_t ide_partition_read_sectors(vfs_node_t *node, uint64_t offset, ui
         return (uint32_t)-1;
     }
 
-    // Offset in bytes for the partition. Need to convert to LBA relative to partition start.
-    // Ensure that size is a multiple of sector size for ide_read_sectors.
-    // If not, read full sectors and then copy relevant bytes.
-    if (size % 512 != 0) {
-        klog(LOG_WARN, "IDE_PART: Read size %u for %s is not a multiple of 512. Reading full sectors.", size, node->name);
-        // For simplicity, we only read whole sectors. If partial read is needed,
-        // it would require reading a full sector and then copying part of it.
+    uint64_t part_bytes = (uint64_t)part_data->partition_size * 512ULL;
+    if (offset >= part_bytes) return 0;
+    if (offset + size > part_bytes) size = (uint32_t)(part_bytes - offset);
 
-        return (uint32_t)-1; 
-    }
-
-    uint32_t start_lba_in_partition = offset / 512;
-    uint8_t num_sectors = size / 512;
-    
-    // Check for read beyond partition boundary
-    if (start_lba_in_partition + num_sectors > part_data->partition_size) {
-        klog(LOG_ERROR, "IDE_PART: Read request for %s goes beyond partition boundary. (LBA %u + sectors %u > total %u)",
-             node->name, start_lba_in_partition, num_sectors, part_data->partition_size);
-        return (uint32_t)-1; // Indicate error
-    }
-
-    uint32_t absolute_lba = part_data->partition_lba_start + start_lba_in_partition;
-    
-    // Call the underlying disk's read function (ide_read_sectors)
-    return ide_read_sectors(part_data->drive_id, absolute_lba, num_sectors, (uint16_t*)buffer);
+    uint64_t abs_offset = ((uint64_t)part_data->partition_lba_start * 512ULL) + offset;
+    return ide_transfer_bytes(part_data->drive_id, abs_offset, size, buffer, false);
 }
 
 static uint32_t ide_partition_write_sectors(vfs_node_t *node, uint64_t offset, uint32_t size, uint8_t *buffer) {
@@ -201,24 +196,12 @@ static uint32_t ide_partition_write_sectors(vfs_node_t *node, uint64_t offset, u
         return (uint32_t)-1;
     }
 
-    if (size % 512 != 0) {
-        klog(LOG_WARN, "IDE_PART: Write size %u for %s is not a multiple of 512. Writing full sectors.", size, node->name);
-        return (uint32_t)-1;
-    }
+    uint64_t part_bytes = (uint64_t)part_data->partition_size * 512ULL;
+    if (offset >= part_bytes) return 0;
+    if (offset + size > part_bytes) size = (uint32_t)(part_bytes - offset);
 
-    uint32_t start_lba_in_partition = offset / 512;
-    uint8_t num_sectors = size / 512;
-
-    // Check for write beyond partition boundary
-    if (start_lba_in_partition + num_sectors > part_data->partition_size) {
-        klog(LOG_ERROR, "IDE_PART: Write request for %s goes beyond partition boundary. (LBA %u + sectors %u > total %u)",
-             node->name, start_lba_in_partition, num_sectors, part_data->partition_size);
-        return (uint32_t)-1; // Indicate error
-    }
-
-    uint32_t absolute_lba = part_data->partition_lba_start + start_lba_in_partition;
-    
-    return ide_write_sectors(part_data->drive_id, absolute_lba, num_sectors, (const uint16_t*)buffer);
+    uint64_t abs_offset = ((uint64_t)part_data->partition_lba_start * 512ULL) + offset;
+    return ide_transfer_bytes(part_data->drive_id, abs_offset, size, buffer, true);
 }
 
 static int ide_partition_ioctl(vfs_node_t *node, int request, void* argp) {
@@ -331,7 +314,7 @@ static int ide_probe(device_t* dev) {
 
 static int ide_attach(device_t* dev) {
     klog(LOG_INFO, "IDE: Attaching to IDE controller.");
-    dev->driver = &ide_driver;
+    if (dev) dev->driver = &ide_driver;
     primary_master_present = false;
 
     // Select master drive
@@ -355,38 +338,45 @@ static int ide_attach(device_t* dev) {
     if (inb(ATA_PRIMARY_STATUS) & ATA_SR_DRQ) {
         klog(LOG_INFO, "IDE: Primary master drive found and ready.");
         primary_master_present = true;
-            // Read and discard IDENTIFY data
+            // Read IDENTIFY data
             uint16_t identify_data[256];
             insw(ATA_PRIMARY_DATA, identify_data, 256);
+
+            uint32_t s28 = identify_data[60] | ((uint32_t)identify_data[61] << 16);
+            if (identify_data[83] & (1 << 10)) {
+                uint64_t s48 = (uint64_t)identify_data[100] |
+                               ((uint64_t)identify_data[101] << 16) |
+                               ((uint64_t)identify_data[102] << 32) |
+                               ((uint64_t)identify_data[103] << 48);
+                if (s48 > 0) g_primary_disk_bytes = s48 * 512ULL;
+            }
+            if (g_primary_disk_bytes == 0 && s28 > 0) {
+                g_primary_disk_bytes = (uint64_t)s28 * 512ULL;
+            }
+            if (g_primary_disk_bytes == 0) {
+                g_primary_disk_bytes = 4096ULL * 1024ULL * 1024ULL;
+            }
+            klog(LOG_INFO, "IDE: Detected capacity: %u MB", (uint32_t)(g_primary_disk_bytes / (1024 * 1024)));
         
-            // Create a device node in KyroFS for this IDE drive at /dev/sda
-            vfs_node_t *dev_dir = vfs_finddir(vfs_root, "dev");
-            if (!dev_dir) {
-                klog(LOG_ERROR, "IDE: /dev directory not found in VFS! Cannot create /dev/sda.");
-                return -1;
-            }
-
-            // Use kyrofs_create_node to properly create the node in the /dev tree.
-            // Mark as file AND char device because it's a block device that can be read/written like a file.
-            if (kyrofs_create_node(dev_dir, "sda", VFS_FILE | VFS_CHARDEVICE) != 0) {
-                klog(LOG_ERROR, "IDE: Failed to create /dev/sda node in KyroFS.");
-                return -1;
-            }
-            vfs_node_t *sda_node = vfs_finddir(dev_dir, "sda");
+            // Create device node for /dev/sda
+            vfs_node_t *sda_node = (vfs_node_t *)kmalloc(sizeof(vfs_node_t));
             if (!sda_node) {
-                klog(LOG_ERROR, "IDE: Created /dev/sda but couldn't find it!");
+                klog(LOG_ERROR, "IDE: Failed to allocate /dev/sda node.");
                 return -1;
             }
-
-            // Now assign the specific IDE functions to this newly created VFS node
+            memset(sda_node, 0, sizeof(vfs_node_t));
+            strncpy(sda_node->name, "sda", MAX_FILENAME_LEN - 1);
             sda_node->read = ide_read_wrapper;
             sda_node->write = ide_write_wrapper;
             sda_node->ioctl = ide_ioctl;
-            sda_node->ptr = (void*)(uintptr_t)0; // Store drive number (0 for primary master)
-            // Flags are already set by kyrofs_create_node, ensure VFS_CHARDEVICE is present.
-            sda_node->flags |= VFS_CHARDEVICE;
+            sda_node->ptr = (void*)(uintptr_t)0; // drive 0
+            sda_node->flags = VFS_BLOCKDEVICE | VFS_CHARDEVICE;
+            sda_node->inode = vfs_get_next_inode();
+            sda_node->length = 0xFFFFFFFFU;
+            sda_node->mode = 0660;
 
-            klog(LOG_INFO, "IDE: /dev/sda device node properly registered in VFS.");
+            devfs_register_device("sda", sda_node);
+            klog(LOG_INFO, "IDE: /dev/sda registered in DevFS.");
 
             // Now initialize partitions for this disk
             ide_init_partitions(sda_node);
@@ -527,4 +517,125 @@ uint32_t ide_write_sectors(uint8_t drive, uint32_t lba, uint8_t num_sectors, con
 void ide_driver_init() {
     deviceman_register_driver(&ide_driver);
     klog(LOG_INFO, "IDE driver registered with Device Manager.");
+}
+
+#define SPARSE_RAMDISK_SECTORS (64 * 1024 * 1024 / 512) // 64 MB virtual disk
+#define SPARSE_PAGES_COUNT     (SPARSE_RAMDISK_SECTORS / 8) // 4096 bytes per page = 8 sectors
+
+static uint8_t *sparse_ramdisk_pages[SPARSE_PAGES_COUNT] = {0};
+
+static uint32_t sparse_disk_read(vfs_node_t *node, uint64_t offset, uint32_t size, uint8_t *buffer) {
+    (void)node;
+    uint64_t max_bytes = (uint64_t)SPARSE_RAMDISK_SECTORS * 512;
+    if (offset >= max_bytes) return 0;
+    if (offset + size > max_bytes) size = (uint32_t)(max_bytes - offset);
+
+    uint32_t bytes_read = 0;
+    while (bytes_read < size) {
+        uint64_t cur_off = offset + bytes_read;
+        uint32_t page_idx = (uint32_t)(cur_off / 4096);
+        uint32_t page_off = (uint32_t)(cur_off % 4096);
+        uint32_t chunk = 4096 - page_off;
+        if (chunk > size - bytes_read) chunk = size - bytes_read;
+
+        if (page_idx < SPARSE_PAGES_COUNT && sparse_ramdisk_pages[page_idx]) {
+            memcpy(buffer + bytes_read, sparse_ramdisk_pages[page_idx] + page_off, chunk);
+        } else {
+            memset(buffer + bytes_read, 0, chunk);
+        }
+        bytes_read += chunk;
+    }
+    return bytes_read;
+}
+
+static uint32_t sparse_disk_write(vfs_node_t *node, uint64_t offset, uint32_t size, uint8_t *buffer) {
+    (void)node;
+    uint64_t max_bytes = (uint64_t)SPARSE_RAMDISK_SECTORS * 512;
+    if (offset >= max_bytes) return 0;
+    if (offset + size > max_bytes) size = (uint32_t)(max_bytes - offset);
+
+    uint32_t bytes_written = 0;
+    while (bytes_written < size) {
+        uint64_t cur_off = offset + bytes_written;
+        uint32_t page_idx = (uint32_t)(cur_off / 4096);
+        uint32_t page_off = (uint32_t)(cur_off % 4096);
+        uint32_t chunk = 4096 - page_off;
+        if (chunk > size - bytes_written) chunk = size - bytes_written;
+
+        if (page_idx < SPARSE_PAGES_COUNT) {
+            if (!sparse_ramdisk_pages[page_idx]) {
+                sparse_ramdisk_pages[page_idx] = (uint8_t *)kmalloc(4096);
+                if (sparse_ramdisk_pages[page_idx]) {
+                    memset(sparse_ramdisk_pages[page_idx], 0, 4096);
+                }
+            }
+            if (sparse_ramdisk_pages[page_idx]) {
+                memcpy(sparse_ramdisk_pages[page_idx] + page_off, buffer + bytes_written, chunk);
+            }
+        }
+        bytes_written += chunk;
+    }
+    return bytes_written;
+}
+
+static int sparse_disk_ioctl(vfs_node_t *node, int request, void* argp) {
+    (void)node;
+    if (request == IDE_IOCTL_GET_DISK_INFO) {
+        ide_disk_info_t *info = (ide_disk_info_t *)argp;
+        if (info) {
+            info->total_sectors = SPARSE_RAMDISK_SECTORS;
+            info->bytes_per_sector = 512;
+            return 0;
+        }
+    } else if (request == IDE_IOCTL_READ_BLOCKS) {
+        ide_read_blocks_t *rb = (ide_read_blocks_t *)argp;
+        if (rb) {
+            sparse_disk_read(node, (uint64_t)rb->lba * 512, rb->count * 512, (uint8_t *)rb->buffer);
+            return 0;
+        }
+    } else if (request == IDE_IOCTL_WRITE_BLOCKS) {
+        ide_write_blocks_t *wb = (ide_write_blocks_t *)argp;
+        if (wb) {
+            sparse_disk_write(node, (uint64_t)wb->lba * 512, wb->count * 512, (uint8_t *)wb->buffer);
+            return 0;
+        }
+    } else if (request == IDE_IOCTL_FORMAT) {
+        return 0;
+    }
+    return -1;
+}
+
+void ide_init(void) {
+    ide_attach(NULL);
+    if (!primary_master_present) {
+        if (g_primary_disk_bytes == 0) g_primary_disk_bytes = (uint64_t)SPARSE_RAMDISK_SECTORS * 512;
+        klog(LOG_INFO, "IDE: Initializing virtual storage device (/dev/sda).");
+        vfs_node_t *sda_node = (vfs_node_t *)kmalloc(sizeof(vfs_node_t));
+        if (sda_node) {
+            memset(sda_node, 0, sizeof(vfs_node_t));
+            strncpy(sda_node->name, "sda", MAX_FILENAME_LEN - 1);
+            sda_node->read = sparse_disk_read;
+            sda_node->write = sparse_disk_write;
+            sda_node->ioctl = sparse_disk_ioctl;
+            sda_node->flags = VFS_BLOCKDEVICE | VFS_CHARDEVICE;
+            sda_node->inode = vfs_get_next_inode();
+            sda_node->length = (uint64_t)SPARSE_RAMDISK_SECTORS * 512;
+            sda_node->mode = 0660;
+            devfs_register_device("sda", sda_node);
+
+            vfs_node_t *sda1_node = (vfs_node_t *)kmalloc(sizeof(vfs_node_t));
+            if (sda1_node) {
+                memset(sda1_node, 0, sizeof(vfs_node_t));
+                strncpy(sda1_node->name, "sda1", MAX_FILENAME_LEN - 1);
+                sda1_node->read = sparse_disk_read;
+                sda1_node->write = sparse_disk_write;
+                sda1_node->ioctl = sparse_disk_ioctl;
+                sda1_node->flags = VFS_BLOCKDEVICE | VFS_CHARDEVICE;
+                sda1_node->inode = vfs_get_next_inode();
+                sda1_node->length = (uint64_t)SPARSE_RAMDISK_SECTORS * 512;
+                sda1_node->mode = 0660;
+                devfs_register_device("sda1", sda1_node);
+            }
+        }
+    }
 }

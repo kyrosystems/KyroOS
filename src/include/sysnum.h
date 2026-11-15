@@ -78,8 +78,12 @@
 #define SYS_SETHOSTNAME 68
 #define SYS_SIGACTION 69
 #define SYS_SIGPROCMASK 70
+#define SYS_GET_GPU_INFO 71
+#define SYS_DISPLAY_CTL 72
+#define SYS_SLEEP 73
+#define SYS_PCI_LIST 74
 
-#define KYROOS_NR_SYSCALLS 71
+#define KYROOS_NR_SYSCALLS 75
 
 /* impl flags: 1 = fully implemented, 0 = partial/not implemented */
 #define SYS_EXIT_IMPL 1
@@ -132,7 +136,7 @@
 #define SYS_GETCWD_IMPL 1
 #define SYS_CHDIR_IMPL 1
 #define SYS_GETPID_IMPL 1
-#define SYS_KILL_IMPL 1
+#define SYS_KILL_IMPL 0
 #define SYS_DUP_IMPL 1
 #define SYS_DUP2_IMPL 1
 #define SYS_LSEEK_IMPL 1
@@ -145,13 +149,17 @@
 #define SYS_FORK_IMPL 0
 #define SYS_WAITPID_IMPL 0
 #define SYS_EXECVE_IMPL 0
-#define SYS_PIPE_IMPL 0
+#define SYS_PIPE_IMPL 1
 #define SYS_MMAP_IMPL 0
 #define SYS_MUNMAP_IMPL 0
 #define SYS_MPROTECT_IMPL 0
-#define SYS_GETHOSTNAME_IMPL 0
-#define SYS_SETHOSTNAME_IMPL 0
+#define SYS_GETHOSTNAME_IMPL 1
+#define SYS_SETHOSTNAME_IMPL 1
 #define SYS_SIGACTION_IMPL 0
 #define SYS_SIGPROCMASK_IMPL 0
+#define SYS_GET_GPU_INFO_IMPL 1
+#define SYS_DISPLAY_CTL_IMPL 0
+#define SYS_SLEEP_IMPL 1
+#define SYS_PCI_LIST_IMPL 1
 
 #endif /* SYSNUM_H */

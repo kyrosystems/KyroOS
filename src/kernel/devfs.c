@@ -1,223 +1,207 @@
 #include "devfs.h"
-#include "errno.h" // For ENOMEM
+#include "errno.h"
 #include "heap.h"
 #include "kstring.h"
 #include "log.h"
-#include "random.h" // For random_get_bytes
+#include "random.h"
 #include "vfs.h"
 #include "keyboard.h"
 
-// Global root node for devfs
-static vfs_node_t *devfs_root_node;
-// Global urandom node for easy access by devfs_finddir and devfs_readdir
-static vfs_node_t *global_urandom_node = NULL;
-static vfs_node_t *global_console_node = NULL;
+typedef struct devfs_entry {
+  char name[MAX_FILENAME_LEN];
+  vfs_node_t *node;
+  struct devfs_entry *next;
+} devfs_entry_t;
 
-// Helper to write to console
+static devfs_entry_t *devfs_devices = NULL;
+static vfs_node_t *devfs_root_node = NULL;
+
 uint32_t console_write(vfs_node_t *node, uint64_t offset, uint32_t size,
                        uint8_t *buffer) {
   (void)node;
   (void)offset;
-  char *str = (char *)kmalloc(size + 1);
-  if (!str)
-    return 0;
+  if (!buffer || size == 0) return 0;
+  char stack_buf[256];
+  char *str = (size < sizeof(stack_buf)) ? stack_buf : (char *)kmalloc(size + 1);
+  if (!str) return 0;
   memcpy(str, buffer, size);
   str[size] = '\0';
-  klog_print_str(str, false); // dirty-marked; timer tick coalesces the VRAM copy
-  serial_print(str); // mirror userspace console output to COM1 (testable headless)
-  kfree(str);
+  klog_print_str(str, true);
+  serial_print(str);
+  if (str != stack_buf) kfree(str);
   return size;
 }
 
-// Helper to read from console (keyboard)
 uint32_t console_read(vfs_node_t *node, uint64_t offset, uint32_t size,
                       uint8_t *buffer) {
   (void)node;
   (void)offset;
-  if (size == 0) return 0;
-
+  if (size == 0 || !buffer) return 0;
   for (uint32_t i = 0; i < size; i++) {
-      buffer[i] = (uint8_t)keyboard_get_char_blocking();
-      // Basic line editing/echo could be here, but for now just raw
+    buffer[i] = (uint8_t)keyboard_get_char_blocking();
   }
-
   return size;
 }
 
-// --- urandom_read implementation ---
 uint32_t urandom_read(vfs_node_t *node, uint64_t offset, uint32_t size,
                       uint8_t *buffer) {
-  (void)node;   // Unused parameter
-  (void)offset; // /dev/urandom is a stream, offset is ignored
-
-  // Generate random bytes directly into the buffer
+  (void)node;
+  (void)offset;
+  if (!buffer || size == 0) return 0;
   random_get_bytes(buffer, size);
   return size;
 }
 
-// --- devfs_finddir implementation ---
-vfs_node_t *devfs_finddir(vfs_node_t *node, char *name) {
-  (void)node; // Suppress unused parameter warning
-  // if (node != devfs_root_node) {
-  //   return NULL; // Only the devfs root has children handled by this finddir
-  // }
-  if (strcmp(name, "urandom") == 0) {
-    return global_urandom_node;
+static uint32_t null_read(vfs_node_t *node, uint64_t offset, uint32_t size,
+                          uint8_t *buffer) {
+  (void)node; (void)offset; (void)size; (void)buffer;
+  return 0; // EOF
+}
+
+static uint32_t null_write(vfs_node_t *node, uint64_t offset, uint32_t size,
+                           uint8_t *buffer) {
+  (void)node; (void)offset; (void)buffer;
+  return size; // Discard
+}
+
+static uint32_t zero_read(vfs_node_t *node, uint64_t offset, uint32_t size,
+                          uint8_t *buffer) {
+  (void)node; (void)offset;
+  if (buffer && size > 0) {
+    memset(buffer, 0, size);
   }
-  if (strcmp(name, "console") == 0) {
-    return global_console_node;
+  return size;
+}
+
+int devfs_register_device(const char *name, vfs_node_t *node) {
+  if (!name || !node) return -EINVAL;
+  devfs_entry_t *cur = devfs_devices;
+  while (cur) {
+    if (strcmp(cur->name, name) == 0) {
+      cur->node = node;
+      return 0;
+    }
+    cur = cur->next;
+  }
+  devfs_entry_t *entry = (devfs_entry_t *)kmalloc(sizeof(devfs_entry_t));
+  if (!entry) return -ENOMEM;
+  strncpy(entry->name, name, MAX_FILENAME_LEN - 1);
+  entry->name[MAX_FILENAME_LEN - 1] = '\0';
+  entry->node = node;
+  entry->next = devfs_devices;
+  devfs_devices = entry;
+  klog(LOG_INFO, "DevFS: Registered /dev/%s", name);
+  return 0;
+}
+
+vfs_node_t *devfs_finddir(vfs_node_t *node, char *name) {
+  if (!name) return NULL;
+  if (strcmp(name, ".") == 0) return node ? node : devfs_root_node;
+  if (strcmp(name, "..") == 0) return vfs_root;
+  devfs_entry_t *cur = devfs_devices;
+  while (cur) {
+    if (strcmp(cur->name, name) == 0) {
+      return cur->node;
+    }
+    cur = cur->next;
   }
   return NULL;
 }
 
-// --- devfs_readdir implementation ---
 int devfs_readdir(vfs_node_t *node, uint32_t index, struct dirent *dir_entry) {
-  (void)node; // Suppress unused parameter warning
-  (void)index; // Suppress unused parameter warning
-
-  if (!dir_entry) {
-    return 0; // Invalid entry pointer
+  (void)node;
+  if (!dir_entry) return -1;
+  uint32_t count = 0;
+  devfs_entry_t *cur = devfs_devices;
+  while (cur) {
+    count++;
+    cur = cur->next;
   }
-
-  if (index == 0) {
-    if (global_urandom_node) {
-      strncpy(dir_entry->name, global_urandom_node->name, MAX_FILENAME_LEN);
-      dir_entry->ino = global_urandom_node->inode;
-      return 1; // Entry found
-    }
-  } else if (index == 1) {
-    if (global_console_node) {
-      strncpy(dir_entry->name, global_console_node->name, MAX_FILENAME_LEN);
-      dir_entry->ino = global_console_node->inode;
-      return 1;
-    }
+  if (index >= count) return 0;
+  uint32_t target = count - 1 - index;
+  cur = devfs_devices;
+  for (uint32_t i = 0; i < target && cur; i++) {
+    cur = cur->next;
   }
-  return 0; // No more entries
+  if (cur) {
+    strncpy(dir_entry->name, cur->name, MAX_FILENAME_LEN - 1);
+    dir_entry->name[MAX_FILENAME_LEN - 1] = '\0';
+    dir_entry->ino = cur->node ? cur->node->inode : (index + 1);
+    return 1;
+  }
+  return 0;
 }
 
-// --- devfs_mount implementation ---
-int devfs_mount(vfs_node_t *mount_point, vfs_node_t *device_node) {
-  (void)device_node; // DevFS does not mount a physical device
+static vfs_node_t *create_basic_node(const char *name, uint32_t flags,
+                                     read_vfs_t read_fn, write_vfs_t write_fn) {
+  vfs_node_t *node = (vfs_node_t *)kmalloc(sizeof(vfs_node_t));
+  if (!node) return NULL;
+  memset(node, 0, sizeof(vfs_node_t));
+  strncpy(node->name, name, MAX_FILENAME_LEN - 1);
+  node->flags = flags;
+  node->inode = vfs_get_next_inode();
+  node->read = read_fn;
+  node->write = write_fn;
+  node->mode = 0666;
+  return node;
+}
 
+int devfs_mount(vfs_node_t *mount_point, vfs_node_t *device_node) {
+  (void)device_node;
   if (!mount_point) {
     klog(LOG_ERROR, "DevFS: Mount point cannot be NULL.");
     return -EINVAL;
   }
 
   devfs_root_node = (vfs_node_t *)kmalloc(sizeof(vfs_node_t));
-  if (!devfs_root_node) {
-    klog(LOG_ERROR, "DevFS: Failed to allocate root node.");
-    return -ENOMEM;
-  }
+  if (!devfs_root_node) return -ENOMEM;
+  memset(devfs_root_node, 0, sizeof(vfs_node_t));
+  strncpy(devfs_root_node->name, "dev", MAX_FILENAME_LEN - 1);
+  devfs_root_node->flags = VFS_DIRECTORY;
+  devfs_root_node->inode = vfs_get_next_inode();
+  devfs_root_node->finddir = devfs_finddir;
+  devfs_root_node->readdir = devfs_readdir;
+  devfs_root_node->mode = 0755;
 
-  // Initialize the devfs root node
-  strncpy(devfs_root_node->name, "dev", MAX_FILENAME_LEN);
-  devfs_root_node->flags = VFS_DIRECTORY; // Set directory flag
-  // Permissions (0755) are not directly in flags; will be handled by stat
+  // Register built-in standard devices
+  vfs_node_t *console_node = create_basic_node("console", VFS_CHARDEVICE, console_read, console_write);
+  if (console_node) devfs_register_device("console", console_node);
 
-  devfs_root_node->inode = 0;   // Or some unique identifier
-  devfs_root_node->length = 0;  // Directories don't have content length
-  devfs_root_node->ptr = NULL; // No specific implementation data for the root
-  devfs_root_node->open = NULL;
-  devfs_root_node->close = NULL;
-  devfs_root_node->read = NULL;
-  devfs_root_node->write = NULL;
-  devfs_root_node->finddir = devfs_finddir; // Custom finddir for devfs
-  devfs_root_node->readdir = devfs_readdir; // Custom readdir for devfs
-  devfs_root_node->create = NULL;
-  devfs_root_node->mkdir = NULL;
-  devfs_root_node->remove = NULL;
-  devfs_root_node->rmdir = NULL;
-  devfs_root_node->stat = NULL;
-  devfs_root_node->ioctl = NULL;
+  vfs_node_t *tty_node = create_basic_node("tty", VFS_CHARDEVICE, console_read, console_write);
+  if (tty_node) devfs_register_device("tty", tty_node);
 
-  // Create /dev/urandom node
-  vfs_node_t *urandom_node = (vfs_node_t *)kmalloc(sizeof(vfs_node_t));
-  if (!urandom_node) {
-    klog(LOG_ERROR, "DevFS: Failed to allocate /dev/urandom node.");
-    kfree(devfs_root_node);
-    return -ENOMEM;
-  }
+  vfs_node_t *urandom_node = create_basic_node("urandom", VFS_CHARDEVICE, urandom_read, NULL);
+  if (urandom_node) devfs_register_device("urandom", urandom_node);
 
-  strncpy(urandom_node->name, "urandom", MAX_FILENAME_LEN);
-  urandom_node->flags = VFS_CHARDEVICE; // Character device
-  urandom_node->inode = 1;              // Or some unique identifier
-  urandom_node->length = 0;             // Device nodes often have no fixed size
-  urandom_node->ptr = NULL;            // No specific data needed for urandom
-  urandom_node->open = NULL;
-  urandom_node->close = NULL;
-  urandom_node->read = urandom_read;
-  urandom_node->write = NULL;
-  urandom_node->finddir = NULL;
-  urandom_node->readdir = NULL;
-  urandom_node->create = NULL;
-  urandom_node->mkdir = NULL;
-  urandom_node->remove = NULL;
-  urandom_node->rmdir = NULL;
-  urandom_node->stat = NULL;
-  urandom_node->ioctl = NULL;
+  vfs_node_t *null_node = create_basic_node("null", VFS_CHARDEVICE, null_read, null_write);
+  if (null_node) devfs_register_device("null", null_node);
 
-  global_urandom_node = urandom_node;
+  vfs_node_t *zero_node = create_basic_node("zero", VFS_CHARDEVICE, zero_read, null_write);
+  if (zero_node) devfs_register_device("zero", zero_node);
 
-  // The mount_point node (which is actually the /dev directory created in
-  // KyroFS) needs to have its operations "redirected" to devfs_root_node's
-  // operations. The vfs_mount function in vfs.c expects the mount_point to
-  // become the root of the mounted filesystem from the VFS perspective. So, we
-  // copy devfs_root_node's operations to mount_point.
+  // Copy ops to mount_point
   memcpy(mount_point->name, devfs_root_node->name, MAX_FILENAME_LEN);
   mount_point->flags = devfs_root_node->flags;
   mount_point->inode = devfs_root_node->inode;
-  mount_point->length = devfs_root_node->length;
-  mount_point->ptr = devfs_root_node->ptr; // This might be NULL
-  mount_point->open = devfs_root_node->open;
-  mount_point->close = devfs_root_node->close;
-  mount_point->read = devfs_root_node->read;
-  mount_point->write = devfs_root_node->write;
-  mount_point->finddir = devfs_root_node->finddir; // Custom finddir for devfs
-  mount_point->readdir = devfs_root_node->readdir; // Custom readdir for devfs
-  mount_point->create = devfs_root_node->create;
-  mount_point->mkdir = devfs_root_node->mkdir;
-  mount_point->remove = devfs_root_node->remove;
-  mount_point->rmdir = devfs_root_node->rmdir;
-  mount_point->stat = devfs_root_node->stat;
-  mount_point->ioctl = devfs_root_node->ioctl;
+  mount_point->length = 0;
+  mount_point->ptr = NULL;
+  mount_point->open = NULL;
+  mount_point->close = NULL;
+  mount_point->read = NULL;
+  mount_point->write = NULL;
+  mount_point->finddir = devfs_finddir;
+  mount_point->readdir = devfs_readdir;
+  mount_point->create = NULL;
+  mount_point->mkdir = NULL;
+  mount_point->remove = NULL;
+  mount_point->rmdir = NULL;
+  mount_point->stat = NULL;
+  mount_point->ioctl = NULL;
 
-  klog(LOG_INFO, "DevFS: /dev/urandom node created.");
-
-  // Create /dev/console node
-  vfs_node_t *console_node = (vfs_node_t *)kmalloc(sizeof(vfs_node_t));
-  if (!console_node) {
-    klog(LOG_ERROR, "DevFS: Failed to allocate /dev/console node.");
-    // Cleanup if needed (skipping for brevity in this patch)
-    return -ENOMEM;
-  }
-
-  strncpy(console_node->name, "console", MAX_FILENAME_LEN);
-  console_node->flags = VFS_CHARDEVICE;
-  console_node->inode = 2;
-  console_node->length = 0;
-  console_node->ptr = NULL;
-  console_node->open = NULL;
-  console_node->close = NULL;
-  console_node->read = console_read;
-  console_node->write = console_write; // We need to define this
-  console_node->finddir = NULL;
-  console_node->readdir = NULL;
-  console_node->create = NULL;
-  console_node->mkdir = NULL;
-  console_node->remove = NULL;
-  console_node->rmdir = NULL;
-  console_node->stat = NULL;
-  console_node->ioctl = NULL;
-
-  global_console_node = console_node;
-  klog(LOG_INFO, "DevFS: /dev/console node created.");
-
-  klog(LOG_INFO, "DevFS: Mounted successfully.");
+  klog(LOG_INFO, "DevFS: Mounted at /dev successfully.");
   return 0;
 }
 
-// --- devfs_init implementation ---
 void devfs_init() {
   struct filesystem_type *devfs_fs_type =
       (struct filesystem_type *)kmalloc(sizeof(struct filesystem_type));
@@ -225,7 +209,7 @@ void devfs_init() {
     klog(LOG_ERROR, "DevFS: Failed to allocate filesystem_type for devfs.");
     return;
   }
-  strncpy(devfs_fs_type->name, "devfs", 32); // Max 32 characters for fs name
+  strncpy(devfs_fs_type->name, "devfs", 32);
   devfs_fs_type->mount_func = devfs_mount;
   devfs_fs_type->next = NULL;
 

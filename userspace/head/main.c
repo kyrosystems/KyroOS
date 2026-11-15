@@ -3,6 +3,12 @@
 #define MAX_LINE 1024
 
 int main(int argc, char **argv) {
+    if (argc > 1 && (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0)) {
+        print("Usage: head [-n LINES] [FILE]...\n");
+        print("Output the first part of files.\n");
+        print_flush();
+        return 0;
+    }
     int lines_to_print = 10; // Default
     const char *filename = NULL;
 

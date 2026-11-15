@@ -12,6 +12,7 @@
 
 #define E1000_REG_CTRL     0x00000
 #define E1000_REG_STATUS   0x00008
+#define E1000_REG_EERD     0x00014
 #define E1000_REG_IMS      0x000D0
 #define E1000_REG_RCTL     0x00100
 #define E1000_REG_TCTL     0x00400
@@ -82,18 +83,40 @@ static void e1000_read_mac(e1000_t *d, uint8_t mac[6]) {
     mac[5] = (high >> 8) & 0xFF;
 }
 
+static uint16_t e1000_read_eeprom(e1000_t *d, uint8_t addr) {
+    uint32_t val = 0;
+    d->mmio[E1000_REG_EERD / 4] = ((uint32_t)addr << 8) | 1;
+    for (int i = 0; i < 20000; i++) {
+        val = d->mmio[E1000_REG_EERD / 4];
+        if (val & (1 << 4)) return (uint16_t)(val >> 16);
+        if (val & (1 << 1)) return (uint16_t)(val >> 16);
+    }
+    d->mmio[E1000_REG_EERD / 4] = ((uint32_t)addr << 2) | 1;
+    for (int i = 0; i < 20000; i++) {
+        val = d->mmio[E1000_REG_EERD / 4];
+        if (val & (1 << 4)) return (uint16_t)(val >> 16);
+    }
+    return 0;
+}
+
 static void e1000_send_packet(net_dev_t *dev, const uint8_t *data, size_t len) {
     e1000_t *d = (e1000_t *)dev;
     if (len > E1000_TX_BUF_SIZE) { dev->tx_errors++; len = E1000_TX_BUF_SIZE; }
+
+    uint32_t i = d->tx_ptr;
+    int wait_limit = 10000;
+    while ((d->tx_ring[i].cmd != 0 && !(d->tx_ring[i].status & 0x01)) && --wait_limit > 0) {
+        __asm__("pause");
+    }
+
     dev->tx_packets++;
     dev->tx_bytes += len;
 
-    uint32_t i = d->tx_ptr;
     memcpy(d->tx_buffers + (i * E1000_TX_BUF_SIZE), data, len);
 
     d->tx_ring[i].length = len;
     d->tx_ring[i].cso = 0;
-    d->tx_ring[i].cmd = (1 << 0) | (1 << 1) | (1 << 3);
+    d->tx_ring[i].cmd = (1 << 0) | (1 << 1) | (1 << 3); // EOP | IFCS | RS
     d->tx_ring[i].status = 0;
     d->tx_ring[i].css = 0;
     d->tx_ring[i].special = 0;
@@ -102,8 +125,6 @@ static void e1000_send_packet(net_dev_t *dev, const uint8_t *data, size_t len) {
 
     d->tx_ptr = (i + 1) % TX_NUM_DESC;
     d->mmio[E1000_REG_TDT / 4] = d->tx_ptr;
-
-    while (d->mmio[E1000_REG_TDH / 4] != d->tx_ptr) __asm__("pause");
 }
 
 void e1000_poll(net_dev_t *dev, uint8_t *buffer, size_t size) {
@@ -146,7 +167,10 @@ void e1000_driver_init(pci_device_t *pdev) {
     d->mmio = (uint32_t *)(pdev->bars[0].base + kernel_hhdm_offset);
 
     uint16_t pci_cmd = pci_config_read_word(pdev->bus, pdev->device, pdev->func, 0x04);
-    pci_config_write_word(pdev->bus, pdev->device, pdev->func, 0x04, pci_cmd | 0x04);
+    pci_config_write_word(pdev->bus, pdev->device, pdev->func, 0x04, pci_cmd | 0x07);
+
+    // Assert SLU (Set Link Up) and ASDE (Auto-Speed Detection) in Device Control
+    d->mmio[E1000_REG_CTRL / 4] |= (1 << 6) | (1 << 5);
 
     d->tx_ring = kmalloc(TX_NUM_DESC * sizeof(struct e1000_tx_desc));
     d->tx_buffers = kmalloc(TX_NUM_DESC * E1000_TX_BUF_SIZE);
@@ -172,15 +196,33 @@ void e1000_driver_init(pci_device_t *pdev) {
     d->mmio[E1000_REG_RDLEN / 4] = RX_NUM_DESC * sizeof(struct e1000_rx_desc);
     d->mmio[E1000_REG_RDH / 4] = 0;
     d->mmio[E1000_REG_RDT / 4] = RX_NUM_DESC - 1;
-    d->mmio[E1000_REG_RCTL / 4] = (1 << 1) | (1 << 2) | (1 << 4) | (1 << 15);
+    // Receiver enable + Store bad packets + Unicast Promiscuous + Multicast Promiscuous + Broadcast accept
+    d->mmio[E1000_REG_RCTL / 4] = (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 15);
 
     e1000_read_mac(d, d->net_dev.mac_addr);
-    if ((d->net_dev.mac_addr[0] == 0xFF && d->net_dev.mac_addr[1] == 0xFF &&
-         d->net_dev.mac_addr[2] == 0xFF && d->net_dev.mac_addr[3] == 0xFF &&
-         d->net_dev.mac_addr[4] == 0xFF && d->net_dev.mac_addr[5] == 0xFF) ||
-        (d->net_dev.mac_addr[0] == 0x00 && d->net_dev.mac_addr[1] == 0x00 &&
-         d->net_dev.mac_addr[2] == 0x00 && d->net_dev.mac_addr[3] == 0x00 &&
-         d->net_dev.mac_addr[4] == 0x00 && d->net_dev.mac_addr[5] == 0x00)) {
+    bool invalid_mac = true;
+    for (int i = 0; i < 6; i++) {
+        if (d->net_dev.mac_addr[i] != 0x00 && d->net_dev.mac_addr[i] != 0xFF) {
+            invalid_mac = false;
+            break;
+        }
+    }
+    if (invalid_mac) {
+        uint16_t w0 = e1000_read_eeprom(d, 0);
+        uint16_t w1 = e1000_read_eeprom(d, 1);
+        uint16_t w2 = e1000_read_eeprom(d, 2);
+        if ((w0 || w1 || w2) && (w0 != 0xFFFF)) {
+            d->net_dev.mac_addr[0] = w0 & 0xFF;
+            d->net_dev.mac_addr[1] = (w0 >> 8) & 0xFF;
+            d->net_dev.mac_addr[2] = w1 & 0xFF;
+            d->net_dev.mac_addr[3] = (w1 >> 8) & 0xFF;
+            d->net_dev.mac_addr[4] = w2 & 0xFF;
+            d->net_dev.mac_addr[5] = (w2 >> 8) & 0xFF;
+            e1000_write_mac(d, d->net_dev.mac_addr);
+            invalid_mac = false;
+        }
+    }
+    if (invalid_mac) {
         static const uint8_t default_mac[6] = {0x52, 0x54, 0x00, 0x12, 0x34, 0x56};
         memcpy(d->net_dev.mac_addr, default_mac, 6);
         e1000_write_mac(d, default_mac);

@@ -96,50 +96,70 @@ void dns_init(uint32_t nameserver_ip) {
 }
 
 uint32_t dns_resolve(const char *hostname) {
-    if (!dns_server_ip) {
-        klog(LOG_ERROR, "DNS: No nameserver configured.");
-        return 0;
+    if (!hostname || !*hostname) return 0;
+
+    uint32_t servers[3];
+    int server_count = 0;
+    if (dns_server_ip != 0) {
+        servers[server_count++] = dns_server_ip;
+    }
+    // Google Public DNS (8.8.8.8)
+    uint32_t google_dns = (8 << 24) | (8 << 16) | (8 << 8) | 8;
+    if (dns_server_ip != google_dns) {
+        servers[server_count++] = google_dns;
+    }
+    // Cloudflare Public DNS (1.1.1.1)
+    uint32_t cf_dns = (1 << 24) | (1 << 16) | (1 << 8) | 1;
+    if (dns_server_ip != cf_dns) {
+        servers[server_count++] = cf_dns;
     }
 
-    /* Build DNS query */
-    uint8_t  buf[512];
-    memset(buf, 0, sizeof(buf));
+    for (int s = 0; s < server_count; s++) {
+        uint32_t current_server = servers[s];
 
-    dns_pending_id = dns_txid++;
-    dns_got_reply  = 0;
-    dns_result     = 0;
+        /* Build DNS query */
+        uint8_t  buf[512];
+        memset(buf, 0, sizeof(buf));
 
-    dns_header_t *hdr = (dns_header_t *)buf;
-    hdr->id      = __builtin_bswap16(dns_pending_id);
-    hdr->flags   = __builtin_bswap16(0x0100); /* RD=1 */
-    hdr->qdcount = __builtin_bswap16(1);
+        dns_pending_id = dns_txid++;
+        dns_got_reply  = 0;
+        dns_result     = 0;
 
-    size_t   name_len = 0;
-    uint8_t *qptr     = buf + sizeof(dns_header_t);
-    dns_encode_name(hostname, qptr, &name_len);
-    qptr += name_len;
+        dns_header_t *hdr = (dns_header_t *)buf;
+        hdr->id      = __builtin_bswap16(dns_pending_id);
+        hdr->flags   = __builtin_bswap16(0x0100); /* RD=1 */
+        hdr->qdcount = __builtin_bswap16(1);
 
-    *(uint16_t *)qptr = __builtin_bswap16(1); qptr += 2; /* QTYPE A */
-    *(uint16_t *)qptr = __builtin_bswap16(1); qptr += 2; /* QCLASS IN */
+        size_t   name_len = 0;
+        uint8_t *qptr     = buf + sizeof(dns_header_t);
+        dns_encode_name(hostname, qptr, &name_len);
+        qptr += name_len;
 
-    size_t total = (size_t)(qptr - buf);
-    udp_send_packet(dns_server_ip, DNS_LOCAL_PORT, DNS_PORT, buf, total);
+        *(uint16_t *)qptr = __builtin_bswap16(1); qptr += 2; /* QTYPE A */
+        *(uint16_t *)qptr = __builtin_bswap16(1); qptr += 2; /* QCLASS IN */
 
-    /* Wait for reply with a deadline. A permanently blocked thread is
-       never woken to re-check its timeout, so use poll-yield with a
-       tick deadline instead (same pattern as sock_recvfrom). */
-    uint64_t deadline_ticks = timer_get_ticks() + (DNS_TIMEOUT / 10000);
-    while (!dns_got_reply) {
-        if (timer_get_ticks() >= deadline_ticks) break;
-        schedule(); /* yield CPU; DNS replies arrive via UDP poll path */
+        size_t total = (size_t)(qptr - buf);
+        udp_send_packet(current_server, DNS_LOCAL_PORT, DNS_PORT, buf, total);
+
+        /* Wait for reply with a deadline */
+        uint64_t deadline_ticks = timer_get_ticks() + (DNS_TIMEOUT / 20000);
+        while (!dns_got_reply) {
+            if (timer_get_ticks() >= deadline_ticks) break;
+            extern void net_poll(void);
+            net_poll();
+            schedule();
+        }
+
+        if (dns_got_reply) {
+            klog(LOG_INFO, "DNS: Resolved %s -> %d.%d.%d.%d via server %d.%d.%d.%d", hostname,
+                 (dns_result >> 24) & 0xFF, (dns_result >> 16) & 0xFF,
+                 (dns_result >>  8) & 0xFF,  dns_result        & 0xFF,
+                 (current_server >> 24) & 0xFF, (current_server >> 16) & 0xFF,
+                 (current_server >>  8) & 0xFF,  current_server        & 0xFF);
+            return dns_result;
+        }
     }
 
-    if (!dns_got_reply) {
-        klog(LOG_WARN, "DNS: Resolve timeout for %s.", hostname);
-        return 0;
-    }
-    klog(LOG_INFO, "DNS: Resolved %s -> %d.%d.%d.%d", hostname,
-         (dns_result >> 24) & 0xFF, (dns_result >> 16) & 0xFF,
-         (dns_result >>  8) & 0xFF,  dns_result        & 0xFF);
-    return dns_result;
+    klog(LOG_WARN, "DNS: Resolve timeout for %s after trying all nameservers.", hostname);
+    return 0;
 }

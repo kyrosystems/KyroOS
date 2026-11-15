@@ -10,6 +10,9 @@ typedef int (*lkm_init_t)(void);
 // Module exit function type
 typedef void (*lkm_exit_t)(void);
 
+#define LKM_INIT(fn) int (*__lkm_init_ptr)(void) __attribute__((used, section(".data"))) = fn
+#define LKM_EXIT(fn) void (*__lkm_exit_ptr)(void) __attribute__((used, section(".data"))) = fn
+
 // Module structure
 typedef struct kernel_module {
     char name[64];              // Module name

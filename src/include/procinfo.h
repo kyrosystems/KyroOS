@@ -36,7 +36,17 @@ struct sysinfo_k {
     uint64_t tx_bytes;
     uint64_t rx_packets;
     uint64_t tx_packets;
-};
+    uint64_t cpu_idle_ticks; /* real idle ticks */
+    uint64_t cpu_busy_ticks; /* real busy ticks */
+    uint64_t fs_used_bytes;  /* real KyroFS bytes used */
+    uint64_t fs_total_bytes; /* real storage drive total bytes */
+    uint8_t  rtc_sec;        /* real hardware CMOS RTC time */
+    uint8_t  rtc_min;
+    uint8_t  rtc_hour;
+    uint8_t  rtc_day;
+    uint8_t  rtc_mon;
+    uint16_t rtc_year;
+} __attribute__((packed));
 
 /* Interface flags mirror IFF_* from net.h */
 #define IFIF_UP       0x01
@@ -58,5 +68,23 @@ struct ifinfo {
     uint64_t rx_dropped, tx_dropped;
     uint64_t collisions;
 } __attribute__((packed));
+
+struct gpu_info {
+    uint16_t vendor_id;
+    uint16_t device_id;
+    uint8_t  bus;
+    uint8_t  slot;
+    uint8_t  func;
+    char     vendor_name[32];
+    char     model_name[64];
+    uint64_t vram_size_bytes;
+    uint64_t bar0_base;
+    uint64_t bar1_base;
+    uint32_t fb_width;
+    uint32_t fb_height;
+    uint32_t fb_bpp;
+} __attribute__((packed));
+
+typedef struct gpu_info gpu_info_t;
 
 #endif /* PROCINFO_H */

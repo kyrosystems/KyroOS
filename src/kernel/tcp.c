@@ -1,4 +1,5 @@
 #include "tcp.h"
+#include "socket.h"
 #include "ip.h"
 #include "isr.h"
 #include "log.h"
@@ -213,6 +214,54 @@ void tcp_handle_packet(net_dev_t *net_dev, const ipv4_header_t *ip_hdr,
         }
         tcb = tcb->next;
     }
+
+    // Handle incoming SYN for listening server sockets
+    if (!tcb && (hdr->flags & TCP_FLAG_SYN) && !(hdr->flags & TCP_FLAG_ACK)) {
+        extern socket_t *active_sockets;
+        socket_t *lsock = active_sockets;
+        while (lsock) {
+            if (lsock->protocol == IPPROTO_TCP &&
+                lsock->state == SOCK_STATE_LISTENING &&
+                __builtin_bswap16(lsock->local_addr.sin_port) == dst_port) {
+                break;
+            }
+            lsock = lsock->next;
+        }
+
+        if (lsock) {
+            uint32_t seq = __builtin_bswap32(hdr->seq_num);
+            tcp_tcb_t *child_tcb = tcp_create_tcb();
+            if (child_tcb) {
+                child_tcb->local_ip = __builtin_bswap32(ip_hdr->dest_ip);
+                child_tcb->local_port = dst_port;
+                child_tcb->remote_ip = src_ip;
+                child_tcb->remote_port = src_port;
+                child_tcb->rcv_nxt = seq + 1;
+                uint32_t isn = 2000 + (seq ^ 0x5A5A);
+                child_tcb->snd_nxt = isn;
+                child_tcb->state = TCP_STATE_ESTABLISHED;
+
+                tcp_send_packet(child_tcb, TCP_FLAG_SYN | TCP_FLAG_ACK, NULL, 0);
+                child_tcb->snd_nxt++;
+
+                socket_t *client_sock = sock_create(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+                if (client_sock) {
+                    client_sock->state = SOCK_STATE_CONNECTED;
+                    client_sock->proto_data.tcp_tcb = child_tcb;
+                    client_sock->local_addr = lsock->local_addr;
+                    client_sock->remote_addr.sin_family = AF_INET;
+                    client_sock->remote_addr.sin_port = hdr->src_port;
+                    client_sock->remote_addr.sin_addr = ip_hdr->src_ip;
+
+                    if (lsock->backlog_count < 16) {
+                        lsock->backlog_queue[lsock->backlog_count++] = client_sock;
+                        waitqueue_wakeup_all(&lsock->waiting_threads);
+                    }
+                }
+            }
+            return;
+        }
+    }
 }
 
 int tcp_close_tcb(tcp_tcb_t *tcb) {
@@ -224,5 +273,21 @@ int tcp_close_tcb(tcp_tcb_t *tcb) {
     tcb->state = TCP_STATE_CLOSED;
     waitqueue_wakeup_all(&tcb->recv_wq);
     waitqueue_wakeup_all(&tcb->connect_wq);
+
+    // Unlink from active_tcbs
+    tcp_tcb_t **curr = &active_tcbs;
+    while (*curr) {
+        if (*curr == tcb) {
+            *curr = tcb->next;
+            break;
+        }
+        curr = &(*curr)->next;
+    }
+
+    if (tcb->recv_buffer) {
+        kfree(tcb->recv_buffer);
+        tcb->recv_buffer = NULL;
+    }
+    kfree(tcb);
     return 0;
 }

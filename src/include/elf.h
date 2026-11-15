@@ -57,6 +57,40 @@ typedef struct {
 #define PF_W           2
 #define PF_R           4
 
+#define SHT_NULL       0
+#define SHT_PROGBITS   1
+#define SHT_SYMTAB     2
+#define SHT_STRTAB     3
+#define SHT_RELA       4
+#define SHT_HASH       5
+#define SHT_DYNAMIC    6
+#define SHT_NOTE       7
+#define SHT_NOBITS     8
+#define SHT_REL        9
+#define SHT_SHLIB      10
+#define SHT_DYNSYM     11
+
+#define SHF_WRITE      (1 << 0)
+#define SHF_ALLOC      (1 << 1)
+#define SHF_EXECINSTR  (1 << 2)
+
+#define R_X86_64_NONE      0
+#define R_X86_64_64        1
+#define R_X86_64_PC32      2
+#define R_X86_64_GOT32     3
+#define R_X86_64_PLT32     4
+#define R_X86_64_COPY      5
+#define R_X86_64_GLOB_DAT  6
+#define R_X86_64_JUMP_SLOT 7
+#define R_X86_64_RELATIVE  8
+#define R_X86_64_GOTPCREL  9
+#define R_X86_64_32        10
+#define R_X86_64_32S       11
+#define R_X86_64_16        12
+#define R_X86_64_PC16      13
+#define R_X86_64_8         14
+#define R_X86_64_PC8       15
+
 typedef struct {
     uint32_t sh_name;
     uint32_t sh_type;

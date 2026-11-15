@@ -14,7 +14,7 @@ Legend: ✅ implemented · 🟡 partial / simplified · ❌ not implemented
 | `getpid` | ✅ | thread id (KyroOS: thread == process) |
 | `kill` | 🟡 | terminates only (SIGKILL/SIGTERM equivalent); no signal delivery |
 | `exec`-like spawn | 🟡 | `SYS_EXEC` spawns a new thread; no true exec-replacement, no `fork` |
-| `wait`/`waitpid` | ❌ | no child tracking (shell runs children asynchronously) |
+| `waitpid` | 🟡 | parent-only wait; signed pid, -1/0/positive, WNOHANG, normal exit status encoding; no process groups/stopped children |
 | signals | ❌ | terminate-only semantics |
 
 ## Memory
@@ -23,7 +23,8 @@ Legend: ✅ implemented · 🟡 partial / simplified · ❌ not implemented
 |---|---|---|
 | `brk`/`sbrk` | ✅ | per-thread program break |
 | `malloc`/`free` (kernel heap) | ✅ | via SYS_MALLOC/SYS_FREE |
-| mmap / shared memory | ❌ | — |
+| `mmap` / `munmap` | 🟡 | private anonymous mappings only, zero-filled, bounded userspace arena, allocation rollback; shared/file-backed mappings return EOPNOTSUPP |
+| `mprotect` | 🟡 | anonymous mmap arena only; PROT_NONE/READ/WRITE/EXEC, NX when supported; x86 write implies read |
 
 ## Files
 
@@ -34,7 +35,8 @@ Legend: ✅ implemented · 🟡 partial / simplified · ❌ not implemented
 | `mkdir`/`unlink`/`rmdir` | 🟡 | works on KyroFS; permission-checked |
 | `readdir` | ✅ | fd-based; directory-only (-ENOTDIR otherwise) |
 | `chdir`/`getcwd` | ✅ | per-thread cwd; relative paths resolved for new syscalls |
-| `dup`/`dup2` | 🟡 | duplicates fd entries; offsets are NOT shared (deviation from POSIX) |
+| `dup`/`dup2` | ✅ | shared file position and descriptor lifetime; socket/pipe endpoints close on last reference |
+| descriptor inheritance | ✅ | spawn inherits the descriptor table with shared file positions and lifetime |
 | `lseek` | ✅ | files only; sockets → -ESPIPE |
 | permissions (R/W/X) | ✅ | kernel/VFS level: owner/group/other, root bypass |
 | `umask` | ✅ | inherited by exec; applied at file creation |
@@ -78,7 +80,10 @@ Legend: ✅ implemented · 🟡 partial / simplified · ❌ not implemented
 - Kernel returns `(uint64_t)-errno` (1..133 range); libc wrapper maps to
   `-1` + `errno`. Legacy `-1` returns remain in a few old handlers and are
   documented in the registry as partial.
-- No COW/fork: `SYS_EXEC` creates an independent address space.
+- No COW/fork. `SYS_EXECVE` is a spawn operation returning a child PID, not POSIX execve image replacement. It inherits descriptors but ignores envp.
+- Anonymous mappings currently use the 0x600000000000–0x700000000000 arena. MAP_FIXED, MAP_SHARED and file mappings are unsupported. munmap/mprotect outside this arena return EINVAL.
+- These are partial POSIX-like APIs, not a claim of POSIX conformance. The registry implementation flag does not establish complete standards compliance.
+- `userspace/posixcheck` and `tests/desktop_smoke.py` exercise the implemented memory, descriptor and wait contracts inside the guest.
 
 ## TLS/HTTPS status (honest)
 

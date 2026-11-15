@@ -2,6 +2,14 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include "libtls.h"
+
+static inline int wget_write(int fd, tls_session_t *t, const void *b, size_t l) {
+    return t ? tls_send(t, b, l) : write(fd, b, l);
+}
+static inline int wget_read(int fd, tls_session_t *t, void *b, size_t l) {
+    return t ? tls_recv(t, b, l) : read(fd, b, l);
+}
 
 #define MAX_URL_PART_LEN    256
 #define HTTP_REQ_BUF_SIZE   1024
@@ -138,11 +146,6 @@ int main(int argc, char **argv) {
         out_file = out_buf;
     }
 
-    if (strcmp(pu.scheme, "https") == 0) {
-        print("wget: HTTPS not supported (no TLS). Try http://\n");
-        return 1;
-    }
-
     print("wget: Resolving "); print(pu.host); print("...\n");
     uint32_t server_ip = resolve_host(pu.host);
     if (!server_ip) {
@@ -176,6 +179,20 @@ redirect:;
         close(sockfd);
         return 1;
     }
+
+    tls_session_t *tls = NULL;
+    if (strcmp(pu.scheme, "https") == 0) {
+        if (verbose) print("wget: Establishing TLS 1.3 handshake...\n");
+        tls = tls_create_session(sockfd, pu.host);
+        if (!tls || tls_handshake(tls) != 0) {
+            print("wget: TLS 1.3 handshake failed.\n");
+            if (tls) tls_destroy_session(tls);
+            close(sockfd);
+            return 1;
+        }
+        if (verbose) print("wget: TLS 1.3 established.\n");
+    }
+
     // Send HTTP GET request
     char req[HTTP_REQ_BUF_SIZE];
     int  req_len = sprintf(req,
@@ -187,8 +204,9 @@ redirect:;
         "\r\n",
         current_path, pu.host);
 
-    if (write(sockfd, req, req_len) < 0) {
+    if (wget_write(sockfd, tls, req, req_len) < 0) {
         print("wget: Failed to send request.\n");
+        if (tls) tls_destroy_session(tls);
         close(sockfd); return 1;
     }
 
@@ -200,7 +218,7 @@ redirect:;
     int   body_preread = 0;
 
     while (hdr_total < (int)sizeof(hdr_buf) - 1) {
-        int n = read(sockfd, hdr_buf + hdr_total, sizeof(hdr_buf) - 1 - hdr_total);
+        int n = wget_read(sockfd, tls, hdr_buf + hdr_total, sizeof(hdr_buf) - 1 - hdr_total);
         if (n <= 0) break;
         hdr_total += n;
         hdr_buf[hdr_total] = '\0';
@@ -215,6 +233,7 @@ redirect:;
 
     if (!body_ptr) {
         print("wget: Incomplete HTTP response.\n");
+        if (tls) tls_destroy_session(tls);
         close(sockfd); return 1;
     }
 
@@ -294,13 +313,14 @@ redirect:;
     static char dl_buf[DOWNLOAD_BUF_SIZE];
     while (1) {
         if (has_cl && downloaded >= content_length) break;
-        int n = read(sockfd, dl_buf, sizeof(dl_buf));
+        int n = wget_read(sockfd, tls, dl_buf, sizeof(dl_buf));
         if (n <= 0) break;
         write(file_fd, dl_buf, n);
         downloaded += n;
     }
 
     close(file_fd);
+    if (tls) tls_destroy_session(tls);
     close(sockfd);
 
     print("wget: Saved '"); print(out_file); print("' (");

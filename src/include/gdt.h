@@ -34,5 +34,6 @@ struct gdt_system_entry_bits {
 
 void gdt_init();
 void gdt_set_tss(void* tss_base);
+void gdt_load_ap(void);
 
 #endif // GDT_H

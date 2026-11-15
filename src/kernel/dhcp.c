@@ -109,6 +109,7 @@ void dhcp_handle_packet(dhcp_packet_t *pkt, size_t len) {
     uint32_t opt_gw     = 0;
 
     uint8_t *opt = pkt->options;
+    uint32_t opt_dns = 0;
     while (*opt != 255 && (size_t)(opt - pkt->options) < sizeof(pkt->options)) {
         uint8_t code = *opt++;
         if (code == 0) continue; /* PAD */
@@ -118,6 +119,7 @@ void dhcp_handle_packet(dhcp_packet_t *pkt, size_t len) {
             case 54: memcpy(&opt_server, opt, 4);              break; /* Server ID */
             case  1: memcpy(&opt_subnet, opt, 4);              break; /* Subnet Mask */
             case  3: memcpy(&opt_gw,     opt, 4);              break; /* Router/GW */
+            case  6: if (olen >= 4) memcpy(&opt_dns, opt, 4); break; /* DNS Server */
         }
         opt += olen;
     }
@@ -136,6 +138,10 @@ void dhcp_handle_packet(dhcp_packet_t *pkt, size_t len) {
         ip_set_local_ip(bound_ip);
         if (opt_subnet) ip_set_subnet_mask(__builtin_bswap32(opt_subnet));
         if (opt_gw)     ip_set_default_gateway(__builtin_bswap32(opt_gw));
+        if (opt_dns) {
+            extern void dns_init(uint32_t nameserver_ip);
+            dns_init(__builtin_bswap32(opt_dns));
+        }
         /* Mirror config onto the interface for ifconfig/sysmon */
         if (network_devices) {
             network_devices->ip_addr = bound_ip;

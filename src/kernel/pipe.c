@@ -144,3 +144,17 @@ void pipe_close_write(pipe_t *pipe) {
 
   spinlock_release(&pipe->lock);
 }
+
+void pipe_close_end(pipe_t *pipe, int is_write) {
+  if (!pipe)
+    return;
+  if (is_write) {
+    pipe_close_write(pipe);
+  } else {
+    pipe_close_read(pipe);
+  }
+  if (pipe->read_closed && pipe->write_closed) {
+    pipe_destroy(pipe);
+  }
+}
+

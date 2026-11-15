@@ -56,7 +56,7 @@ and returns `-1`.
 | 47 | `getcwd` | `int` | `char* buf, size_t size` | - | yes | Get current working directory |
 | 48 | `chdir` | `int` | `const char* path` | - | yes | Change current working directory |
 | 49 | `getpid` | `uint32_t` | `void` | - | yes | Current thread/process id |
-| 50 | `kill` | `int` | `uint32_t pid, int sig` | owner | yes | Terminate another thread (SIGKILL/SIGTERM; EPERM if not owner/root) |
+| 50 | `kill` | `int` | `uint32_t pid, int sig` | owner | partial | Terminate another thread; no POSIX signal handlers or process-group semantics |
 | 51 | `dup` | `int` | `int fd` | - | yes | Duplicate fd to lowest free slot |
 | 52 | `dup2` | `int` | `int fd, int fd2` | - | yes | Duplicate fd onto fd2 |
 | 53 | `lseek` | `int64_t` | `int fd, int64_t offset, int whence` | - | yes | Reposition file offset |
@@ -67,15 +67,19 @@ and returns `-1`.
 | 58 | `sock_shutdown` | `int` | `int fd, int how` | - | yes | Shut down socket send/receive |
 | 59 | `getsockname` | `int` | `int fd, struct sockaddr_in* addr, socklen_t* addrlen` | - | yes | Local socket address |
 | 60 | `fork` | `uint32_t` | `void` | - | no | Address-space+fd-table copy (needs COW or eager copy) |
-| 61 | `waitpid` | `uint32_t` | `uint32_t pid, int* status, int options` | - | no | Reap child (needs parent/child links in thread_t) |
-| 62 | `execve` | `int` | `const char* path, char** argv, char** envp` | - | no | Full POSIX exec (env support pending) |
-| 63 | `pipe` | `int` | `int fds[2]` | - | no | Pipe pair (pipe.c exists kernel-side, no syscall) |
-| 64 | `mmap` | `void*` | `void* addr, size_t len, int prot, int flags, int fd, int64_t off` | - | no | Anonymous/file mapping |
-| 65 | `munmap` | `int` | `void* addr, size_t len` | - | no | Unmap |
-| 66 | `mprotect` | `int` | `void* addr, size_t len, int prot` | - | no | Page protection change |
-| 67 | `gethostname` | `int` | `char* name, size_t len` | - | no | Hostname query |
-| 68 | `sethostname` | `int` | `const char* name, size_t len` | root | no | Hostname set |
+| 61 | `waitpid` | `int32_t` | `int32_t pid, int* status, int options` | - | partial | Parent-only child wait; pid -1/0/positive, WNOHANG, encoded normal exit status; no process groups |
+| 62 | `execve` | `int` | `const char* path, char** argv, char** envp` | - | partial | Spawn new process with inherited descriptors; NOT POSIX image replacement; envp unsupported |
+| 63 | `pipe` | `int` | `int fds[2]` | - | yes | Create unidirectional data channel (pipe pair) |
+| 64 | `mmap` | `void*` | `void* addr, size_t len, int prot, int flags, int fd, int64_t off` | - | partial | Private anonymous mappings; file-backed/shared unsupported |
+| 65 | `munmap` | `int` | `void* addr, size_t len` | - | partial | Unmap private anonymous mmap arena; cannot unmap kernel, ELF, heap or framebuffer |
+| 66 | `mprotect` | `int` | `void* addr, size_t len, int prot` | - | partial | Page protection for anonymous mmap arena; x86 write implies read |
+| 67 | `gethostname` | `int` | `char* name, size_t len` | - | yes | Query system hostname |
+| 68 | `sethostname` | `int` | `const char* name, size_t len` | root | yes | Set system hostname |
 | 69 | `sigaction` | `int` | `int sig, const struct sigaction* act, struct sigaction* old` | - | no | Full signal model (currently only terminate-on-kill) |
 | 70 | `sigprocmask` | `int` | `int how, const sigset_t* set, sigset_t* old` | - | no | Signal mask |
+| 71 | `get_gpu_info` | `int` | `struct gpu_info* out` | - | yes | Query GPU hardware model and VRAM aperture |
+| 72 | `display_ctl` | `int` | `uint64_t op, void* data, uint64_t arg` | - | partial | Software window surfaces and compositor-routed input; same-user session only |
+| 73 | `sleep` | `int` | `uint32_t ms` | - | yes | Sleep current thread for milliseconds |
+| 74 | `pci_list` | `int` | `struct pci_dev_info* buf, size_t max_entries` | - | yes | Enumerate PCI devices |
 
 Statuses: `yes` = implemented and covered by tests; `partial` = implemented with documented gaps; `no` = reserved number, planned work (never reallocate).

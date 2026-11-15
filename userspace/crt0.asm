@@ -1,5 +1,6 @@
 bits 64
 extern main
+extern print_flush
 global _start
 
 section .text
@@ -10,7 +11,9 @@ _start:
     and rsp, -16
     call main
 
-    mov rdi, rax
+    push rax
+    call print_flush
+    pop rdi
     mov rax, 0
     int 0x80
 

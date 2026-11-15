@@ -4,7 +4,13 @@
  * groups - print primary gid of the effective credentials, resolved to a
  * group name via /etc/group (name:x:gid:) when available.
  */
-int main(void) {
+int main(int argc, char **argv) {
+    if (argc > 1 && (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0)) {
+        print("Usage: groups [USER]\n");
+        print("Print group memberships for USER.\n");
+        print_flush();
+        return 0;
+    }
     uint32_t egid = getegid();
 
     int fd = open("/etc/group", O_RDONLY);

@@ -32,6 +32,12 @@ static void print_flags(uint32_t f) {
 }
 
 int main(int argc, char **argv) {
+    if (argc > 1 && (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0)) {
+        print("Usage: ifconfig [INTERFACE] [IP]\n");
+        print("Configure network interfaces.\n");
+        print_flush();
+        return 0;
+    }
     (void)argc; (void)argv;
     struct ifinfo ifs[8];
     int n = net_ifconf(ifs, 8);
