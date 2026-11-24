@@ -32,18 +32,31 @@ uint32_t tty_read(vfs_node_t *node, uint64_t offset, uint32_t size,
         char c = (char)ev.data1;
         if (c == 3) { // Ctrl+C: Send SIGINT
           extern thread_t *console_focus;
+          extern thread_t *scheduler_find_thread(uint64_t pid);
           thread_t *target = console_focus ? console_focus : get_current_thread();
           if (target && target->id > 1) {
-            if (target->sig_handlers[2] != SIG_IGN) {
-              if (target->sig_handlers[2] != SIG_DFL) {
+            bool is_shell = (strcmp(target->name, "sh") == 0 ||
+                             strcmp(target->name, "/bin/sh") == 0 ||
+                             strcmp(target->name, "init") == 0 ||
+                             target->id <= 2);
+            if (!is_shell) {
+              if (target->sig_handlers[2] == SIG_IGN) {
+                // Ignored
+              } else if (target->sig_handlers[2] != SIG_DFL) {
                 target->sig_pending |= (1 << 2);
               } else {
                 target->exit_status = 130;
                 target->state = THREAD_DEAD;
+                if (target->parent_id) {
+                  thread_t *parent = scheduler_find_thread(target->parent_id);
+                  if (parent) parent->sig_pending |= (1 << 17);
+                }
+                if (console_focus == target) console_focus = NULL;
+                fb_release_graphics_owner(target->id);
               }
+              klog_print_str("^C\n", true);
             }
           }
-          klog_print_str("^C\n", false);
           buffer[0] = c;
           return 1;
         }

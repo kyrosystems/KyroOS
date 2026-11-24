@@ -20,6 +20,12 @@ static uint32_t console_rows = 0;
 static const uint32_t char_width = 8;
 static const uint32_t char_height = 16;
 static uint32_t current_fg_color = FB_DEFAULT_FG_COLOR;
+static uint32_t current_bg_color = FB_DEFAULT_BG_COLOR;
+static bool sgr_invert = false;
+static bool cursor_visible = true;
+static bool cursor_drawn = false;
+static uint32_t cursor_saved_x = 0;
+static uint32_t cursor_saved_y = 0;
 log_level_t current_log_level = LOG_INFO;
 
 void log_update_console_dimensions(void) {
@@ -51,26 +57,196 @@ void log_set_fg_color(uint32_t color) {
   current_fg_color = color;
 }
 
-/* Minimal ANSI CSI state for userspace TUIs (sysmon/editor):
- * handles ESC [ 2 J (clear) and ESC [ H (home); other CSI sequences
- * are consumed silently instead of printing garbage. */
+void klog_draw_cursor(void) {
+  if (!cursor_visible || cursor_drawn) return;
+  if (console_cols == 0 || console_rows == 0) return;
+  if (console_x >= console_cols || console_y >= console_rows) return;
+
+  uint32_t px = console_x * char_width;
+  uint32_t py = console_y * char_height;
+  for (uint32_t dy = char_height - 2; dy < char_height; dy++) {
+    for (uint32_t dx = 0; dx < char_width; dx++) {
+      uint32_t c = fb_get_pixel(px + dx, py + dy);
+      fb_set_pixel(px + dx, py + dy, c ^ 0x00FFFFFF);
+    }
+  }
+  cursor_saved_x = console_x;
+  cursor_saved_y = console_y;
+  cursor_drawn = true;
+  fb_flush_dirty();
+}
+
+void klog_clear_cursor(void) {
+  if (!cursor_drawn) return;
+  uint32_t px = cursor_saved_x * char_width;
+  uint32_t py = cursor_saved_y * char_height;
+  for (uint32_t dy = char_height - 2; dy < char_height; dy++) {
+    for (uint32_t dx = 0; dx < char_width; dx++) {
+      uint32_t c = fb_get_pixel(px + dx, py + dy);
+      fb_set_pixel(px + dx, py + dy, c ^ 0x00FFFFFF);
+    }
+  }
+  cursor_drawn = false;
+  fb_flush_dirty();
+}
+
+void klog_clear_line(void) {
+  klog_clear_cursor();
+  uint32_t bg = sgr_invert ? current_fg_color : current_bg_color;
+  fb_draw_rect(0, console_y * char_height, console_cols * char_width, char_height, bg);
+  console_x = 0;
+  klog_draw_cursor();
+}
+
+/* Comprehensive ANSI CSI parser for terminal TUIs (nano, edit, sh, sysmon):
+ * Handles cursor positioning \033[row;colH, cursor movement \033[A/B/C/D,
+ * line/screen clearing \033[K / \033[2J, SGR colors & inversion \033[m,
+ * and cursor show/hide \033[?25h / \033[?25l. */
 static int ansi_state = 0; /* 0=text, 1=seen ESC, 2=in CSI */
+#define MAX_CSI_PARAMS 8
+static int csi_params[MAX_CSI_PARAMS];
+static bool csi_has_param[MAX_CSI_PARAMS];
+static int csi_param_count = 0;
+static bool csi_is_private = false;
 
 static void ansi_consume(char c) {
   if (ansi_state == 1) {
-    if (c == '[') { ansi_state = 2; return; }
+    if (c == '[') {
+      ansi_state = 2;
+      csi_param_count = 0;
+      csi_params[0] = 0;
+      csi_has_param[0] = false;
+      csi_is_private = false;
+      return;
+    }
     ansi_state = 0;
     if (c == 0x1B) ansi_state = 1;
     return;
   }
-  /* ansi_state == 2: collecting CSI until a final byte (@-~) */
+
+  /* ansi_state == 2: collecting CSI */
+  if (c == '?') {
+    csi_is_private = true;
+    return;
+  }
+
+  if (c >= '0' && c <= '9') {
+    csi_params[csi_param_count] = csi_params[csi_param_count] * 10 + (c - '0');
+    csi_has_param[csi_param_count] = true;
+    return;
+  }
+
+  if (c == ';') {
+    if (csi_param_count < MAX_CSI_PARAMS - 1) {
+      csi_param_count++;
+      csi_params[csi_param_count] = 0;
+      csi_has_param[csi_param_count] = false;
+    }
+    return;
+  }
+
+  /* Final byte (@ through ~) terminates CSI */
   if (c >= '@' && c <= '~') {
-    if (c == 'J') console_clear();
-    else if (c == 'H') { console_x = 0; console_y = 0; }
+    klog_clear_cursor();
+    if (c == 'H' || c == 'f') { // Cursor Position: \033[row;colH
+      int row = (csi_has_param[0] && csi_params[0] > 0) ? csi_params[0] : 1;
+      int col = (csi_param_count >= 1 && csi_has_param[1] && csi_params[1] > 0) ? csi_params[1] : 1;
+      console_y = (uint32_t)(row > 0 ? row - 1 : 0);
+      console_x = (uint32_t)(col > 0 ? col - 1 : 0);
+      if (console_cols && console_x >= console_cols) console_x = console_cols - 1;
+      if (console_rows && console_y >= console_rows) console_y = console_rows - 1;
+    } else if (c == 'A') { // Cursor Up: \033[<n>A
+      int n = (csi_has_param[0] && csi_params[0] > 0) ? csi_params[0] : 1;
+      console_y = console_y >= (uint32_t)n ? console_y - n : 0;
+    } else if (c == 'B') { // Cursor Down: \033[<n>B
+      int n = (csi_has_param[0] && csi_params[0] > 0) ? csi_params[0] : 1;
+      console_y = (console_y + n < console_rows) ? console_y + n : (console_rows ? console_rows - 1 : 0);
+    } else if (c == 'C') { // Cursor Forward (Right): \033[<n>C
+      int n = (csi_has_param[0] && csi_params[0] > 0) ? csi_params[0] : 1;
+      console_x = (console_x + n < console_cols) ? console_x + n : (console_cols ? console_cols - 1 : 0);
+    } else if (c == 'D') { // Cursor Back (Left): \033[<n>D
+      int n = (csi_has_param[0] && csi_params[0] > 0) ? csi_params[0] : 1;
+      console_x = console_x >= (uint32_t)n ? console_x - n : 0;
+    } else if (c == 'J') { // Erase in Display: \033[2J
+      int mode = csi_has_param[0] ? csi_params[0] : 0;
+      if (mode == 2 || mode == 3) {
+        console_clear();
+      } else if (mode == 0) {
+        uint32_t bg = sgr_invert ? current_fg_color : current_bg_color;
+        if (console_x < console_cols) {
+          fb_draw_rect(console_x * char_width, console_y * char_height,
+                       (console_cols - console_x) * char_width, char_height, bg);
+        }
+        if (console_y + 1 < console_rows) {
+          fb_draw_rect(0, (console_y + 1) * char_height,
+                       console_cols * char_width, (console_rows - (console_y + 1)) * char_height, bg);
+        }
+      }
+    } else if (c == 'K') { // Erase in Line: \033[K, \033[2K
+      int mode = csi_has_param[0] ? csi_params[0] : 0;
+      uint32_t bg = sgr_invert ? current_fg_color : current_bg_color;
+      if (mode == 0) {
+        if (console_x < console_cols) {
+          fb_draw_rect(console_x * char_width, console_y * char_height,
+                       (console_cols - console_x) * char_width, char_height, bg);
+        }
+      } else if (mode == 1) {
+        uint32_t w = (console_x + 1 < console_cols) ? (console_x + 1) : console_cols;
+        fb_draw_rect(0, console_y * char_height, w * char_width, char_height, bg);
+      } else if (mode == 2) {
+        fb_draw_rect(0, console_y * char_height, console_cols * char_width, char_height, bg);
+      }
+    } else if (c == 'm') { // SGR attributes: \033[m
+      int total = csi_has_param[0] ? (csi_param_count + 1) : 1;
+      for (int i = 0; i < total; i++) {
+        int val = csi_has_param[i] ? csi_params[i] : 0;
+        if (val == 0) {
+          current_fg_color = FB_DEFAULT_FG_COLOR;
+          current_bg_color = FB_DEFAULT_BG_COLOR;
+          sgr_invert = false;
+        } else if (val == 7) {
+          sgr_invert = true;
+        } else if (val == 27) {
+          sgr_invert = false;
+        } else if (val >= 30 && val <= 37) {
+          static const uint32_t ansi_colors[8] = {
+            0xFF000000, 0xFFCC0000, 0xFF00CC00, 0xFFCCCC00,
+            0xFF2255CC, 0xFFCC00CC, 0xFF00CCCC, 0xFFAAAAAA
+          };
+          current_fg_color = ansi_colors[val - 30];
+        } else if (val == 39) {
+          current_fg_color = FB_DEFAULT_FG_COLOR;
+        } else if (val >= 40 && val <= 47) {
+          static const uint32_t ansi_bg[8] = {
+            0xFF000000, 0xFF880000, 0xFF008800, 0xFF888800,
+            0xFF000088, 0xFF880088, 0xFF008888, 0xFF888888
+          };
+          current_bg_color = ansi_bg[val - 40];
+        } else if (val == 49) {
+          current_bg_color = FB_DEFAULT_BG_COLOR;
+        } else if (val >= 90 && val <= 97) {
+          static const uint32_t ansi_bright[8] = {
+            0xFF555555, 0xFFFF4444, 0xFF44FF44, 0xFFFFFF44,
+            0xFF4488FF, 0xFFFF44FF, 0xFF44FFFF, 0xFFFFFFFF
+          };
+          current_fg_color = ansi_bright[val - 90];
+        } else if (val >= 100 && val <= 107) {
+          static const uint32_t ansi_bright_bg[8] = {
+            0xFF333333, 0xFFAA2222, 0xFF22AA22, 0xFFAAAA22,
+            0xFF2222AA, 0xFFAA22AA, 0xFF22AAAA, 0xFFAAAAAA
+          };
+          current_bg_color = ansi_bright_bg[val - 100];
+        }
+      }
+    } else if (c == 'h' || c == 'l') { // Set / Reset mode
+      if (csi_is_private && csi_has_param[0] && csi_params[0] == 25) {
+        cursor_visible = (c == 'h');
+        if (!cursor_visible) klog_clear_cursor();
+      }
+    }
     ansi_state = 0;
     return;
   }
-  /* parameter bytes (digits, ';', etc.) — ignore */
 }
 
 void klog_putchar(char c) {
@@ -81,6 +257,8 @@ void klog_putchar(char c) {
     return;
   }
 
+  klog_clear_cursor();
+
   if (c == '\n') {
     console_x = 0;
     console_y++;
@@ -89,12 +267,15 @@ void klog_putchar(char c) {
   } else if (c == '\b') {
     if (console_x > 0) {
       console_x--;
+      uint32_t bg = sgr_invert ? current_fg_color : current_bg_color;
       fb_draw_rect(console_x * char_width, console_y * char_height,
-                   char_width, char_height, FB_DEFAULT_BG_COLOR);
+                   char_width, char_height, bg);
     }
   } else {
+    uint32_t eff_fg = sgr_invert ? current_bg_color : current_fg_color;
+    uint32_t eff_bg = sgr_invert ? current_fg_color : current_bg_color;
     fb_draw_char(c, console_x * char_width, console_y * char_height,
-                 current_fg_color, FB_DEFAULT_BG_COLOR);
+                 eff_fg, eff_bg);
     console_x++;
   }
 
@@ -104,22 +285,29 @@ void klog_putchar(char c) {
   }
   if (console_rows > 0 && console_y >= console_rows) {
     fb_copy_region(char_height, 0, (console_rows - 1) * char_height);
+    uint32_t bg = sgr_invert ? current_fg_color : current_bg_color;
     fb_draw_rect(0, (console_rows - 1) * char_height,
-                 console_cols * char_width, char_height, FB_DEFAULT_BG_COLOR);
+                 console_cols * char_width, char_height, bg);
     console_y = console_rows - 1;
   }
 }
 
 void klog_print_str(const char *s, bool do_flush) {
   while (*s) klog_putchar(*s++);
-  if (do_flush) fb_flush_dirty();
+  if (do_flush) {
+    klog_draw_cursor();
+    fb_flush_dirty();
+  }
 }
 
 void console_clear(void) {
-  fb_clear(FB_DEFAULT_BG_COLOR);
+  klog_clear_cursor();
+  uint32_t bg = sgr_invert ? current_fg_color : current_bg_color;
+  fb_clear(bg);
   console_x = 0;
   console_y = 0;
   fb_flush();
+  klog_draw_cursor();
 }
 
 void log_init(void) {
@@ -145,6 +333,7 @@ void klog(log_level_t level, const char *fmt, ...) {
   if (epstein == 1 || level >= LOG_WARN) {
     klog_print_str(buf, false);
     klog_putchar('\n');
+    fb_flush_dirty();
   }
 }
 
@@ -166,7 +355,4 @@ void panic(const char *message, struct registers *regs) {
   for (;;) __asm__ __volatile__("hlt");
 }
 
-void klog_draw_cursor(void) {}
-void klog_clear_cursor(void) {}
-void klog_clear_line(void) {}
 void log_dump(void) {}

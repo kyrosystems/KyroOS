@@ -194,6 +194,40 @@ typedef struct VkPresentInfoKHR {
     VkResult*                pResults;
 } VkPresentInfoKHR;
 
+typedef struct VkClearValue {
+    union {
+        float float32[4];
+        int32_t int32[4];
+        uint32_t uint32[4];
+    } color;
+    struct {
+        float depth;
+        uint32_t stencil;
+    } depthStencil;
+} VkClearValue;
+
+typedef struct VkRenderPassBeginInfo {
+    VkStructureType sType;
+    const void*     pNext;
+    VkRenderPass    renderPass;
+    VkFramebuffer   framebuffer;
+    struct {
+        int32_t x, y;
+        uint32_t width, height;
+    } renderArea;
+    uint32_t        clearValueCount;
+    const VkClearValue* pClearValues;
+} VkRenderPassBeginInfo;
+
+typedef struct VkViewport {
+    float x, y, width, height, minDepth, maxDepth;
+} VkViewport;
+
+typedef struct VkRect2D {
+    struct { int32_t x, y; } offset;
+    VkExtent2D extent;
+} VkRect2D;
+
 // Core Functions
 VkResult vkCreateInstance(const VkInstanceCreateInfo* pCreateInfo, const void* pAllocator, VkInstance* pInstance);
 void     vkDestroyInstance(VkInstance instance, const void* pAllocator);
@@ -219,6 +253,22 @@ void     vkDestroySwapchainKHR(VkDevice device, VkSwapchainKHR swapchain, const 
 VkResult vkQueueSubmit(VkQueue queue, uint32_t submitCount, const VkSubmitInfo* pSubmits, void* fence);
 VkResult vkQueueWaitIdle(VkQueue queue);
 VkResult vkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPresentInfo);
+
+void vkCmdBeginRenderPass(VkCommandBuffer commandBuffer, const VkRenderPassBeginInfo* pRenderPassBegin, uint32_t contents);
+void vkCmdEndRenderPass(VkCommandBuffer commandBuffer);
+void vkCmdBindPipeline(VkCommandBuffer commandBuffer, uint32_t pipelineBindPoint, VkPipeline pipeline);
+void vkCmdSetViewport(VkCommandBuffer commandBuffer, uint32_t firstViewport, uint32_t viewportCount, const VkViewport* pViewports);
+void vkCmdSetScissor(VkCommandBuffer commandBuffer, uint32_t firstScissor, uint32_t scissorCount, const VkRect2D* pScissors);
+void vkCmdDraw(VkCommandBuffer commandBuffer, uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance);
+
+// KyroVK Software Rasterizer Triangle API
+typedef struct {
+    float x, y, z;
+    uint32_t color;
+} VkVertex3D;
+
+void vkClearDepthBuffer(void);
+void vkRasterizeTriangle(const VkVertex3D *v0, const VkVertex3D *v1, const VkVertex3D *v2);
 
 #ifdef __cplusplus
 }

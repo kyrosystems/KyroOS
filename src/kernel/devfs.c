@@ -6,6 +6,7 @@
 #include "random.h"
 #include "vfs.h"
 #include "keyboard.h"
+#include "thread.h"
 
 typedef struct devfs_entry {
   char name[MAX_FILENAME_LEN];
@@ -37,8 +38,11 @@ uint32_t console_read(vfs_node_t *node, uint64_t offset, uint32_t size,
   (void)node;
   (void)offset;
   if (size == 0 || !buffer) return 0;
+  thread_t *t = get_current_thread();
   for (uint32_t i = 0; i < size; i++) {
+    if (t && t->state == THREAD_DEAD) return i;
     buffer[i] = (uint8_t)keyboard_get_char_blocking();
+    if (t && t->state == THREAD_DEAD) return i + 1;
   }
   return size;
 }

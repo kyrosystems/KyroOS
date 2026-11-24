@@ -1,9 +1,14 @@
 #include "keyboard.h"
 #include "event.h"
 #include "isr.h"
-#include "log.h" // Added
+#include "log.h"
 #include "port_io.h"
+#include "thread.h"
+#include "signal.h"
+#include "scheduler.h"
+#include "fb.h"
 #include <stdbool.h>
+#include <string.h>
 
 // Basic US QWERTY scancode to ASCII map
 
@@ -61,6 +66,17 @@ char keyboard_get_char_blocking() {
     }
 }
 
+static void push_vt100_seq(const char *s, uint8_t scancode) {
+  while (*s) {
+    event_t ev = {0};
+    ev.type = EVENT_KEY_DOWN;
+    ev.data1 = (uint64_t)(uint8_t)(*s++);
+    ev.data2 = (uint64_t)scancode;
+    ev.data3 = (ctrl_pressed ? 1 : 0) | (shift_pressed ? 2 : 0) | 4;
+    event_push(ev);
+  }
+}
+
 static void keyboard_handler(struct registers *regs) {
   (void)regs; // Suppress unused parameter warning
 
@@ -88,9 +104,29 @@ static void keyboard_handler(struct registers *regs) {
     return;
   }
 
+  // Handle extended navigation and editing keys -> Standard VT100 / ANSI escape sequences
+  if (extended || (scancode >= 0x47 && scancode <= 0x53 && kbd_us[scancode] == 0)) {
+    if (!(scancode & 0x80)) { // Key press
+      switch (scancode) {
+        case 0x48: push_vt100_seq("\033[A", scancode); return; // Up Arrow
+        case 0x50: push_vt100_seq("\033[B", scancode); return; // Down Arrow
+        case 0x4D: push_vt100_seq("\033[C", scancode); return; // Right Arrow
+        case 0x4B: push_vt100_seq("\033[D", scancode); return; // Left Arrow
+        case 0x47: push_vt100_seq("\033[H", scancode); return; // Home
+        case 0x4F: push_vt100_seq("\033[F", scancode); return; // End
+        case 0x49: push_vt100_seq("\033[5~", scancode); return; // Page Up
+        case 0x51: push_vt100_seq("\033[6~", scancode); return; // Page Down
+        case 0x52: push_vt100_seq("\033[2~", scancode); return; // Insert
+        case 0x53: push_vt100_seq("\033[3~", scancode); return; // Delete
+        default: break;
+      }
+    } else {
+      return; // Ignore key release of extended keys
+    }
+  }
+
   if (scancode & 0x80) { // Key release
     event.type = EVENT_KEY_UP;
-    // For simplicity, we don't apply shift/caps on release, just send the base character
     event.data1 = kbd_us[scancode & 0x7F];
   } else { // Key press
     event.type = EVENT_KEY_DOWN;
@@ -111,6 +147,38 @@ static void keyboard_handler(struct registers *regs) {
             c = (char)(c - 'A' + 1);
         }
     }
+
+    // Check for Ctrl+C (character 0x03)
+    if (c == 3) {
+      extern thread_t *console_focus;
+      extern thread_t *scheduler_find_thread(uint64_t pid);
+      thread_t *target = console_focus ? console_focus : get_current_thread();
+      if (target && target->id > 1) {
+        bool is_shell = (strcmp(target->name, "sh") == 0 ||
+                         strcmp(target->name, "/bin/sh") == 0 ||
+                         strcmp(target->name, "init") == 0 ||
+                         target->id <= 2);
+        if (!is_shell) {
+          if (target->sig_handlers[2] == SIG_IGN) {
+            // Ignored by process
+          } else if (target->sig_handlers[2] != SIG_DFL) {
+            target->sig_pending |= (1 << 2); // Deliver custom SIGINT
+          } else {
+            // Terminate foreground application immediately
+            target->exit_status = 130;
+            target->state = THREAD_DEAD;
+            if (target->parent_id) {
+              thread_t *parent = scheduler_find_thread(target->parent_id);
+              if (parent) parent->sig_pending |= (1 << 17); // SIGCHLD
+            }
+            if (console_focus == target) console_focus = NULL;
+            fb_release_graphics_owner(target->id);
+          }
+          klog_print_str("^C\n", true);
+        }
+      }
+    }
+
     event.data1 = c;
   }
   event.data3 = (ctrl_pressed ? 1 : 0) | (shift_pressed ? 2 : 0) | (extended ? 4 : 0);

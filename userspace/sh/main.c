@@ -122,12 +122,88 @@ static void win_close(int target) {
     }
 }
 
+static char cmd_history[32][256];
+static int cmd_history_count = 0;
+
 static void read_line(char *buf, int max_len) {
-    int idx = 0;
-    while (idx < max_len - 1) {
+    int len = 0;
+    int pos = 0;
+    int history_idx = -1;
+
+    buf[0] = '\0';
+
+    while (1) {
         char ch = 0;
         int n = read(0, &ch, 1);
         if (n <= 0) continue;
+
+        // Ctrl+C (SIGINT): Cancel current command line and start fresh
+        if (ch == 3) {
+            print("^C\n");
+            print_flush();
+            buf[0] = '\0';
+            return;
+        }
+
+        // Ctrl+D (EOF): Exit if line is empty
+        if (ch == 4) {
+            if (len == 0) {
+                strncpy(buf, "exit", max_len - 1);
+                buf[max_len - 1] = '\0';
+                print("exit\n");
+                print_flush();
+                return;
+            }
+            continue;
+        }
+
+        // Ctrl+A: Move to beginning of line (Home)
+        if (ch == 1) {
+            if (pos > 0) {
+                char mc[16];
+                snprintf(mc, sizeof(mc), "\033[%dD", pos);
+                print(mc);
+                print_flush();
+                pos = 0;
+            }
+            continue;
+        }
+
+        // Ctrl+E: Move to end of line (End)
+        if (ch == 5) {
+            if (pos < len) {
+                char mc[16];
+                snprintf(mc, sizeof(mc), "\033[%dC", len - pos);
+                print(mc);
+                print_flush();
+                pos = len;
+            }
+            continue;
+        }
+
+        // Ctrl+U: Erase entire line
+        if (ch == 21) {
+            if (pos > 0) {
+                char mc[16];
+                snprintf(mc, sizeof(mc), "\033[%dD", pos);
+                print(mc);
+            }
+            print("\033[K");
+            print_flush();
+            len = 0;
+            pos = 0;
+            buf[0] = '\0';
+            continue;
+        }
+
+        // Ctrl+K: Kill from cursor to end of line
+        if (ch == 11) {
+            print("\033[K");
+            print_flush();
+            len = pos;
+            buf[len] = '\0';
+            continue;
+        }
 
         if (ch == 2) { // Ctrl+B (tmux hotkey prefix)
             print("\033[7m[TMUX]\033[0m");
@@ -168,24 +244,161 @@ static void read_line(char *buf, int max_len) {
             continue;
         }
 
+        // VT100 / ANSI Escape Sequences (Arrows, Home, End, Delete)
+        if (ch == 27) {
+            char seq[3];
+            int n1 = read(0, &seq[0], 1);
+            if (n1 <= 0) continue;
+            if (seq[0] == '[') {
+                int n2 = read(0, &seq[1], 1);
+                if (n2 <= 0) continue;
+
+                if (seq[1] == 'D') { // Left Arrow
+                    if (pos > 0) {
+                        pos--;
+                        print("\033[D");
+                        print_flush();
+                    }
+                } else if (seq[1] == 'C') { // Right Arrow
+                    if (pos < len) {
+                        pos++;
+                        print("\033[C");
+                        print_flush();
+                    }
+                } else if (seq[1] == 'H') { // Home
+                    if (pos > 0) {
+                        char mc[16];
+                        snprintf(mc, sizeof(mc), "\033[%dD", pos);
+                        print(mc);
+                        print_flush();
+                        pos = 0;
+                    }
+                } else if (seq[1] == 'F') { // End
+                    if (pos < len) {
+                        char mc[16];
+                        snprintf(mc, sizeof(mc), "\033[%dC", len - pos);
+                        print(mc);
+                        print_flush();
+                        pos = len;
+                    }
+                } else if (seq[1] == 'A') { // Up Arrow (History Prev)
+                    if (cmd_history_count > 0) {
+                        if (history_idx == -1) history_idx = cmd_history_count - 1;
+                        else if (history_idx > 0) history_idx--;
+
+                        if (pos > 0) {
+                            char mc[16];
+                            snprintf(mc, sizeof(mc), "\033[%dD", pos);
+                            print(mc);
+                        }
+                        print("\033[K");
+                        strncpy(buf, cmd_history[history_idx], max_len - 1);
+                        buf[max_len - 1] = '\0';
+                        len = strlen(buf);
+                        pos = len;
+                        print(buf);
+                        print_flush();
+                    }
+                } else if (seq[1] == 'B') { // Down Arrow (History Next)
+                    if (history_idx >= 0) {
+                        history_idx++;
+                        if (pos > 0) {
+                            char mc[16];
+                            snprintf(mc, sizeof(mc), "\033[%dD", pos);
+                            print(mc);
+                        }
+                        print("\033[K");
+                        if (history_idx >= cmd_history_count) {
+                            history_idx = -1;
+                            len = 0;
+                            pos = 0;
+                            buf[0] = '\0';
+                        } else {
+                            strncpy(buf, cmd_history[history_idx], max_len - 1);
+                            buf[max_len - 1] = '\0';
+                            len = strlen(buf);
+                            pos = len;
+                            print(buf);
+                        }
+                        print_flush();
+                    }
+                } else if (seq[1] == '3') { // Delete key (\033[3~)
+                    char tilde = 0;
+                    read(0, &tilde, 1);
+                    if (pos < len) {
+                        memmove(buf + pos, buf + pos + 1, len - pos);
+                        len--;
+                        buf[len] = '\0';
+                        print(buf + pos);
+                        print(" \033[K");
+                        char mc[16];
+                        snprintf(mc, sizeof(mc), "\033[%dD", len - pos + 1);
+                        print(mc);
+                        print_flush();
+                    }
+                }
+            }
+            continue;
+        }
+
+        // Enter: Commit command line
         if (ch == '\r' || ch == '\n') {
             print("\n");
             print_flush();
+            buf[len] = '\0';
+            // Save to history
+            if (len > 0) {
+                if (cmd_history_count == 0 || strcmp(cmd_history[cmd_history_count - 1], buf) != 0) {
+                    if (cmd_history_count < 32) {
+                        strncpy(cmd_history[cmd_history_count++], buf, 255);
+                    } else {
+                        memmove(&cmd_history[0], &cmd_history[1], sizeof(cmd_history[0]) * 31);
+                        strncpy(cmd_history[31], buf, 255);
+                    }
+                }
+            }
             break;
-        } else if (ch == '\b' || ch == 127) {
-            if (idx > 0) {
-                idx--;
-                print("\b \b");
+        }
+
+        // Backspace: Delete character before cursor
+        if (ch == '\b' || ch == 127) {
+            if (pos > 0) {
+                memmove(buf + pos - 1, buf + pos, len - pos + 1);
+                pos--;
+                len--;
+                print("\033[D");
+                print(buf + pos);
+                print(" \033[K");
+                char mc[16];
+                snprintf(mc, sizeof(mc), "\033[%dD", len - pos + 1);
+                print(mc);
                 print_flush();
             }
-        } else if (ch >= 32 && ch <= 126) {
-            buf[idx++] = ch;
-            char out[2] = {ch, '\0'};
-            print(out);
-            print_flush();
+            continue;
+        }
+
+        // Regular printable character
+        if (ch >= 32 && ch <= 126) {
+            if (len < max_len - 1) {
+                memmove(buf + pos + 1, buf + pos, len - pos + 1);
+                buf[pos] = ch;
+                pos++;
+                len++;
+                buf[len] = '\0';
+
+                char out[2] = {ch, '\0'};
+                print(out);
+                if (pos < len) {
+                    print(buf + pos);
+                    char mc[16];
+                    snprintf(mc, sizeof(mc), "\033[%dD", len - pos);
+                    print(mc);
+                }
+                print_flush();
+            }
         }
     }
-    buf[idx] = '\0';
+    buf[len] = '\0';
 }
 
 static int parse_args(char *line, char *argv[], char **redir_in, char **redir_out, int *append_out) {
