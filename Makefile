@@ -14,12 +14,11 @@ _BUILD_INC := $(shell \
 endif
 
 LDFLAGS = -T linker.ld -nostdlib -z noexecstack -z separate-code
-OS_VERSION = 26.03.12-Beryllium
+OS_VERSION = 26.11.13-Carbon
 # cflags
 K_CFLAGS = -Wall -Wextra -std=c11 -ffreestanding -O2 -Isrc/include \
            -mcmodel=kernel -mno-red-zone -m64 -nostdlib -fno-stack-protector \
-           -D_FORTIFY_SOURCE=0 -fno-builtin \
-           -isystem /usr/lib64/gcc/x86_64-suse-linux/15/include \
+           -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -fno-builtin \
            -mno-sse -mno-sse2 -mno-mmx -mno-80387 -fno-pic -fno-pie \
            -DOS_VERSION="\"$(OS_VERSION)\""
 BUILD_DIR = build
@@ -41,30 +40,47 @@ QEMU_FLAGS = -cdrom $(ISO_FILENAME) -serial stdio -no-reboot \
              -netdev user,id=net0,hostname=kyroos,dns=8.8.8.8 \
              -display sdl
 
-.PHONY: all clean run iso userspace
+.PHONY: all clean run iso userspace modules
 
-all: userspace $(BUILD_DIR)/kernel/kyroos.elf iso
+all: iso
 
 userspace:
-	@make -C userspace all
+	+@$(MAKE) -C userspace all
+
+modules:
+	+@$(MAKE) -C modules/hello_lkm
 
 run: 
 	@qemu-system-x86_64 $(QEMU_FLAGS)
 
-iso:
-	@mkdir -p $(BUILD_DIR)/isodir/boot/limine
+iso: userspace modules $(BUILD_DIR)/kernel/kyroos.elf
+	@mkdir -p $(BUILD_DIR)/isodir/boot/limine $(BUILD_DIR)/isodir/EFI/BOOT $(BUILD_DIR)/isodir/etc $(BUILD_DIR)/isodir/lib/modules
 	@cp $(BUILD_DIR)/kernel/kyroos.elf $(BUILD_DIR)/isodir/boot/kernel.elf
 	@cp limine.conf $(BUILD_DIR)/isodir/boot/limine/
+	@cp etc/* $(BUILD_DIR)/isodir/etc/
+	@if [ -f modules/hello_lkm/hello.ko ]; then cp modules/hello_lkm/hello.ko $(BUILD_DIR)/isodir/lib/modules/; fi
 	@for f in $(BUILD_DIR)/isodir/bin/*; do \
 		echo "    module_path: boot():/bin/$$(basename $$f)" >> $(BUILD_DIR)/isodir/boot/limine/limine.conf; \
 	done
+	@for f in $(BUILD_DIR)/isodir/etc/*; do \
+		echo "    module_path: boot():/etc/$$(basename $$f)" >> $(BUILD_DIR)/isodir/boot/limine/limine.conf; \
+	done
+	@if [ -f $(BUILD_DIR)/isodir/lib/modules/hello.ko ]; then \
+		echo "    module_path: boot():/lib/modules/hello.ko" >> $(BUILD_DIR)/isodir/boot/limine/limine.conf; \
+	fi
+	@echo "    module_path: boot():/boot/kernel.elf" >> $(BUILD_DIR)/isodir/boot/limine/limine.conf
+	@echo "    module_path: boot():/boot/limine/limine.conf" >> $(BUILD_DIR)/isodir/boot/limine/limine.conf
+	@echo "    module_path: boot():/boot/limine/BOOTX64.EFI" >> $(BUILD_DIR)/isodir/boot/limine/limine.conf
+	@echo "    module_path: boot():/boot/limine/limine-bios.sys" >> $(BUILD_DIR)/isodir/boot/limine/limine.conf
+	@echo "    module_path: boot():/boot/limine/limine-bios-cd.bin" >> $(BUILD_DIR)/isodir/boot/limine/limine.conf
 	@cp limine/BOOTX64.EFI limine/limine-bios.sys limine/limine-bios-cd.bin limine/limine-uefi-cd.bin $(BUILD_DIR)/isodir/boot/limine/
+	@cp limine/BOOTX64.EFI $(BUILD_DIR)/isodir/EFI/BOOT/BOOTX64.EFI
 	@rm -rf /tmp/kyroos_build
 	@cp -r $(BUILD_DIR)/isodir /tmp/kyroos_build
 	@xorriso -as mkisofs -R -J -iso-level 3 -volid "KYROOS" \
 		-b boot/limine/limine-bios-cd.bin \
 		-no-emul-boot -boot-load-size 4 -boot-info-table \
-		--efi-boot boot/limine/BOOTX64.EFI \
+		--efi-boot boot/limine/limine-uefi-cd.bin \
 		-efi-boot-part --efi-boot-image --protective-msdos-label \
 		/tmp/kyroos_build -o $(ISO_FILENAME)
 	@limine/limine bios-install $(ISO_FILENAME) 2>/dev/null || true
@@ -74,7 +90,7 @@ iso:
 $(BUILD_DIR)/kernel/kyroos.elf: $(K_BOOT_OBJS) $(K_OBJS)
 	@$(LD) -T linker.ld -o $@ $^ -m elf_x86_64
 
-$(BUILD_DIR)/kernel/%.o: src/kernel/%.c src/include/version.h
+$(BUILD_DIR)/kernel/%.o: src/kernel/%.c $(wildcard src/include/*.h)
 	@mkdir -p $(@D)
 	@$(CC) $(K_CFLAGS) -c $< -o $@
 

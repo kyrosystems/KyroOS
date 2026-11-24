@@ -12,18 +12,21 @@ KyroOS is a 64-bit operating system for the x86-64 architecture, developed as a 
 *   **Memory Management:** Physical Memory Manager (PMM) and Virtual Memory Manager (VMM) with demand paging.
 *   **Multitasking:** Preemptive, round-robin scheduler for efficient task switching.
 *   **Basic Drivers:** Support for keyboard, mouse, framebuffer, IDE hard disks, E1000 network cards, and AC97 audio.
-*   **Virtual File System (VFS):** Unified interface for file operations, with KyroFS (in-memory and disk-based) as the primary filesystem.
-*   **Userspace Environment:** A basic shell (`kyroshell`) and a set of core utilities (`cat`, `ls`, `mkdir`, etc.), loaded at boot as Limine modules from `/bin`.
-*   **Networking Stack:** Support for ARP, IP, UDP, and a stubbed TCP implementation.
-*   **Package Manager (`kpm`):** Simple command-line tool for managing userspace software (not operational yet).
-*   **Installer:** An automated installer to prepare disk partitions (not operational yet).
+*   **Virtual File System (VFS):** Unified interface for file operations, with KyroFS (in-memory and disk-based) as the primary filesystem, plus devfs and block device nodes.
+*   **Decoupled Userspace & Shell:** True Unix/Linux architecture separation. The kernel boots into Ring 3 `/bin/init` (PID 1), which configures hostname/issue and launches `/bin/sh` (or custom user shells) with pipeline (`|`) and redirection (`>`, `>>`, `<`) support.
+*   **POSIX Syscalls & Multi-User Security:** POSIX-compatible `waitpid`, `execve`, `pipe`, `mmap`, `munmap`, `gethostname`, `sethostname`. Full user & group security (`/etc/passwd`, `/etc/shadow`, `/etc/group`, `useradd`, `userdel`, `groupadd`, `groupdel`, `chmod`, `chown`, `su`, `id`, `whoami`).
+*   **3D Graphics (OpenGL & Vulkan):** Software-rasterized OpenGL 1.1 / Mesa subset (`libgl`) and Vulkan 1.1 ICD (`libvulkan`), complete with 3D demos `gears` and `vkcube`.
+*   **Loadable Kernel Modules (LKM):** ELF64 relocatable object loader (`.ko`) supporting `R_X86_64_64`, `PC32`, `PLT32`, `32`, `32S` relocations, kernel symbol exports, and userspace management (`lsmod`, `insmod`, `rmmod`).
+*   **TLS 1.3 & HTTPS:** Native client-side TLS 1.3 cryptographic engine (`libtls`) with X25519, HKDF-SHA256, ChaCha20-Poly1305, and AES-GCM, integrated into `curl` and `wget`.
+*   **Disk Installer:** Interactive system installation wizard (`installer`) supporting automatic drive discovery, MBR partitioning, KyroFS formatting, file deployment, and Limine bootloader installation.
+*   **Networking Stack:** Full ARP, IPv4, ICMP ping, UDP, TCP client sockets, and DHCP.
 
 ## System Requirements
 
 *   **CPU:** x86-64 compatible processor.
-*   **RAM:** Minimum 24 MB.
-*   **Storage:** Minimum 100 MB flash drive (The installation of the system will be fully implemented in the future)
-*   **Boot:** BIOS or UEFI firmware.
+*   **RAM:** Minimum 32 MB.
+*   **Storage:** Minimum 100 MB disk or USB flash drive for installation.
+*   **Boot:** BIOS or UEFI firmware (hybrid ISO).
 
 ## Quick Build Overview
 

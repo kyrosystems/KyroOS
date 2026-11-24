@@ -48,6 +48,40 @@ A simple graphics library that provides basic drawing functions.
 -   **Initialization:** During initialization (`gfx_init()`), the library calls `SYS_GFX_GET_FB_INFO` to obtain direct access to video memory from the kernel.
 -   **Functionality:** Provides functions `gfx_draw_pixel`, `gfx_draw_rect`, which directly write data to the framebuffer memory. It also includes a wrapper for `SYS_INPUT_POLL_EVENT` to receive input events.
 
+## 12.5. Decoupled Architecture: PID 1 (`/bin/init`) & Shell (`/bin/sh`)
+
+KyroOS completely decouples the kernel from the user-space environment:
+1. **PID 1 (`/bin/init`)**:
+   - The kernel boots and immediately spawns `/bin/init` as the first Ring 3 process.
+   - `/bin/init` configures the system hostname from `/etc/hostname`, displays the login banner from `/etc/issue`, and supervises `/bin/sh`.
+   - If the shell exits, `init` automatically respawns it.
+2. **Userspace Shell (`/bin/sh`)**:
+   - Runs in Ring 3 with colored prompts (`user@host:path$ ` or `root@host:path# `).
+   - Supports pipeline execution (`cmd1 | cmd2`) via the kernel `pipe` syscall.
+   - Supports I/O redirection: `>` (truncate), `>>` (append), `<` (input file).
+   - Builtin commands: `cd`, `pwd`, `echo`, `clear`, `version`, `help`, `exit`.
+   - External command execution: Resolves path and launches binaries via `execve` and `waitpid`.
+   - Modularity: Custom shells or GNU Bash can be placed at `/bin/sh` to build custom distributions.
+
+## 12.6. User & Permission Security Model
+
+KyroOS implements standard POSIX-compatible multi-user security:
+- **Configuration Files**:
+  - `/etc/passwd`: User account database (`username:x:uid:gid:gecos:home:shell`).
+  - `/etc/shadow`: Shadow password hashes and account expiration data.
+  - `/etc/group`: Group database (`groupname:x:gid:member_list`).
+- **User Management Utilities**:
+  - `useradd <username> [-u uid] [-g gid] [-d home]`: Creates a new user account.
+  - `userdel <username>`: Deletes a user account.
+  - `groupadd <groupname> [-g gid]`: Creates a new user group.
+  - `groupdel <groupname>`: Deletes a user group.
+  - `id [user]`: Displays effective and real UID, GID, and supplementary groups.
+  - `whoami`: Displays current username.
+  - `su [username]`: Switches active user identity.
+  - `chmod <octal_mode> <file>`: Sets file permission bits.
+  - `chown <owner[:group]> <file>`: Sets file owner and group.
+
+
 ### `libtui`
 
 A library for creating Text User Interfaces. It is a higher-level abstraction built on top of `libkyroos_gfx`.
