@@ -2,6 +2,7 @@
 #define LOG_H
 
 #include <stdint.h>
+#include <stddef.h>
 #include <stdbool.h>
 #include <stdarg.h>
 #include "isr.h"
@@ -25,6 +26,7 @@ void log_init();
 void log_update_console_dimensions();
 void klog(log_level_t level, const char *fmt, ...);
 void klog_print_str(const char *s, bool do_flush);
+void klog_write(const char *s, size_t len, bool do_flush);
 void klog_putchar(char c);
 void log_set_fg_color(uint32_t color);
 void klog_draw_cursor();

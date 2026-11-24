@@ -9,7 +9,10 @@ static uint64_t graphics_owner = 0;
 
 void fb_set_graphics_owner(uint64_t pid) { graphics_owner = pid; }
 void fb_release_graphics_owner(uint64_t pid) {
-  if (graphics_owner == pid) graphics_owner = 0;
+  if (graphics_owner == pid) {
+    graphics_owner = 0;
+    fb_flush();
+  }
 }
 static uint32_t *back_buffer = NULL;
 static bool back_buffer_ready = false;

@@ -32,6 +32,7 @@ int gfx_compositor_init(void) {
 }
 
 int gfx_init(void) {
+    raw_syscall(SYS_DISPLAY_CTL, DISPLAY_REGISTER, 0, 0);
     display_surface_info_t surface;
     if (raw_syscall(SYS_DISPLAY_CTL, DISPLAY_CREATE, (long)&surface, 0) == 0) {
         size_t required = (size_t)surface.pitch * surface.height;

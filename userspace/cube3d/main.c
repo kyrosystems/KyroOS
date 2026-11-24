@@ -116,9 +116,6 @@ int main(int argc, char **argv) {
     float rot_y = 35.0f;
     float rot_z = 0.0f;
 
-    float vel_x = 0.0f;
-    float vel_y = 0.0f;
-
     bool auto_spin = false;
     bool solid_mode = true;
     bool running = true;
@@ -167,8 +164,6 @@ int main(int argc, char **argv) {
                     rot_x = 25.0f;
                     rot_y = 35.0f;
                     rot_z = 0.0f;
-                    vel_x = 0.0f;
-                    vel_y = 0.0f;
                     current_scale = base_scale;
                 }
             } else if (ev.type == GFX_EVENT_MOUSE_MOVE) {
@@ -178,9 +173,7 @@ int main(int argc, char **argv) {
                     float dx = (float)(mouse_x - prev_mouse_x);
                     float dy = (float)(mouse_y - prev_mouse_y);
                     rot_y += dx * 0.6f;
-                    rot_x += dy * 0.6f;
-                    vel_y = dx * 0.6f;
-                    vel_x = dy * 0.6f;
+                    rot_x -= dy * 0.6f;
                 } else if (right_button_down) {
                     float dy = (float)(mouse_y - prev_mouse_y);
                     current_scale -= dy * 1.5f;
@@ -202,7 +195,7 @@ int main(int argc, char **argv) {
                     } else if (is_point_in_rect(mouse_x, mouse_y, btn_mode.x, btn_mode.y, btn_mode.w, btn_mode.h)) {
                         solid_mode = !solid_mode;
                     } else if (is_point_in_rect(mouse_x, mouse_y, btn_reset.x, btn_reset.y, btn_reset.w, btn_reset.h)) {
-                        rot_x = 25.0f; rot_y = 35.0f; rot_z = 0.0f; vel_x = 0.0f; vel_y = 0.0f; current_scale = base_scale;
+                        rot_x = 25.0f; rot_y = 35.0f; rot_z = 0.0f; current_scale = base_scale;
                     } else if (is_point_in_rect(mouse_x, mouse_y, btn_exit.x, btn_exit.y, btn_exit.w, btn_exit.h)) {
                         running = false;
                         break;
@@ -221,15 +214,10 @@ int main(int argc, char **argv) {
         }
         if (!running) break;
 
-        // Auto-spin or apply drag velocity damping
+        // Auto-spin if enabled
         if (auto_spin) {
             rot_y += 1.5f;
             rot_x += 0.8f;
-        } else if (!left_button_down) {
-            rot_x += vel_x;
-            rot_y += vel_y;
-            vel_x *= 0.94f;
-            vel_y *= 0.94f;
         }
 
         // Clamp rotation angles

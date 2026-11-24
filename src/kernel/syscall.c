@@ -1008,7 +1008,6 @@ static void sys_gfx_get_fb_info(struct registers *regs) {
     // Safely copy the correctly-sized structure to the userspace pointer.
     memcpy(user_info_ptr, &temp_info, sizeof(user_fb_info_t));
 
-    fb_set_graphics_owner(get_current_thread()->id);
     regs->rax = 0; // Success
   } else {
     klog(LOG_ERROR,

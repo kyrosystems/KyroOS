@@ -300,6 +300,17 @@ void klog_print_str(const char *s, bool do_flush) {
   }
 }
 
+void klog_write(const char *s, size_t len, bool do_flush) {
+  if (!s) return;
+  for (size_t i = 0; i < len; i++) {
+    klog_putchar(s[i]);
+  }
+  if (do_flush) {
+    klog_draw_cursor();
+    fb_flush_dirty();
+  }
+}
+
 void console_clear(void) {
   klog_clear_cursor();
   uint32_t bg = sgr_invert ? current_fg_color : current_bg_color;

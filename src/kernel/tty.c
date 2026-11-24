@@ -74,10 +74,10 @@ uint32_t tty_write(vfs_node_t *node, uint64_t offset, uint32_t size,
                    uint8_t *buffer) {
   (void)node;
   (void)offset;
+  if (!buffer || size == 0) return 0;
 
-  // klog_print_str handles both serial and framebuffer output, and cursor management
-  // It also calls fb_flush internally as part of its framebuffer update.
-  klog_print_str((const char *)buffer, true); // Flush immediately after writing to tty
+  // klog_write safely writes exact buffer length without assuming null-termination
+  klog_write((const char *)buffer, size, true);
   
   return size;
 }

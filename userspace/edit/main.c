@@ -1,11 +1,29 @@
 #include <kyroolib.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <string.h>
 
 #define MAX_TEXT_LEN 65536
-#define SCREEN_ROWS 25
-#define SCREEN_COLS 80
+static int screen_rows = 25;
+static int screen_cols = 80;
 #define CUT_BUFFER_LEN 4096
+
+static char frame_buf[65536];
+static int frame_len = 0;
+
+static inline void fb_append(const char *s) {
+    if (!s) return;
+    while (*s && frame_len < (int)sizeof(frame_buf) - 1) {
+        frame_buf[frame_len++] = *s++;
+    }
+}
+
+static inline void fb_append_n(const char *s, int n) {
+    if (!s || n <= 0) return;
+    for (int i = 0; i < n && frame_len < (int)sizeof(frame_buf) - 1; i++) {
+        frame_buf[frame_len++] = s[i];
+    }
+}
 
 static char filename[128] = "untitled.txt";
 static char text[MAX_TEXT_LEN];
@@ -17,7 +35,7 @@ static bool modified = false;
 static char cut_buffer[CUT_BUFFER_LEN] = "";
 
 static void clear_screen(void) {
-    print("\033[2J\033[H");
+    write(1, "\033[2J\033[H", 7);
 }
 
 static void get_cursor_row_col(int *out_row, int *out_col) {
@@ -47,8 +65,11 @@ static int count_total_lines(int *line_starts, int max_starts) {
 }
 
 static void draw_editor(void) {
-    // Top Title Bar (Authentic GNU nano 7.2)
-    print("\033[H\033[7m");
+    frame_len = 0;
+
+    // Top Title Bar (Authentic GNU nano 7.2) - Row 1
+    char pos_buf[32];
+    fb_append("\033[1;1H\033[7m");
     char title_left[32] = "  GNU nano 7.2";
     char title_mid[64];
     snprintf(title_mid, sizeof(title_mid), "File: %s", filename);
@@ -58,17 +79,17 @@ static void draw_editor(void) {
     int mid_len = strlen(title_mid);
     int right_len = strlen(mod_str);
 
-    print(title_left);
-    int pad1 = (SCREEN_COLS / 2) - left_len - (mid_len / 2);
+    fb_append(title_left);
+    int pad1 = (screen_cols / 2) - left_len - (mid_len / 2);
     if (pad1 < 1) pad1 = 1;
-    for (int i = 0; i < pad1; i++) print(" ");
-    print(title_mid);
+    for (int i = 0; i < pad1; i++) fb_append(" ");
+    fb_append(title_mid);
     int printed_so_far = left_len + pad1 + mid_len;
-    int pad2 = SCREEN_COLS - printed_so_far - right_len - 2;
+    int pad2 = screen_cols - printed_so_far - right_len - 1;
     if (pad2 < 1) pad2 = 1;
-    for (int i = 0; i < pad2; i++) print(" ");
-    print(mod_str);
-    print("  \033[0m\n");
+    for (int i = 0; i < pad2; i++) fb_append(" ");
+    fb_append(mod_str);
+    fb_append(" \033[0m");
 
     // Line start indexing
     int line_starts[2048];
@@ -77,7 +98,7 @@ static void draw_editor(void) {
     int cur_r, cur_c;
     get_cursor_row_col(&cur_r, &cur_c);
 
-    int edit_rows = SCREEN_ROWS - 4; // Title(1) + Status(1) + Help(2) = 4
+    int edit_rows = screen_rows - 4; // Title(1) + Status(1) + Help(2) = 4
     if (edit_rows < 1) edit_rows = 1;
 
     if (cur_r < scroll_line) scroll_line = cur_r;
@@ -85,60 +106,61 @@ static void draw_editor(void) {
         scroll_line = cur_r - edit_rows + 1;
     }
 
-    // Text Viewport
+    // Text Viewport - Rows 2 to (screen_rows - 3)
     for (int l = 0; l < edit_rows; l++) {
+        int r = 2 + l;
+        snprintf(pos_buf, sizeof(pos_buf), "\033[%d;1H\033[2K", r);
+        fb_append(pos_buf);
+
         int line_idx = scroll_line + l;
-        print("\033[2K"); // Clear entire line
         if (line_idx < total_lines) {
             int start = line_starts[line_idx];
             int end = (line_idx + 1 < total_lines) ? line_starts[line_idx + 1] - 1 : text_len;
             int len = end - start;
             if (len > 0) {
-                if (len > SCREEN_COLS) len = SCREEN_COLS;
-                char line_buf[256];
-                if (len > 250) len = 250;
-                memcpy(line_buf, text + start, len);
-                line_buf[len] = '\0';
-                print(line_buf);
+                if (len > screen_cols - 1) len = screen_cols - 1;
+                fb_append_n(text + start, len);
             }
         }
-        print("\n");
     }
 
-    // Status / Message Line
-    print("\033[2K");
+    // Status / Message Line - Row (screen_rows - 2)
+    snprintf(pos_buf, sizeof(pos_buf), "\033[%d;1H\033[2K", screen_rows - 2);
+    fb_append(pos_buf);
     if (status_msg[0] != '\0') {
-        print("  ");
-        print(status_msg);
+        fb_append("  ");
+        fb_append(status_msg);
     }
-    print("\n");
 
     // GNU nano 2-row Shortcut Grid
-    // Row 1
-    print("\033[2K");
-    print("\033[7m^G\033[0m Help      ");
-    print("\033[7m^O\033[0m WriteOut  ");
-    print("\033[7m^W\033[0m Where Is  ");
-    print("\033[7m^K\033[0m Cut       ");
-    print("\033[7m^T\033[0m Execute   ");
-    print("\033[7m^C\033[0m Location  \n");
+    // Row 1 - Row (screen_rows - 1)
+    snprintf(pos_buf, sizeof(pos_buf), "\033[%d;1H\033[2K", screen_rows - 1);
+    fb_append(pos_buf);
+    fb_append("\033[7m^G\033[0m Help      ");
+    fb_append("\033[7m^O\033[0m WriteOut  ");
+    fb_append("\033[7m^W\033[0m Where Is  ");
+    fb_append("\033[7m^K\033[0m Cut       ");
+    fb_append("\033[7m^T\033[0m Execute   ");
+    fb_append("\033[7m^C\033[0m Location  ");
 
-    // Row 2
-    print("\033[2K");
-    print("\033[7m^X\033[0m Exit      ");
-    print("\033[7m^R\033[0m Read File ");
-    print("\033[7m^\\\033[0m Replace   ");
-    print("\033[7m^U\033[0m Paste     ");
-    print("\033[7m^J\033[0m Justify   ");
-    print("\033[7m^_\033[0m Go To Line");
+    // Row 2 - Row screen_rows
+    snprintf(pos_buf, sizeof(pos_buf), "\033[%d;1H\033[2K", screen_rows);
+    fb_append(pos_buf);
+    fb_append("\033[7m^X\033[0m Exit      ");
+    fb_append("\033[7m^R\033[0m Read File ");
+    fb_append("\033[7m^\\\033[0m Replace   ");
+    fb_append("\033[7m^U\033[0m Paste     ");
+    fb_append("\033[7m^J\033[0m Justify   ");
+    fb_append("\033[7m^_\033[0m Go To Line");
 
     // Position cursor at editing coordinate
     int screen_row = (cur_r - scroll_line) + 2;
     int screen_col = cur_c + 1;
-    char pos_buf[32];
+    if (screen_col >= screen_cols) screen_col = screen_cols - 1;
     snprintf(pos_buf, sizeof(pos_buf), "\033[%d;%dH", screen_row, screen_col);
-    print(pos_buf);
-    print_flush();
+    fb_append(pos_buf);
+
+    write(1, frame_buf, frame_len);
 }
 
 static bool save_file(const char *path) {
@@ -169,7 +191,7 @@ static void prompt_write_out(void) {
     strncpy(input_name, filename, sizeof(input_name) - 1);
     input_name[sizeof(input_name) - 1] = '\0';
 
-    int edit_rows = SCREEN_ROWS - 4;
+    int edit_rows = screen_rows - 4;
     int prompt_row = edit_rows + 2;
 
     char pbuf[32];
@@ -219,11 +241,9 @@ static void prompt_write_out(void) {
 static void cut_current_line(void) {
     if (text_len == 0) return;
 
-    // Find start of current line
     int line_start = cursor;
     while (line_start > 0 && text[line_start - 1] != '\n') line_start--;
 
-    // Find end of current line (including newline if present)
     int line_end = cursor;
     while (line_end < text_len && text[line_end] != '\n') line_end++;
     if (line_end < text_len && text[line_end] == '\n') line_end++;
@@ -290,6 +310,14 @@ int main(int argc, char **argv) {
         filename[sizeof(filename) - 1] = '\0';
     }
 
+    user_fb_info_t fb_info;
+    if (gfx_get_fb_info(&fb_info) == 0) {
+        if (fb_info.width >= 320 && fb_info.height >= 200) {
+            screen_cols = fb_info.width / 8;
+            screen_rows = fb_info.height / 16;
+        }
+    }
+
     memset(text, 0, sizeof(text));
     text_len = 0;
     cursor = 0;
@@ -297,7 +325,6 @@ int main(int argc, char **argv) {
     modified = false;
     status_msg[0] = '\0';
 
-    // Try reading file if it exists
     int fd = open(filename, O_RDONLY);
     if (fd >= 0) {
         int n = read(fd, text, sizeof(text) - 1);
@@ -324,7 +351,7 @@ int main(int argc, char **argv) {
         // Ctrl+X: Exit
         if (c == 24) {
             if (modified) {
-                int edit_rows = SCREEN_ROWS - 4;
+                int edit_rows = screen_rows - 4;
                 int prompt_row = edit_rows + 2;
                 char pbuf[32];
                 snprintf(pbuf, sizeof(pbuf), "\033[%d;1H\033[2K", prompt_row);
@@ -478,12 +505,12 @@ int main(int argc, char **argv) {
                     } else if (seq[1] == '5') { // Page Up
                         char tilde = 0;
                         read(0, &tilde, 1);
-                        scroll_line -= (SCREEN_ROWS - 4);
+                        scroll_line -= (screen_rows - 4);
                         if (scroll_line < 0) scroll_line = 0;
                     } else if (seq[1] == '6') { // Page Down
                         char tilde = 0;
                         read(0, &tilde, 1);
-                        scroll_line += (SCREEN_ROWS - 4);
+                        scroll_line += (screen_rows - 4);
                     }
                 }
             }

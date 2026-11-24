@@ -78,7 +78,18 @@ def main():
 
         def type_keys(keys, delay=0.12):
             for k in keys:
-                hmp(f'sendkey {k}')
+                if k == ' ':
+                    hmp('sendkey spc')
+                elif k == '.':
+                    hmp('sendkey dot')
+                elif k == '/':
+                    hmp('sendkey slash')
+                elif k == '-':
+                    hmp('sendkey minus')
+                elif k == '_':
+                    hmp('sendkey shift-minus')
+                else:
+                    hmp(f'sendkey {k}')
                 time.sleep(delay)
 
         def take_screenshot(name):
@@ -156,6 +167,35 @@ def main():
         type_keys(list('pwd') + ['ret'])
         time.sleep(0.5)
         take_screenshot('16_final_health_check')
+
+        # Test free and lsblk
+        print("Testing free command...")
+        type_keys(list('free') + ['ret'])
+        time.sleep(0.5)
+        take_screenshot('17_free_output')
+
+        print("Testing lsblk command...")
+        type_keys(list('lsblk') + ['ret'])
+        time.sleep(0.5)
+        take_screenshot('18_lsblk_output')
+
+        # Test nano fullscreen & lag
+        print("Testing nano fullscreen...")
+        type_keys(list('nano test.txt') + ['ret'])
+        wait_log('GNU nano 7.2', timeout=10)
+        time.sleep(0.5)
+        take_screenshot('19_nano_fullscreen')
+
+        type_keys(list('Hello KyroOS nano!') + ['ret'])
+        wait_log('ello yro nano', timeout=10)
+        time.sleep(0.5)
+        take_screenshot('20_nano_typed')
+
+        type_keys(['ctrl-x'])
+        time.sleep(0.5)
+        type_keys(['n'])
+        time.sleep(0.8)
+        take_screenshot('21_shell_after_nano')
 
         print("\n=== ALL VERIFICATIONS COMPLETED SUCCESSFULLY! ===")
 

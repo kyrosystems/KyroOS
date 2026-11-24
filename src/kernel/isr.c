@@ -53,6 +53,7 @@ uint64_t g_cpu_busy_ticks = 0;
 uint64_t timer_get_ticks() { return ticks; }
 
 void timer_init(uint32_t frequency) {
+  if (frequency == 0) frequency = 100;
   uint32_t divisor = 1193180 / frequency;
 
   // Send the command byte.

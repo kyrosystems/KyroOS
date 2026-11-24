@@ -5,6 +5,7 @@
 #include "uaccess.h"
 #include "scheduler.h"
 #include "errno.h"
+#include "fb.h"
 
 #define SURFACE_BYTES (DISPLAY_WIDTH * DISPLAY_HEIGHT * 4)
 #define INPUT_COUNT 64
@@ -34,6 +35,7 @@ long display_control(uint64_t op, void *data, uint64_t arg) {
         /* Do not allow another user's process to capture an existing session. */
         server = self;
         console_focus = self;
+        fb_set_graphics_owner(self->id);
         return 0;
     }
     if (op == DISPLAY_CREATE) {
@@ -127,7 +129,10 @@ int display_poll(thread_t *thread, void *event) {
     return 1;
 }
 void display_release(thread_t *thread) {
-    if (server == thread) server = 0;
+    if (server == thread) {
+        server = 0;
+        fb_release_graphics_owner(thread->id);
+    }
     surface_t *s = find(thread, 0);
     if (s) {
         kfree(s->pixels);

@@ -205,21 +205,28 @@ int vksprintf(char *buffer, const char *format, va_list args) {
   while (*format) {
     if (*format == '%') {
       format++;
+      if (*format == '%') {
+        *buf_ptr++ = '%';
+        format++;
+        continue;
+      }
+
+      bool left_align = false;
+      if (*format == '-') {
+        left_align = true;
+        format++;
+      }
+
       int padding = 0;
       char pad_char = ' ';
-
-      // Check for padding like %02d or %04d
-      if (*format == '0') {
+      if (*format == '0' && !left_align) {
+        pad_char = '0';
         format++;
-        if (*format >= '0' && *format <= '9') {
-          padding = *format - '0';
-          format++;
-          if (*format >= '0' && *format <= '9') { // For %04d
-            padding = padding * 10 + (*format - '0');
-            format++;
-          }
-          pad_char = '0';
-        }
+      }
+
+      while (*format >= '0' && *format <= '9') {
+        padding = padding * 10 + (*format - '0');
+        format++;
       }
 
       // Check for length modifiers
@@ -239,8 +246,14 @@ int vksprintf(char *buffer, const char *format, va_list args) {
         char *s = va_arg(args, char *);
         if (!s)
           s = "(null)";
-        while (*s) {
-          *buf_ptr++ = *s++;
+        int slen = 0;
+        while (s[slen]) slen++;
+        if (!left_align && padding > slen) {
+          for (int p = 0; p < padding - slen; p++) *buf_ptr++ = ' ';
+        }
+        for (int p = 0; p < slen; p++) *buf_ptr++ = s[p];
+        if (left_align && padding > slen) {
+          for (int p = 0; p < padding - slen; p++) *buf_ptr++ = ' ';
         }
         break;
       }
@@ -260,7 +273,7 @@ int vksprintf(char *buffer, const char *format, va_list args) {
           if (is_long_long || is_long) {
             val = va_arg(args, uint64_t);
           } else {
-            val = va_arg(args, uint32_t); // Standard %x is 32-bit
+            val = (uint64_t)va_arg(args, uint32_t); // Standard %x is 32-bit
           }
         }
 
@@ -276,28 +289,45 @@ int vksprintf(char *buffer, const char *format, va_list args) {
           }
         }
 
-        // Simple padding for hex (standard)
         int h_padding = padding > i ? padding : i;
-        for (int j = 0; j < h_padding - i; j++) {
-          *buf_ptr++ = pad_char;
+        if (!left_align) {
+          for (int j = 0; j < h_padding - i; j++) {
+            *buf_ptr++ = pad_char;
+          }
         }
         while (i > 0) {
           *buf_ptr++ = hex_buf[--i];
+        }
+        if (left_align) {
+          for (int j = 0; j < h_padding - i; j++) {
+            *buf_ptr++ = ' ';
+          }
         }
         break;
       }
       case 'u':
       case 'd': {
         uint64_t val;
-        if (is_long_long || is_long) {
-          val = va_arg(args, uint64_t);
+        bool is_negative = false;
+        if (*format == 'd') {
+          int64_t sval;
+          if (is_long_long || is_long) {
+            sval = va_arg(args, int64_t);
+          } else {
+            sval = (int64_t)va_arg(args, int);
+          }
+          if (sval < 0) {
+            is_negative = true;
+            val = (uint64_t)(-sval);
+          } else {
+            val = (uint64_t)sval;
+          }
         } else {
-          val = (uint64_t)va_arg(args, int);
-        }
-
-        if (*format == 'd' && (int64_t)val < 0) {
-          *buf_ptr++ = '-';
-          val = -(int64_t)val;
+          if (is_long_long || is_long) {
+            val = va_arg(args, uint64_t);
+          } else {
+            val = (uint64_t)va_arg(args, uint32_t);
+          }
         }
 
         char num_str[21]; // Max for uint64_t is 20 digits + null terminator
@@ -311,25 +341,32 @@ int vksprintf(char *buffer, const char *format, va_list args) {
           }
         }
 
-        int d_padding = padding > i ? padding : i;
-        for (int j = 0; j < d_padding - i; j++) {
-          *buf_ptr++ = pad_char;
+        int total_len = i + (is_negative ? 1 : 0);
+        int pad_len = (padding > total_len) ? (padding - total_len) : 0;
+
+        if (!left_align) {
+          if (pad_char == '0') {
+            if (is_negative) *buf_ptr++ = '-';
+            for (int j = 0; j < pad_len; j++) *buf_ptr++ = '0';
+          } else {
+            for (int j = 0; j < pad_len; j++) *buf_ptr++ = ' ';
+            if (is_negative) *buf_ptr++ = '-';
+          }
+        } else {
+          if (is_negative) *buf_ptr++ = '-';
         }
+
         while (i > 0) {
           *buf_ptr++ = num_str[--i];
+        }
+
+        if (left_align) {
+          for (int j = 0; j < pad_len; j++) *buf_ptr++ = ' ';
         }
         break;
       }
       default:
-        if (pad_char == '0' && padding > 0) { // If it was a %0X but not %0Xd
-          *buf_ptr++ = '%';
-          *buf_ptr++ = '0';
-          if (padding >= 10)
-            *buf_ptr++ = (padding / 10) + '0';
-          *buf_ptr++ = (padding % 10) + '0';
-        } else { // Normal % or unknown specifier
-          *buf_ptr++ = '%';
-        }
+        *buf_ptr++ = '%';
         *buf_ptr++ = *format;
         break;
       }

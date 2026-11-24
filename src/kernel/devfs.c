@@ -22,14 +22,15 @@ uint32_t console_write(vfs_node_t *node, uint64_t offset, uint32_t size,
   (void)node;
   (void)offset;
   if (!buffer || size == 0) return 0;
+  klog_write((const char *)buffer, size, true);
   char stack_buf[256];
   char *str = (size < sizeof(stack_buf)) ? stack_buf : (char *)kmalloc(size + 1);
-  if (!str) return 0;
-  memcpy(str, buffer, size);
-  str[size] = '\0';
-  klog_print_str(str, true);
-  serial_print(str);
-  if (str != stack_buf) kfree(str);
+  if (str) {
+    memcpy(str, buffer, size);
+    str[size] = '\0';
+    serial_print(str);
+    if (str != stack_buf) kfree(str);
+  }
   return size;
 }
 
