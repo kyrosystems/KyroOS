@@ -115,8 +115,7 @@ void fb_draw_char(char c, uint32_t x, uint32_t y, uint32_t fg, uint32_t bg) {
     uint32_t *row = back_buffer + (y + i) * pitch_px + x;
     uint8_t bits = glyph[i];
     for (int j = 0; j < FONT_WIDTH; j++) {
-      if (bits & (1 << (7 - j))) row[j] = fg;
-      else if (bg != 0) row[j] = bg;
+      row[j] = (bits & (1 << (7 - j))) ? fg : bg;
     }
   }
   if (!dirty_valid) {

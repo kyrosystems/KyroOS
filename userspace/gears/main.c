@@ -137,7 +137,7 @@ int main(int argc, char **argv) {
         while (gfx_poll_event(&ev)) {
             if (ev.type == GFX_EVENT_KEY_DOWN) {
                 char c = (char)ev.data1;
-                if (c == 'q' || c == 'Q' || c == 27 || ev.data1 == 27) {
+                if (c == 'q' || c == 'Q' || c == 27 || ev.data1 == 27 || c == 3) {
                     running = false;
                     break;
                 }
@@ -191,5 +191,8 @@ int main(int argc, char **argv) {
         angle_y += 3.0f;
     }
 
+    glClear(GL_COLOR_BUFFER_BIT);
+    glSwapBuffers();
+    print("\033[2J\033[H");
     return 0;
 }

@@ -37,7 +37,7 @@ static virtio_net_t g_virtio_net;
 
 static void virtio_net_send_packet(net_dev_t *dev, const uint8_t *data, size_t len) {
     virtio_net_t *vn = (virtio_net_t *)dev;
-    if (!vn->io_base || !vn->tx_desc) return;
+    if (!vn || !vn->io_base || !vn->tx_desc || !vn->tx_avail || vn->tx_qsize == 0) return;
 
     static virtio_net_hdr_t tx_hdr __attribute__((aligned(16)));
     static uint8_t tx_pkt_buf[2048] __attribute__((aligned(16)));
@@ -73,7 +73,7 @@ static void virtio_net_send_packet(net_dev_t *dev, const uint8_t *data, size_t l
 static void virtio_net_poll(net_dev_t *dev, uint8_t *buffer, size_t size) {
     (void)buffer; (void)size;
     virtio_net_t *vn = (virtio_net_t *)dev;
-    if (!vn->io_base || !vn->rx_used) return;
+    if (!vn || !vn->io_base || !vn->rx_used || vn->rx_qsize == 0) return;
 
     while (vn->rx_last_used_idx != vn->rx_used->idx) {
         uint16_t cur_used = vn->rx_last_used_idx % vn->rx_qsize;

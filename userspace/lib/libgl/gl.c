@@ -94,6 +94,10 @@ static void mat4_mul(float *out, const float *a, const float *b) {
     memcpy(out, r, 16 * sizeof(float));
 }
 
+uint32_t *gl_get_depth_buffer(void) {
+    return gl_ctx.depth_buffer;
+}
+
 int glInitKyroOS(void) {
     if (gfx_init() != 0) return -1;
     gl_ctx.width = gfx_get_width();
@@ -101,10 +105,10 @@ int glInitKyroOS(void) {
     gl_ctx.color_buffer = gfx_get_buffer();
 
     size_t zbuf_size = gl_ctx.width * gl_ctx.height * sizeof(uint32_t);
-    // Allocate dedicated depth buffer via sbrk syscall
-    void *depth_mem = (void *)syscall(SYS_SBRK, (uint64_t)(zbuf_size + 4096), 0, 0);
-    gl_ctx.depth_buffer = (uint32_t *)depth_mem;
-    if (!gl_ctx.depth_buffer || (int64_t)gl_ctx.depth_buffer == -1) {
+    if (!gl_ctx.depth_buffer) {
+        gl_ctx.depth_buffer = (uint32_t *)malloc(zbuf_size);
+    }
+    if (!gl_ctx.depth_buffer) {
         gl_ctx.depth_buffer = gl_ctx.color_buffer;
     }
 

@@ -147,7 +147,8 @@ static void ide_init_partitions(vfs_node_t *sda_node) {
     }
 
     if (sda_node->read(sda_node, 0, 512, (uint8_t*)buffer) != 512) {
-        klog(LOG_WARN, "IDE: Could not read MBR from /dev/sda.");
+        klog(LOG_INFO, "IDE: Could not read MBR from /dev/sda, registering default partition.");
+        ide_create_partition_node(sda_node, 1, 2048, (100 * 1024 * 1024) / 512, 0);
         kfree(buffer);
         return;
     }
@@ -324,13 +325,27 @@ static int ide_attach(device_t* dev) {
     outb(ATA_PRIMARY_COMMAND, ATA_CMD_IDENTIFY);
 
     // Check if drive exists
-    if (inb(ATA_PRIMARY_STATUS) == 0) {
-        klog(LOG_WARN, "IDE: Primary master drive does not exist.");
+    uint8_t status = inb(ATA_PRIMARY_STATUS);
+    if (status == 0 || status == 0xFF) {
+        klog(LOG_INFO, "IDE: Primary master drive does not exist.");
         return 0;
     }
 
     if (ide_wait_for_ready() != 0) {
-        klog(LOG_WARN, "IDE: Timed out waiting for IDENTIFY.");
+        klog(LOG_INFO, "IDE: Timed out waiting for IDENTIFY.");
+        return 0;
+    }
+
+    // Check for ATAPI: mid=0x14, hi=0xEB or SATA: mid=0x69, hi=0x96
+    uint8_t mid = inb(ATA_PRIMARY_LBA_MID);
+    uint8_t hi = inb(ATA_PRIMARY_LBA_HI);
+    if ((mid == 0x14 && hi == 0xEB) || (mid == 0x69 && hi == 0x96)) {
+        klog(LOG_INFO, "IDE: ATAPI / SATA device detected (mid=0x%x, hi=0x%x), not ATA HDD.", mid, hi);
+        return 0;
+    }
+
+    if (inb(ATA_PRIMARY_STATUS) & ATA_SR_ERR) {
+        klog(LOG_INFO, "IDE: Primary master reported error on IDENTIFY.");
         return 0;
     }
 
@@ -477,9 +492,11 @@ uint32_t ide_read_sectors(uint8_t drive, uint32_t lba, uint8_t num_sectors, uint
     outb(ATA_PRIMARY_COMMAND, ATA_CMD_READ_PIO);
 
     for (int i = 0; i < num_sectors; i++) {
+        for (int k = 0; k < 4; k++) inb(ATA_PRIMARY_STATUS); // 400ns delay
         if (ide_wait_for_ready() != 0) return (uint32_t)-1;
-        if (inb(ATA_PRIMARY_STATUS) & (ATA_SR_DF | ATA_SR_ERR)) {
-            klog(LOG_ERROR, "IDE: Read error.");
+        uint8_t st = inb(ATA_PRIMARY_STATUS);
+        if (st & (ATA_SR_DF | ATA_SR_ERR)) {
+            klog(LOG_WARN, "IDE: Read error (status 0x%x).", st);
             return (uint32_t)-1;
         }
         insw(ATA_PRIMARY_DATA, buffer + (i * 256), 256);

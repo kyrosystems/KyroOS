@@ -26,6 +26,7 @@ static bool cursor_visible = true;
 static bool cursor_drawn = false;
 static uint32_t cursor_saved_x = 0;
 static uint32_t cursor_saved_y = 0;
+static uint32_t cursor_saved_pixels[16];
 log_level_t current_log_level = LOG_INFO;
 
 void log_update_console_dimensions(void) {
@@ -64,10 +65,10 @@ void klog_draw_cursor(void) {
 
   uint32_t px = console_x * char_width;
   uint32_t py = console_y * char_height;
-  for (uint32_t dy = char_height - 2; dy < char_height; dy++) {
+  for (uint32_t dy = 0; dy < 2; dy++) {
     for (uint32_t dx = 0; dx < char_width; dx++) {
-      uint32_t c = fb_get_pixel(px + dx, py + dy);
-      fb_set_pixel(px + dx, py + dy, c ^ 0x00FFFFFF);
+      cursor_saved_pixels[dy * char_width + dx] = fb_get_pixel(px + dx, py + char_height - 2 + dy);
+      fb_set_pixel(px + dx, py + char_height - 2 + dy, 0xFFFFFFFF);
     }
   }
   cursor_saved_x = console_x;
@@ -80,10 +81,9 @@ void klog_clear_cursor(void) {
   if (!cursor_drawn) return;
   uint32_t px = cursor_saved_x * char_width;
   uint32_t py = cursor_saved_y * char_height;
-  for (uint32_t dy = char_height - 2; dy < char_height; dy++) {
+  for (uint32_t dy = 0; dy < 2; dy++) {
     for (uint32_t dx = 0; dx < char_width; dx++) {
-      uint32_t c = fb_get_pixel(px + dx, py + dy);
-      fb_set_pixel(px + dx, py + dy, c ^ 0x00FFFFFF);
+      fb_set_pixel(px + dx, py + char_height - 2 + dy, cursor_saved_pixels[dy * char_width + dx]);
     }
   }
   cursor_drawn = false;

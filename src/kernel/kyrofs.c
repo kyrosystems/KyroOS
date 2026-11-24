@@ -501,6 +501,7 @@ static int64_t kd_alloc_inode(void) {
 }
 
 static void kd_free_inode(uint64_t ino) {
+    if (ino < 1 || kd_sb.inodes_per_group == 0) return;
     uint32_t g = (uint32_t)((ino - 1) / kd_sb.inodes_per_group);
     uint32_t idx = (uint32_t)((ino - 1) % kd_sb.inodes_per_group);
     if (g >= kd_sb.group_count) return;
@@ -517,7 +518,7 @@ static void kd_free_inode(uint64_t ino) {
 }
 
 static int kd_read_inode(uint64_t ino, kyrofs_inode_t *out) {
-    if (ino < 1) return -1;
+    if (ino < 1 || kd_sb.inodes_per_group == 0) return -1;
     uint32_t g = (uint32_t)((ino - 1) / kd_sb.inodes_per_group);
     uint32_t idx = (uint32_t)((ino - 1) % kd_sb.inodes_per_group);
     if (g >= kd_sb.group_count) return -1;
@@ -531,7 +532,7 @@ static int kd_read_inode(uint64_t ino, kyrofs_inode_t *out) {
 }
 
 static int kd_write_inode(uint64_t ino, const kyrofs_inode_t *in) {
-    if (ino < 1) return -1;
+    if (ino < 1 || kd_sb.inodes_per_group == 0) return -1;
     uint32_t g = (uint32_t)((ino - 1) / kd_sb.inodes_per_group);
     uint32_t idx = (uint32_t)((ino - 1) % kd_sb.inodes_per_group);
     if (g >= kd_sb.group_count) return -1;
@@ -982,8 +983,8 @@ int kyrofs_mount(vfs_node_t *mount_point, vfs_node_t *device_node) {
     }
 
     memcpy(&kd_sb, sb_buf, sizeof(kd_sb));
-    if (kd_sb.magic != KYROFS_MAGIC) {
-        klog(LOG_ERROR, "KyroFS: bad magic on partition, not a KyroFS volume");
+    if (kd_sb.magic != KYROFS_MAGIC || kd_sb.inodes_per_group == 0 || kd_sb.group_count == 0 || kd_sb.block_size == 0) {
+        klog(LOG_ERROR, "KyroFS: bad magic or invalid geometry on partition, not a KyroFS volume");
         return -1;
     }
 

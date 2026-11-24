@@ -390,6 +390,7 @@ static void read_line(char *buf, int max_len) {
                 print(out);
                 if (pos < len) {
                     print(buf + pos);
+                    print("\033[K");
                     char mc[16];
                     snprintf(mc, sizeof(mc), "\033[%dD", len - pos);
                     print(mc);

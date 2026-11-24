@@ -149,6 +149,7 @@ void glFinish(void);
 // KyroOS Framebuffer binding
 int  glInitKyroOS(void);
 void glSwapBuffers(void);
+uint32_t *gl_get_depth_buffer(void);
 
 #ifdef __cplusplus
 }

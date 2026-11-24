@@ -17,7 +17,7 @@ static vring_used_t *g_used = NULL;
 static uint64_t g_capacity_sectors = 0;
 
 static int virtio_blk_rw(uint64_t sector, uint32_t count, void *buffer, int is_write) {
-    if (!g_io_base || !g_desc) return -1;
+    if (!g_io_base || !g_desc || !g_avail || g_qsize == 0) return -1;
 
     // Header, data, status
     static virtio_blk_req_t req __attribute__((aligned(16)));

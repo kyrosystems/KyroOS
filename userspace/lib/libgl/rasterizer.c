@@ -33,7 +33,8 @@ void gl_rasterize_triangle(const gl_vertex_t *v0, const gl_vertex_t *v1, const g
     uint32_t width = gfx_get_width();
     uint32_t height = gfx_get_height();
     uint32_t *color_buf = gfx_get_buffer();
-    uint32_t *depth_buf = (uint32_t *)((uint64_t)color_buf + (width * height * 4));
+    uint32_t *depth_buf = gl_get_depth_buffer();
+    if (!color_buf || !depth_buf) return;
 
     bool depth_test = glIsEnabled(GL_DEPTH_TEST);
 

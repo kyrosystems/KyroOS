@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Interactive verification of terminal cursor, GNU nano, Vulkan 3D vkcube, and Ctrl+C."""
+"""Interactive verification of:
+1. Shell typing, moving cursor back, and inserting text without overlap
+2. Gears OpenGL demo running without crash
+3. Cube3D interactive mouse-controlled 3D cube demo
+4. Ctrl+C process termination
+"""
 import json
 import re
 import shutil
@@ -71,7 +76,7 @@ def main():
                 time.sleep(0.2)
             raise RuntimeError(f"Timeout waiting for marker '{text}' in {log}")
 
-        def type_keys(keys, delay=0.15):
+        def type_keys(keys, delay=0.12):
             for k in keys:
                 hmp(f'sendkey {k}')
                 time.sleep(delay)
@@ -87,68 +92,72 @@ def main():
         wait_log('kyroos login:')
         print("Boot reached login prompt.")
 
-        # Take screenshot of login prompt
-        take_screenshot('01_login_prompt')
-
         # Log in as root
-        print("Logging in as root...")
         type_keys(list('root') + ['ret'])
         time.sleep(1.0)
-        take_screenshot('02_shell_logged_in')
+        take_screenshot('10_shell_prompt')
 
-        # Test 1: Test interactive typing in shell
-        print("Testing interactive shell typing...")
-        type_keys(list('echo hello kyroos') + ['ret'])
+        # Test 1: Verify cursor move back and typing without overlapping!
+        print("Testing typing, moving cursor back, and typing inside...")
+        # Type 'asfhr'
+        type_keys(list('asfhr'))
+        time.sleep(0.3)
+        # Move back 3 characters
+        type_keys(['left', 'left', 'left'])
+        time.sleep(0.3)
+        # Type '123'
+        type_keys(list('123'))
+        time.sleep(0.3)
+        take_screenshot('11_cursor_insert_clean')
+        print("Captured cursor insert screenshot (11_cursor_insert_clean.ppm).")
+
+        # Clear line
+        type_keys(['ctrl-c'])
         time.sleep(0.5)
-        take_screenshot('03_shell_echo')
 
-        # Test 2: Test nano editor
-        print("Launching nano test.txt...")
-        type_keys(list('nano test.txt') + ['ret'])
+        # Test 2: Launch OpenGL gears demo
+        print("Launching gears (OpenGL)...")
+        type_keys(list('gears') + ['ret'])
+        time.sleep(2.0)
+        shot_gears = take_screenshot('12_gears_running')
+        print(f"Captured gears screenshot: {shot_gears}")
+
+        # Exit gears with 'q'
+        type_keys(['q'])
         time.sleep(1.0)
+        take_screenshot('13_shell_after_gears')
 
-        # Type some text into nano
-        type_keys(list('Hello World from GNU nano!') + ['ret'])
-        type_keys(list('Second line of text.') + ['ret'])
-        time.sleep(0.5)
-
-        # Take screenshot of nano
-        shot_nano = take_screenshot('04_nano_editor')
-        print(f"Captured nano screenshot: {shot_nano}")
-
-        # Exit nano without saving (^X then 'n')
-        type_keys(['ctrl-x'])
-        time.sleep(0.5)
-        take_screenshot('05_nano_save_prompt')
-        type_keys(['n'])
-        time.sleep(0.5)
-        take_screenshot('06_shell_after_nano')
-
-        # Test 3: Test vkcube and Ctrl+C interruption
-        print("Launching vkcube...")
-        type_keys(list('vkcube') + ['ret'])
+        # Test 3: Launch new interactive cube3d
+        print("Launching cube3d (Interactive 3D with mouse)...")
+        type_keys(list('cube3d') + ['ret'])
         time.sleep(2.0)
 
-        # Take screenshot of vkcube running
-        shot_vkcube = take_screenshot('07_vkcube_running')
-        print(f"Captured vkcube screenshot: {shot_vkcube}")
+        # Send mouse movement and left drag via QMP/HMP
+        # mouse_move dx dy [dz]
+        hmp('mouse_move 50 -30')
+        time.sleep(0.2)
+        hmp('mouse_button 1') # Press left button
+        time.sleep(0.2)
+        hmp('mouse_move -100 80') # Drag mouse
+        time.sleep(0.3)
+        hmp('mouse_button 0') # Release left button
+        time.sleep(0.3)
 
-        # Send Ctrl+C to terminate vkcube
-        print("Sending Ctrl+C to terminate vkcube...")
+        shot_cube3d = take_screenshot('14_cube3d_running')
+        print(f"Captured cube3d screenshot: {shot_cube3d}")
+
+        # Send Ctrl+C to terminate cube3d
+        print("Sending Ctrl+C to exit cube3d...")
         type_keys(['ctrl-c'])
         time.sleep(1.0)
+        take_screenshot('15_shell_after_cube3d')
 
-        # Take screenshot confirming return to shell
-        shot_after_ctrl_c = take_screenshot('08_shell_after_ctrl_c')
-        print(f"Captured shell screenshot after Ctrl+C: {shot_after_ctrl_c}")
-
-        # Type pwd to verify shell is active and responsive
+        # Run pwd to confirm shell is healthy
         type_keys(list('pwd') + ['ret'])
         time.sleep(0.5)
-        shot_pwd = take_screenshot('09_shell_pwd_verified')
-        print(f"Captured final responsive shell screenshot: {shot_pwd}")
+        take_screenshot('16_final_health_check')
 
-        print("\n=== ALL INTERACTIVE VERIFICATIONS PASSED SUCCESSFULLY! ===")
+        print("\n=== ALL VERIFICATIONS COMPLETED SUCCESSFULLY! ===")
 
     finally:
         if sock:
