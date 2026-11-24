@@ -157,7 +157,7 @@ static void canonicalize_path(const char *cwd, const char *input, char *output, 
 static vfs_node_t *resolve_for_thread(const char *path) {
   thread_t *t = get_current_thread();
   const char *cwd = (t && t->cwd[0]) ? t->cwd : "/";
-  static char canon[MAX_FILENAME_LEN];
+  char canon[MAX_FILENAME_LEN];
   canonicalize_path(cwd, path, canon, sizeof(canon));
   return vfs_resolve_path(vfs_root, canon);
 }
@@ -168,13 +168,12 @@ static void sys_open(struct registers *regs) {
 
   // Copy path from userspace to a kernel buffer to avoid faulting.
   char path[MAX_FILENAME_LEN];
-  if (validate_user_pointer(user_path, 1) != 0) {
+  int rc = copy_user_string(path, user_path, sizeof(path));
+  if (rc != 0) {
     klog(LOG_ERROR, "SYSCALL_EXIT: sys_open: Invalid user path pointer. Denying.");
-    regs->rax = (uint64_t)-1;
+    regs->rax = (uint64_t)rc;
     return;
   }
-  strncpy(path, user_path, MAX_FILENAME_LEN - 1);
-  path[MAX_FILENAME_LEN - 1] = '\0';
   klog(LOG_DEBUG, "SYSCALL_DEBUG: sys_open: Resolved path: '%s'", path);
 
   vfs_node_t *node = resolve_for_thread(path);
@@ -184,26 +183,27 @@ static void sys_open(struct registers *regs) {
     klog(LOG_DEBUG, "SYSCALL_DEBUG: sys_open: File '%s' not found, O_CREAT set. Attempting to create.", path);
     // Find parent directory
     char parent_path[MAX_FILENAME_LEN];
+    parent_path[0] = '\0';
     char filename[MAX_FILENAME_LEN];
     char *last_slash = strrchr(path, '/');
     vfs_node_t *parent_node;
 
     if (last_slash && last_slash != path) {
-      int parent_len = last_slash - path;
+      int parent_len = (int)(last_slash - path);
+      if (parent_len >= MAX_FILENAME_LEN) parent_len = MAX_FILENAME_LEN - 1;
       strncpy(parent_path, path, parent_len);
       parent_path[parent_len] = '\0';
-      strncpy(filename, last_slash + 1, MAX_FILENAME_LEN);
-      parent_path[MAX_FILENAME_LEN - 1] = '\0'; // Ensure null-termination
+      strncpy(filename, last_slash + 1, MAX_FILENAME_LEN - 1);
       filename[MAX_FILENAME_LEN - 1] = '\0'; // Ensure null-termination
       parent_node = resolve_for_thread(parent_path);
     } else {
       // File in root, or current directory for relative path.
       if (last_slash == path) {
-        strncpy(filename, path + 1, MAX_FILENAME_LEN); // "/name"
+        strncpy(filename, path + 1, MAX_FILENAME_LEN - 1); // "/name"
         filename[MAX_FILENAME_LEN - 1] = '\0';
         parent_node = vfs_root;
       } else {
-        strncpy(filename, path, MAX_FILENAME_LEN);
+        strncpy(filename, path, MAX_FILENAME_LEN - 1);
         filename[MAX_FILENAME_LEN - 1] = '\0';
         // Relative to the thread's cwd node
         thread_t *tc = get_current_thread();
@@ -226,8 +226,7 @@ static void sys_open(struct registers *regs) {
       klog(LOG_ERROR, "SYSCALL_EXIT: sys_open: Failed to create file %s. Returning -1.", path);
       return;
     }
-    node = vfs_resolve_path(
-        vfs_root, path); // Resolve again to get the newly created node
+    node = resolve_for_thread(path); // Resolve again to get the newly created node
     if (!node) {
       regs->rax = (uint64_t)-1; // Should not happen if create succeeded
       klog(LOG_ERROR,
@@ -238,8 +237,10 @@ static void sys_open(struct registers *regs) {
     klog(LOG_DEBUG, "SYSCALL_DEBUG: sys_open: File '%s' created successfully.", path);
     // Ownership + umask for the new node (POSIX-style)
     thread_t *tc = get_current_thread();
-    vfs_node_set_owner(node, tc->euid, tc->egid,
-                       (uint16_t)vfs_default_mode_for(node->flags, tc));
+    if (tc) {
+      vfs_node_set_owner(node, tc->euid, tc->egid,
+                         (uint16_t)vfs_default_mode_for(node->flags, tc));
+    }
   } else if (!node) {
     regs->rax = (uint64_t)-1; // File not found and O_CREAT not set
     klog(LOG_WARN, "SYSCALL_EXIT: sys_open: File not found: %s. O_CREAT not set. Returning -1.", path);
@@ -349,41 +350,48 @@ static void sys_stat(struct registers *regs) {
   struct stat *stat_buf = (struct stat *)regs->rsi;
 
   char path[MAX_FILENAME_LEN];
-  if (validate_user_pointer(user_path, 1) != 0) {
-    regs->rax = (uint64_t)-1;
+  int rc = copy_user_string(path, user_path, sizeof(path));
+  if (rc != 0) {
+    regs->rax = (uint64_t)rc;
     return;
   }
-  strncpy(path, user_path, MAX_FILENAME_LEN - 1);
-  path[MAX_FILENAME_LEN - 1] = '\0';
 
   if (validate_user_write(stat_buf, sizeof(struct stat)) != 0) {
-      regs->rax = (uint64_t)-1;
+      regs->rax = (uint64_t)-EFAULT;
       return;
   }
 
   vfs_node_t *node = resolve_for_thread(path);
   if (!node) {
-    regs->rax = -ENOENT;
+    regs->rax = (uint64_t)-ENOENT;
     return;
   }
 
+  struct stat st;
   if (node->stat) {
-    regs->rax = node->stat(node, stat_buf);
+    int sret = node->stat(node, &st);
+    if (sret != 0) {
+      regs->rax = (uint64_t)sret;
+      return;
+    }
   } else {
-    fill_stat_from_node(node, stat_buf);
-    regs->rax = 0;
+    fill_stat_from_node(node, &st);
   }
+  if (copy_to_user(stat_buf, &st, sizeof(st)) != 0) {
+    regs->rax = (uint64_t)-EFAULT;
+    return;
+  }
+  regs->rax = 0;
 }
 
 static void sys_mkdir(struct registers *regs) {
   char *user_path = (char *)regs->rdi;
   char path[MAX_FILENAME_LEN];
-  if (validate_user_pointer(user_path, 1) != 0) {
-    regs->rax = (uint64_t)-EFAULT;
+  int rc = copy_user_string(path, user_path, sizeof(path));
+  if (rc != 0) {
+    regs->rax = (uint64_t)rc;
     return;
   }
-  strncpy(path, user_path, MAX_FILENAME_LEN - 1);
-  path[MAX_FILENAME_LEN - 1] = '\0';
 
   thread_t *t = get_current_thread();
   const char *cwd = (t && t->cwd[0]) ? t->cwd : "/";
@@ -468,12 +476,11 @@ static void sys_readdir(struct registers *regs) {
 static void sys_unlink(struct registers *regs) {
   char *user_path = (char *)regs->rdi;
   char path[MAX_FILENAME_LEN];
-  if (validate_user_pointer(user_path, 1) != 0) {
-    regs->rax = (uint64_t)-EFAULT;
+  int rc = copy_user_string(path, user_path, sizeof(path));
+  if (rc != 0) {
+    regs->rax = (uint64_t)rc;
     return;
   }
-  strncpy(path, user_path, MAX_FILENAME_LEN - 1);
-  path[MAX_FILENAME_LEN - 1] = '\0';
 
   thread_t *t = get_current_thread();
   const char *cwd = (t && t->cwd[0]) ? t->cwd : "/";
@@ -512,12 +519,11 @@ static void sys_unlink(struct registers *regs) {
 static void sys_rmdir(struct registers *regs) {
   char *user_path = (char *)regs->rdi;
   char path[MAX_FILENAME_LEN];
-  if (validate_user_pointer(user_path, 1) != 0) {
-    regs->rax = (uint64_t)-EFAULT;
+  int rc = copy_user_string(path, user_path, sizeof(path));
+  if (rc != 0) {
+    regs->rax = (uint64_t)rc;
     return;
   }
-  strncpy(path, user_path, MAX_FILENAME_LEN - 1);
-  path[MAX_FILENAME_LEN - 1] = '\0';
 
   thread_t *t = get_current_thread();
   const char *cwd = (t && t->cwd[0]) ? t->cwd : "/";
@@ -559,18 +565,24 @@ static void sys_socket(struct registers *regs) {
   int protocol = (int)regs->rdx;
 
   thread_t *t = get_current_thread();
+  if (!t) {
+    regs->rax = (uint64_t)-EINVAL;
+    return;
+  }
   for (int i = 0; i < MAX_FILES; i++) { // Reuse MAX_FILES for sockets too
     if (t->fd_table[i].type == FD_TYPE_NONE) {
       socket_t *sock = sock_create(domain, type, protocol);
-      if (sock) {
-        t->fd_table[i].type = FD_TYPE_SOCKET;
-        t->fd_table[i].data.sock = sock;
-        regs->rax = i; // Return socket descriptor
+      if (!sock) {
+        regs->rax = (uint64_t)-ENOMEM;
         return;
       }
+      t->fd_table[i].type = FD_TYPE_SOCKET;
+      t->fd_table[i].data.sock = sock;
+      regs->rax = i; // Return socket descriptor
+      return;
     }
   }
-  regs->rax = -1; // No free descriptors
+  regs->rax = (uint64_t)-EMFILE; // No free descriptors
 }
 
 static void sys_connect(struct registers *regs) {
@@ -579,18 +591,19 @@ static void sys_connect(struct registers *regs) {
   // int addrlen = (int)regs->rdx; // Not used yet, assuming sockaddr_in_t size
 
   thread_t *t = get_current_thread();
-  if (fd < 0 || fd >= MAX_FILES || t->fd_table[fd].type != FD_TYPE_SOCKET) {
-    regs->rax = -1; // Not a valid socket FD
+  if (!t || fd < 0 || fd >= MAX_FILES || t->fd_table[fd].type != FD_TYPE_SOCKET) {
+    regs->rax = (uint64_t)-EBADF; // Not a valid socket FD
     return;
   }
 
-  if (validate_user_pointer(addr, sizeof(sockaddr_in_t)) != 0) {
-      regs->rax = (uint64_t)-1;
+  sockaddr_in_t kaddr;
+  if (copy_from_user(&kaddr, addr, sizeof(kaddr)) != 0) {
+      regs->rax = (uint64_t)-EFAULT;
       return;
   }
 
   socket_t *sock = t->fd_table[fd].data.sock;
-  regs->rax = sock_connect(sock, addr);
+  regs->rax = sock_connect(sock, &kaddr);
 }
 
 static void sys_bind(struct registers *regs) {
@@ -599,18 +612,19 @@ static void sys_bind(struct registers *regs) {
   // int addrlen = (int)regs->rdx; // Not used yet, assuming sockaddr_in_t size
 
   thread_t *t = get_current_thread();
-  if (fd < 0 || fd >= MAX_FILES || t->fd_table[fd].type != FD_TYPE_SOCKET) {
-    regs->rax = -1; // Not a valid socket FD
+  if (!t || fd < 0 || fd >= MAX_FILES || t->fd_table[fd].type != FD_TYPE_SOCKET) {
+    regs->rax = (uint64_t)-EBADF; // Not a valid socket FD
     return;
   }
 
-  if (validate_user_pointer(addr, sizeof(sockaddr_in_t)) != 0) {
-      regs->rax = (uint64_t)-1;
+  sockaddr_in_t kaddr;
+  if (copy_from_user(&kaddr, addr, sizeof(kaddr)) != 0) {
+      regs->rax = (uint64_t)-EFAULT;
       return;
   }
 
   socket_t *sock = t->fd_table[fd].data.sock;
-  regs->rax = sock_bind(sock, addr);
+  regs->rax = sock_bind(sock, &kaddr);
 }
 
 static void sys_listen(struct registers *regs) {
@@ -631,21 +645,27 @@ static void sys_accept(struct registers *regs) {
   int fd = (int)regs->rdi;
   sockaddr_in_t *addr = (sockaddr_in_t *)regs->rsi;
 
-
   thread_t *t = get_current_thread();
-  if (fd < 0 || fd >= MAX_FILES || t->fd_table[fd].type != FD_TYPE_SOCKET) {
-    regs->rax = -1; // Not a valid socket FD
+  if (!t || fd < 0 || fd >= MAX_FILES || t->fd_table[fd].type != FD_TYPE_SOCKET) {
+    regs->rax = (uint64_t)-EBADF; // Not a valid socket FD
     return;
   }
 
   if (addr && validate_user_write(addr, sizeof(sockaddr_in_t)) != 0) {
-      regs->rax = (uint64_t)-1;
+      regs->rax = (uint64_t)-EFAULT;
       return;
   }
 
-  socket_t *new_sock = sock_accept(t->fd_table[fd].data.sock, addr);
+  sockaddr_in_t kaddr;
+  socket_t *new_sock = sock_accept(t->fd_table[fd].data.sock, addr ? &kaddr : NULL);
   if (!new_sock) {
-    regs->rax = -1; // Accept failed
+    regs->rax = (uint64_t)-1; // Accept failed
+    return;
+  }
+
+  if (addr && copy_to_user(addr, &kaddr, sizeof(kaddr)) != 0) {
+    sock_close(new_sock);
+    regs->rax = (uint64_t)-EFAULT;
     return;
   }
 
@@ -657,7 +677,8 @@ static void sys_accept(struct registers *regs) {
       return;
     }
   }
-  regs->rax = -1; // No free descriptors
+  sock_close(new_sock);
+  regs->rax = (uint64_t)-EMFILE; // No free descriptors
 }
 
 #include "crypto.h" // For sha256_hash
@@ -727,19 +748,89 @@ static void sys_ioctl(struct registers *regs) {
   void *argp = (void *)regs->rdx;
 
   thread_t *t = get_current_thread();
-  if (fd < 0 || fd >= MAX_FILES || t->fd_table[fd].type == FD_TYPE_NONE) {
-    regs->rax = -1; // Invalid FD
+  if (!t || fd < 0 || fd >= MAX_FILES || t->fd_table[fd].type == FD_TYPE_NONE) {
+    regs->rax = (uint64_t)-EBADF;
     return;
   }
 
-
-  if (t->fd_table[fd].type == FD_TYPE_FILE &&
-      t->fd_table[fd].data.file.node->ioctl) {
-    regs->rax = t->fd_table[fd].data.file.node->ioctl(
-        t->fd_table[fd].data.file.node, request, argp);
-  } else {
-    regs->rax = -1; // IOCTL not supported for this FD type or node.
+  if (t->fd_table[fd].type != FD_TYPE_FILE || !t->fd_table[fd].data.file.node ||
+      !t->fd_table[fd].data.file.node->ioctl) {
+    regs->rax = (uint64_t)-ENOTTY;
+    return;
   }
+
+  vfs_node_t *node = t->fd_table[fd].data.file.node;
+  if (node->flags & VFS_BLOCKDEVICE) {
+    if (request == IDE_IOCTL_GET_DISK_INFO) {
+      if (validate_user_write(argp, sizeof(ide_disk_info_t)) != 0) {
+        regs->rax = (uint64_t)-EFAULT;
+        return;
+      }
+      ide_disk_info_t info;
+      memset(&info, 0, sizeof(info));
+      int ret = node->ioctl(node, request, &info);
+      if (ret == 0 && copy_to_user(argp, &info, sizeof(info)) != 0) {
+        regs->rax = (uint64_t)-EFAULT;
+        return;
+      }
+      regs->rax = (uint64_t)ret;
+      return;
+    } else if (request == IDE_IOCTL_READ_BLOCKS) {
+      if (t->euid != 0) {
+        regs->rax = (uint64_t)-EPERM;
+        return;
+      }
+      ide_read_blocks_t rb;
+      if (copy_from_user(&rb, argp, sizeof(rb)) != 0) {
+        regs->rax = (uint64_t)-EFAULT;
+        return;
+      }
+      if (validate_user_write(rb.buffer, (size_t)rb.count * 512) != 0) {
+        regs->rax = (uint64_t)-EFAULT;
+        return;
+      }
+      regs->rax = (uint64_t)node->ioctl(node, request, &rb);
+      return;
+    } else if (request == IDE_IOCTL_WRITE_BLOCKS) {
+      if (t->euid != 0) {
+        regs->rax = (uint64_t)-EPERM;
+        return;
+      }
+      ide_write_blocks_t wb;
+      if (copy_from_user(&wb, argp, sizeof(wb)) != 0) {
+        regs->rax = (uint64_t)-EFAULT;
+        return;
+      }
+      if (validate_user_pointer(wb.buffer, (size_t)wb.count * 512) != 0) {
+        regs->rax = (uint64_t)-EFAULT;
+        return;
+      }
+      regs->rax = (uint64_t)node->ioctl(node, request, &wb);
+      return;
+    } else if (request == IDE_IOCTL_FORMAT) {
+      if (t->euid != 0) {
+        regs->rax = (uint64_t)-EPERM;
+        return;
+      }
+      if (validate_user_pointer(argp, sizeof(ide_ioctl_format_t)) != 0) {
+        regs->rax = (uint64_t)-EFAULT;
+        return;
+      }
+      ide_ioctl_format_t fmt;
+      if (copy_from_user(&fmt, argp, sizeof(fmt)) != 0) {
+        regs->rax = (uint64_t)-EFAULT;
+        return;
+      }
+      regs->rax = (uint64_t)node->ioctl(node, request, &fmt);
+      return;
+    }
+  }
+
+  if (argp && validate_user_pointer(argp, 1) != 0) {
+    regs->rax = (uint64_t)-EFAULT;
+    return;
+  }
+  regs->rax = (uint64_t)node->ioctl(node, request, argp);
 }
 
 // New Mount/Unmount Syscalls
@@ -752,43 +843,40 @@ static void sys_mount(struct registers *regs) {
   if (!tc || tc->euid != 0) { regs->rax = -EPERM; return; } // registry: root
 
   char mount_point_path[MAX_FILENAME_LEN];
-  if (validate_user_pointer(user_mount_point_path, 1) != 0) {
-    regs->rax = -1;
+  int rc = copy_user_string(mount_point_path, user_mount_point_path, sizeof(mount_point_path));
+  if (rc != 0) {
+    regs->rax = (uint64_t)rc;
     return;
   }
-  strncpy(mount_point_path, user_mount_point_path, MAX_FILENAME_LEN - 1);
-  mount_point_path[MAX_FILENAME_LEN - 1] = '\0';
 
   char device_node_path[MAX_FILENAME_LEN];
-  if (validate_user_pointer(user_device_node_path, 1) != 0) {
-    regs->rax = -1;
+  rc = copy_user_string(device_node_path, user_device_node_path, sizeof(device_node_path));
+  if (rc != 0) {
+    regs->rax = (uint64_t)rc;
     return;
   }
-  strncpy(device_node_path, user_device_node_path, MAX_FILENAME_LEN - 1);
-  device_node_path[MAX_FILENAME_LEN - 1] = '\0';
 
   char fs_type_name[32]; // Filesystem names are short
-  if (validate_user_pointer(user_fs_type_name, 1) != 0) {
-    regs->rax = -1;
+  rc = copy_user_string(fs_type_name, user_fs_type_name, sizeof(fs_type_name));
+  if (rc != 0) {
+    regs->rax = (uint64_t)rc;
     return;
   }
-  strncpy(fs_type_name, user_fs_type_name, 31);
-  fs_type_name[31] = '\0';
 
-  vfs_node_t *mount_point = vfs_resolve_path(vfs_root, mount_point_path);
+  vfs_node_t *mount_point = resolve_for_thread(mount_point_path);
   if (!mount_point || !(mount_point->flags & VFS_DIRECTORY)) {
     klog(LOG_ERROR, "SYSCALL: sys_mount: Invalid mount point %s.",
          mount_point_path);
-    regs->rax = -1;
+    regs->rax = (uint64_t)-ENOTDIR;
     return;
   }
 
-  vfs_node_t *device_node = vfs_resolve_path(vfs_root, device_node_path);
+  vfs_node_t *device_node = resolve_for_thread(device_node_path);
   if (!device_node ||
-      !(device_node->flags & VFS_FILE)) { // Must be a block device file
+      !(device_node->flags & (VFS_FILE | VFS_BLOCKDEVICE))) { // Must be a block device or file
     klog(LOG_ERROR, "SYSCALL: sys_mount: Invalid device node %s.",
          device_node_path);
-    regs->rax = -1;
+    regs->rax = (uint64_t)-ENOTBLK;
     return;
   }
 
@@ -798,19 +886,21 @@ static void sys_mount(struct registers *regs) {
 static void sys_unmount(struct registers *regs) {
   char *user_mount_point_path = (char *)regs->rdi;
 
+  thread_t *tc = get_current_thread();
+  if (!tc || tc->euid != 0) { regs->rax = (uint64_t)-EPERM; return; }
+
   char mount_point_path[MAX_FILENAME_LEN];
-  if (validate_user_pointer(user_mount_point_path, 1) != 0) {
-    regs->rax = -1;
+  int rc = copy_user_string(mount_point_path, user_mount_point_path, sizeof(mount_point_path));
+  if (rc != 0) {
+    regs->rax = (uint64_t)rc;
     return;
   }
-  strncpy(mount_point_path, user_mount_point_path, MAX_FILENAME_LEN - 1);
-  mount_point_path[MAX_FILENAME_LEN - 1] = '\0';
 
-  vfs_node_t *mount_point = vfs_resolve_path(vfs_root, mount_point_path);
+  vfs_node_t *mount_point = resolve_for_thread(mount_point_path);
   if (!mount_point || !(mount_point->flags & VFS_MOUNTPOINT)) {
     klog(LOG_ERROR, "SYSCALL: sys_unmount: Not a mount point %s.",
          mount_point_path);
-    regs->rax = -1;
+    regs->rax = (uint64_t)-EINVAL;
     return;
   }
 
@@ -818,129 +908,33 @@ static void sys_unmount(struct registers *regs) {
 }
 
 static void sys_exec(struct registers *regs) {
-    char *user_path = (char *)regs->rdi;
-    klog(LOG_DEBUG, "SYSCALL_EXEC: path=%p", user_path);
-    
-    if (validate_user_pointer(user_path, 1) != 0) {
-        regs->rax = (uint64_t)-1;
-        return;
-    }
-    
-    char path[MAX_FILENAME_LEN];
-    strncpy(path, user_path, MAX_FILENAME_LEN - 1);
-    path[MAX_FILENAME_LEN - 1] = '\0';
-    
-    vfs_node_t *node = vfs_resolve_path(vfs_root, path);
-    if (!node || (node->flags & VFS_DIRECTORY)) {
-        klog(LOG_ERROR, "SYSCALL_EXEC: File not found or is directory: %s", path);
-        regs->rax = (uint64_t)-1;
-        return;
-    }
-    
-    // Read ELF header
-    uint8_t elf_header[64];
-    if (vfs_read(node, 0, 64, elf_header) != 64) {
-        klog(LOG_ERROR, "SYSCALL_EXEC: Failed to read ELF header");
-        regs->rax = (uint64_t)-1;
-        return;
-    }
-    
-    // Verify ELF magic
-    if (elf_header[0] != 0x7F || elf_header[1] != 'E' || 
-        elf_header[2] != 'L' || elf_header[3] != 'F') {
-        klog(LOG_ERROR, "SYSCALL_EXEC: Not a valid ELF file");
-        regs->rax = (uint64_t)-1;
-        return;
-    }
-    
-    // Load entire file into memory
-    uint8_t *elf_data = (uint8_t *)kmalloc(node->length);
-    if (!elf_data) {
-        klog(LOG_ERROR, "SYSCALL_EXEC: Failed to allocate memory for ELF");
-        regs->rax = (uint64_t)-1;
-        return;
-    }
-    
-    if (vfs_read(node, 0, node->length, elf_data) != node->length) {
-        klog(LOG_ERROR, "SYSCALL_EXEC: Failed to read ELF file");
-        kfree(elf_data);
-        regs->rax = (uint64_t)-1;
-        return;
-    }
-    
-    // Parse ELF and create new address space
-    Elf64_Ehdr *ehdr = (Elf64_Ehdr *)elf_data;
-    Elf64_Phdr *phdr = (Elf64_Phdr *)(elf_data + ehdr->e_phoff);
-    
-    // Allocate new PML4 for the process
-    pml4_t *new_pml4 = vmm_create_address_space();
-    if (!new_pml4) {
-        klog(LOG_ERROR, "SYSCALL_EXEC: Failed to create new PML4");
-        kfree(elf_data);
-        regs->rax = (uint64_t)-1;
-        return;
-    }
-    
-    // Load program headers
-    uint64_t entry_point = 0;
-    for (int i = 0; i < ehdr->e_phnum; i++) {
-        if (phdr[i].p_type == PT_LOAD) {
-            // Allocate pages for this segment
-            uint64_t vaddr = phdr[i].p_vaddr & ~0xFFF;
-            uint64_t end_vaddr = (phdr[i].p_vaddr + phdr[i].p_memsz + 0xFFF) & ~0xFFF;
-            
-            for (uint64_t addr = vaddr; addr < end_vaddr; addr += PAGE_SIZE) {
-                void *phys = pmm_alloc_page();
-                if (!phys) {
-                    klog(LOG_ERROR, "SYSCALL_EXEC: Failed to allocate page");
-                    vmm_destroy_address_space(new_pml4);
-                    kfree(elf_data);
-                    regs->rax = (uint64_t)-1;
-                    return;
-                }
-                memset(phys, 0, PAGE_SIZE);
-                vmm_map_page(new_pml4, (void *)(addr + kernel_hhdm_offset), phys, PAGE_PRESENT | PAGE_WRITE | PAGE_USER);
-            }
-            
-            // Copy data to the mapped pages
-            uint8_t *vaddr_ptr = (uint8_t *)(phdr[i].p_vaddr + kernel_hhdm_offset);
-            memcpy(vaddr_ptr, elf_data + phdr[i].p_offset, phdr[i].p_filesz);
-            
-            if (i == 0) entry_point = ehdr->e_entry;
-        }
-    }
-    
-    // Allocate user stack
-    uint64_t stack_top = 0x8000000000; // User stack address
-    for (uint64_t addr = stack_top - (8 * PAGE_SIZE); addr < stack_top; addr += PAGE_SIZE) {
-        void *phys = pmm_alloc_page();
-        if (!phys) {
-            klog(LOG_ERROR, "SYSCALL_EXEC: Failed to allocate stack page");
-            vmm_destroy_address_space(new_pml4);
-            kfree(elf_data);
-            regs->rax = (uint64_t)-1;
-            return;
-        }
-        memset(phys, 0, PAGE_SIZE);
-        vmm_map_page(new_pml4, (void *)(addr + kernel_hhdm_offset), phys, PAGE_PRESENT | PAGE_WRITE | PAGE_USER);
-    }
-    
-    kfree(elf_data);
-    
-    // Derive process name from basename of the path
-    const char *base = strrchr(path, '/');
-    base = base ? base + 1 : path;
-    // Use existing thread_create_userspace function
-    thread_t *new_thread = thread_create_userspace(entry_point, new_pml4, 0, 0, NULL, base);
-    if (!new_thread) {
-        klog(LOG_ERROR, "SYSCALL_EXEC: Failed to create thread");
-        vmm_destroy_address_space(new_pml4);
-        regs->rax = (uint64_t)-1;
-        return;
-    }
-    
-    klog(LOG_INFO, "SYSCALL_EXEC: Created userspace thread at entry %p", (void *)entry_point);
-    regs->rax = 0; // Success
+  char *user_path = (char *)regs->rdi;
+  char path[MAX_FILENAME_LEN];
+  int rc = copy_user_string(path, user_path, sizeof(path));
+  if (rc != 0) {
+    regs->rax = (uint64_t)rc;
+    return;
+  }
+
+  thread_t *t = get_current_thread();
+  const char *cwd = (t && t->cwd[0]) ? t->cwd : "/";
+  char canon[MAX_FILENAME_LEN];
+  canonicalize_path(cwd, path, canon, sizeof(canon));
+
+  vfs_node_t *node = vfs_resolve_path(vfs_root, canon);
+  rc = vfs_check_exec(node);
+  if (rc != 0) {
+    regs->rax = (uint64_t)rc;
+    return;
+  }
+
+  char *argv[2] = { canon, NULL };
+  struct thread *th = elf_exec_as_thread_handle(canon, 1, argv);
+  if (!th) {
+    regs->rax = (uint64_t)-ENOEXEC;
+    return;
+  }
+  regs->rax = 0;
 }
 
 static void sys_display_ctl(struct registers *regs) {
@@ -966,7 +960,7 @@ static void sys_gfx_get_fb_info(struct registers *regs) {
   klog(LOG_DEBUG, "SYSCALL_GFX: user_info_ptr = %p", user_info_ptr);
 
   if (validate_user_write(user_info_ptr, sizeof(user_fb_info_t)) != 0) {
-      regs->rax = (uint64_t)-1;
+      regs->rax = (uint64_t)-EFAULT;
       return;
   }
 
@@ -1006,7 +1000,10 @@ static void sys_gfx_get_fb_info(struct registers *regs) {
          "SYSCALL_GFX: Copying temp_info from %p to user_info_ptr %p (size %u)",
          &temp_info, user_info_ptr, sizeof(user_fb_info_t));
     // Safely copy the correctly-sized structure to the userspace pointer.
-    memcpy(user_info_ptr, &temp_info, sizeof(user_fb_info_t));
+    if (copy_to_user(user_info_ptr, &temp_info, sizeof(user_fb_info_t)) != 0) {
+      regs->rax = (uint64_t)-EFAULT;
+      return;
+    }
 
     regs->rax = 0; // Success
   } else {
@@ -1040,18 +1037,36 @@ static void sys_input_poll_event(struct registers *regs) {
 }
 
 static void sys_sbrk(struct registers *regs) {
-  intptr_t increment = (intptr_t)regs->rdi;
+  int64_t increment = (int64_t)regs->rdi;
   thread_t *t = get_current_thread();
+  if (!t || !t->pml4) {
+    regs->rax = (uint64_t)-1;
+    return;
+  }
 
   uint64_t old_brk = t->program_break;
-  uint64_t new_brk = old_brk + increment;
-
   if (increment == 0) {
     regs->rax = old_brk;
     return;
   }
 
-  if (new_brk < t->initial_program_break) {
+  if (increment > 0) {
+    if ((uint64_t)increment > 0x0000600000000000ULL ||
+        old_brk >= 0x0000600000000000ULL ||
+        (uint64_t)increment >= 0x0000600000000000ULL - old_brk) {
+      regs->rax = (uint64_t)-1;
+      return;
+    }
+  } else {
+    uint64_t dec = (uint64_t)(-(increment + 1)) + 1ULL;
+    if (dec > old_brk || old_brk - dec < t->initial_program_break) {
+      regs->rax = (uint64_t)-1;
+      return;
+    }
+  }
+
+  uint64_t new_brk = (uint64_t)((int64_t)old_brk + increment);
+  if (new_brk < t->initial_program_break || new_brk >= 0x0000600000000000ULL) {
     regs->rax = (uint64_t)-1;
     return;
   }
@@ -1059,16 +1074,22 @@ static void sys_sbrk(struct registers *regs) {
   if (new_brk > old_brk) {
       // Allocate and map pages
       uint64_t start = (old_brk + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+      uint64_t mapped_end = start;
       for (uint64_t addr = start; addr < new_brk; addr += PAGE_SIZE) {
           if (!vmm_get_phys_addr(t->pml4, (void*)addr)) {
               void *phys = pmm_alloc_page();
               if (!phys) {
+                  for (uint64_t u = start; u < mapped_end; u += PAGE_SIZE) {
+                      void *p = vmm_unmap_page(t->pml4, (void*)u);
+                      if (p) pmm_free_page(p);
+                  }
                   regs->rax = (uint64_t)-1;
                   return;
               }
               memset((void*)P_TO_V(phys), 0, PAGE_SIZE);
               vmm_map_page(t->pml4, (void*)addr, phys, PAGE_PRESENT | PAGE_WRITE | PAGE_USER);
           }
+          mapped_end = addr + PAGE_SIZE;
       }
   } else if (new_brk < old_brk) {
       // Unmap and free pages
@@ -1383,6 +1404,7 @@ static void sys_kill(struct registers *regs) {
   uint32_t pid = (uint32_t)regs->rdi;
   int sig = (int)regs->rsi;
   thread_t *t = get_current_thread();
+  if (!t) { regs->rax = -ESRCH; return; }
   if (sig < 1 || sig >= 32) { regs->rax = -EINVAL; return; }
   if (pid == t->id && (sig == SIGKILL || sig == SIGTERM)) { thread_exit(); return; }
 
@@ -1392,16 +1414,26 @@ static void sys_kill(struct registers *regs) {
   if (t->euid != 0 && t->euid != target->euid) { regs->rax = -EPERM; return; }
 
   if (sig == SIGKILL) {
+    target->exit_status = 128 + sig;
     target->state = THREAD_DEAD;
   } else if (target->sig_handlers[sig] == SIG_IGN) {
     // Ignored
   } else if (target->sig_handlers[sig] != SIG_DFL) {
     target->sig_pending |= (1 << sig);
+    if (target->state == THREAD_BLOCKED) {
+      target->state = THREAD_READY;
+    }
   } else {
     if (sig != SIGCHLD) {
       target->exit_status = 128 + sig;
       target->state = THREAD_DEAD;
     }
+  }
+
+  if (target->state == THREAD_DEAD) {
+    if (console_focus == target) console_focus = NULL;
+    fb_release_graphics_owner(target->id);
+    display_release(target);
   }
   regs->rax = 0;
 }
@@ -1558,8 +1590,12 @@ static void sys_fstat(struct registers *regs) {
 static void sys_proc_list(struct registers *regs) {
   struct procinfo *buf = (struct procinfo *)regs->rdi;
   size_t max_entries = (size_t)regs->rsi;
+  if (max_entries > SIZE_MAX / sizeof(struct procinfo)) {
+    regs->rax = (uint64_t)-EINVAL;
+    return;
+  }
   if (validate_user_write(buf, max_entries * sizeof(struct procinfo)) != 0) {
-    regs->rax = -EFAULT;
+    regs->rax = (uint64_t)-EFAULT;
     return;
   }
   thread_t *t = get_current_thread();
@@ -1599,14 +1635,11 @@ static void sys_proc_list(struct registers *regs) {
 
 static void sys_sysinfo(struct registers *regs) {
   struct sysinfo_k *out = (struct sysinfo_k *)regs->rdi;
-  if (validate_user_write(out, sizeof(struct sysinfo_k)) != 0) {
-    regs->rax = -EFAULT;
-    return;
-  }
-  memset(out, 0, sizeof(struct sysinfo_k));
-  out->mem_total_kb = (uint32_t)(pmm_get_total_memory() / 1024);
-  out->mem_used_kb = (uint32_t)(pmm_get_used_memory() / 1024);
-  out->uptime_ticks = timer_get_ticks();
+  struct sysinfo_k kinfo;
+  memset(&kinfo, 0, sizeof(kinfo));
+  kinfo.mem_total_kb = (uint32_t)(pmm_get_total_memory() / 1024);
+  kinfo.mem_used_kb = (uint32_t)(pmm_get_used_memory() / 1024);
+  kinfo.uptime_ticks = timer_get_ticks();
 
   uint32_t procs = 0;
   thread_t *t = get_current_thread();
@@ -1617,25 +1650,30 @@ static void sys_sysinfo(struct registers *regs) {
       cur = cur->next;
     } while (cur && cur != t);
   }
-  out->procs_total = procs ? procs : 1;
+  kinfo.procs_total = procs ? procs : 1;
 
-  out->rx_bytes = network_devices ? network_devices->rx_bytes : 0;
-  out->tx_bytes = network_devices ? network_devices->tx_bytes : 0;
-  out->rx_packets = network_devices ? network_devices->rx_packets : 0;
-  out->tx_packets = network_devices ? network_devices->tx_packets : 0;
+  kinfo.rx_bytes = network_devices ? network_devices->rx_bytes : 0;
+  kinfo.tx_bytes = network_devices ? network_devices->tx_bytes : 0;
+  kinfo.rx_packets = network_devices ? network_devices->rx_packets : 0;
+  kinfo.tx_packets = network_devices ? network_devices->tx_packets : 0;
 
-  out->cpu_idle_ticks = g_cpu_idle_ticks;
-  out->cpu_busy_ticks = g_cpu_busy_ticks;
-  out->fs_used_bytes = kyrofs_get_total_bytes_used();
-  out->fs_total_bytes = ide_get_primary_capacity();
+  kinfo.cpu_idle_ticks = g_cpu_idle_ticks;
+  kinfo.cpu_busy_ticks = g_cpu_busy_ticks;
+  kinfo.fs_used_bytes = kyrofs_get_total_bytes_used();
+  kinfo.fs_total_bytes = ide_get_primary_capacity();
 
   rtc_time_t rt = rtc_get_time();
-  out->rtc_sec = rt.second;
-  out->rtc_min = rt.minute;
-  out->rtc_hour = rt.hour;
-  out->rtc_day = rt.day;
-  out->rtc_mon = rt.month;
-  out->rtc_year = rt.year;
+  kinfo.rtc_sec = rt.second;
+  kinfo.rtc_min = rt.minute;
+  kinfo.rtc_hour = rt.hour;
+  kinfo.rtc_day = rt.day;
+  kinfo.rtc_mon = rt.month;
+  kinfo.rtc_year = rt.year;
+
+  if (copy_to_user(out, &kinfo, sizeof(kinfo)) != 0) {
+    regs->rax = (uint64_t)-EFAULT;
+    return;
+  }
 
   regs->rax = 0;
 }
@@ -1643,8 +1681,12 @@ static void sys_sysinfo(struct registers *regs) {
 static void sys_net_ifconf(struct registers *regs) {
   struct ifinfo *buf = (struct ifinfo *)regs->rdi;
   size_t max_entries = (size_t)regs->rsi;
+  if (max_entries > SIZE_MAX / sizeof(struct ifinfo)) {
+    regs->rax = (uint64_t)-EINVAL;
+    return;
+  }
   if (validate_user_write(buf, max_entries * sizeof(struct ifinfo)) != 0) {
-    regs->rax = -EFAULT;
+    regs->rax = (uint64_t)-EFAULT;
     return;
   }
   size_t count = 0;
@@ -1726,7 +1768,10 @@ static void sys_waitpid(struct registers *regs) {
   int st = 0;
   int ret = scheduler_waitpid((uint64_t)pid, status ? &st : NULL, options);
   if (ret >= 0 && status) {
-    *status = st;
+    if (copy_to_user(status, &st, sizeof(st)) != 0) {
+      regs->rax = (uint64_t)-EFAULT;
+      return;
+    }
   }
   regs->rax = (uint64_t)ret;
 }
@@ -1737,54 +1782,83 @@ static void sys_execve(struct registers *regs) {
   char path[MAX_FILENAME_LEN];
   int rc = copy_user_string(path, user_path, sizeof(path));
   if (rc) { regs->rax = (uint64_t)rc; return; }
+
+  #define EXECVE_MAX_ARGS 32
+  #define EXECVE_ARG_LEN  128
+  char *kargs = (char *)kmalloc(EXECVE_MAX_ARGS * EXECVE_ARG_LEN);
+  if (!kargs) { regs->rax = (uint64_t)-ENOMEM; return; }
+
   int argc = 0;
-  char *kargv[32];
-  char kargs[32][128];
+  char *kargv[EXECVE_MAX_ARGS];
   if (user_argv) {
-    for (; argc < 32; argc++) {
+    for (; argc < EXECVE_MAX_ARGS; argc++) {
       char *arg;
       if (copy_from_user(&arg, &user_argv[argc], sizeof(arg))) {
-        regs->rax = -EFAULT; return;
+        kfree(kargs);
+        regs->rax = (uint64_t)-EFAULT;
+        return;
       }
       if (!arg) break;
-      rc = copy_user_string(kargs[argc], arg, sizeof(kargs[argc]));
-      if (rc) { regs->rax = rc == -ENAMETOOLONG ? -E2BIG : (uint64_t)rc; return; }
-      kargv[argc] = kargs[argc];
+      char *slot = kargs + (argc * EXECVE_ARG_LEN);
+      rc = copy_user_string(slot, arg, EXECVE_ARG_LEN);
+      if (rc) {
+        kfree(kargs);
+        regs->rax = rc == -ENAMETOOLONG ? (uint64_t)-E2BIG : (uint64_t)rc;
+        return;
+      }
+      kargv[argc] = slot;
     }
-    if (argc == 32) { regs->rax = -E2BIG; return; }
+    if (argc == EXECVE_MAX_ARGS) {
+      kfree(kargs);
+      regs->rax = (uint64_t)-E2BIG;
+      return;
+    }
   }
   if (!argc) { kargv[0] = path; argc = 1; }
   kargv[argc] = NULL;
 
-  vfs_node_t *node = resolve_for_thread(path);
-  if (!node) {
+  thread_t *cur = get_current_thread();
+  const char *cwd = (cur && cur->cwd[0]) ? cur->cwd : "/";
+  char canon[MAX_FILENAME_LEN];
+  canonicalize_path(cwd, path, canon, sizeof(canon));
+  vfs_node_t *node = vfs_resolve_path(vfs_root, canon);
+  if (!node && path[0] != '/') {
     char bin_path[MAX_FILENAME_LEN];
     ksprintf(bin_path, "/bin/%s", path);
     node = vfs_resolve_path(vfs_root, bin_path);
     if (node) {
-      strncpy(path, bin_path, sizeof(path) - 1);
+      strncpy(canon, bin_path, sizeof(canon) - 1);
+      canon[sizeof(canon) - 1] = '\0';
     }
   }
-  if (!node) {
-    regs->rax = (uint64_t)-ENOENT;
+  rc = vfs_check_exec(node);
+  if (rc != 0) {
+    kfree(kargs);
+    regs->rax = (uint64_t)rc;
     return;
   }
 
-  struct thread *th = elf_exec_as_thread_handle(path, argc, kargv);
+  struct thread *th = elf_exec_as_thread_handle(canon, argc, kargv);
+  kfree(kargs);
   if (!th) {
     regs->rax = (uint64_t)-ENOEXEC;
     return;
   }
-  thread_t *cur = get_current_thread();
   if (cur) {
+    uint64_t iflags = save_interrupts_and_disable();
     th->parent_id = cur->id;
     for (int i = 0; i < MAX_FILES; i++) {
       if (fd_duplicate(&th->fd_table[i], &cur->fd_table[i]) < 0) {
+        for (int j = 0; j < i; j++) {
+          fd_release(&th->fd_table[j]);
+        }
         th->state = THREAD_DEAD;
-        regs->rax = -ENOMEM;
+        restore_interrupts(iflags);
+        regs->rax = (uint64_t)-ENOMEM;
         return;
       }
     }
+    restore_interrupts(iflags);
   }
   regs->rax = th->id;
 }
@@ -1820,8 +1894,13 @@ static void sys_pipe(struct registers *regs) {
   t->fd_table[fd1].data.pipe.pipe = p;
   t->fd_table[fd1].data.pipe.is_write = 1;
 
-  user_fds[0] = fd0;
-  user_fds[1] = fd1;
+  int fds[2] = { fd0, fd1 };
+  if (copy_to_user(user_fds, fds, sizeof(fds)) != 0) {
+    fd_release(&t->fd_table[fd0]);
+    fd_release(&t->fd_table[fd1]);
+    regs->rax = (uint64_t)-EFAULT;
+    return;
+  }
   regs->rax = 0;
 }
 
@@ -1880,11 +1959,29 @@ static void sys_mmap(struct registers *regs) {
   regs->rax = vaddr;
 }
 
+static uint64_t vmm_get_pte(pml4_t *pml4, void *va) {
+  uint64_t addr = (uint64_t)va;
+  uint64_t pml4_i = (addr >> 39) & 0x1FF;
+  if (!(pml4->entries[pml4_i] & PAGE_PRESENT)) return 0;
+  pdpt_t *pdpt = (pdpt_t *)vmm_phys_to_virt((void *)(pml4->entries[pml4_i] & PHYSICAL_ADDR_MASK));
+  uint64_t pdpt_i = (addr >> 30) & 0x1FF;
+  if (!(pdpt->entries[pdpt_i] & PAGE_PRESENT)) return 0;
+  pd_t *pd = (pd_t *)vmm_phys_to_virt((void *)(pdpt->entries[pdpt_i] & PHYSICAL_ADDR_MASK));
+  uint64_t pd_i = (addr >> 21) & 0x1FF;
+  if (!(pd->entries[pd_i] & PAGE_PRESENT)) return 0;
+  pt_t *pt = (pt_t *)vmm_phys_to_virt((void *)(pd->entries[pd_i] & PHYSICAL_ADDR_MASK));
+  uint64_t pt_i = (addr >> 12) & 0x1FF;
+  if (!(pt->entries[pt_i] & PAGE_PRESENT)) return 0;
+  return pt->entries[pt_i];
+}
+
 static void sys_munmap(struct registers *regs) {
   uint64_t addr = regs->rdi;
   size_t len = regs->rsi;
   thread_t *t = get_current_thread();
-  if (!t || !t->pml4 || !mmap_range(addr, len)) { regs->rax = -EINVAL; return; }
+  if (!t || !t->pml4 || !len || len > MMAP_END - MMAP_BASE) { regs->rax = -EINVAL; return; }
+  len = (len + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+  if (!mmap_range(addr, len)) { regs->rax = -EINVAL; return; }
   for (size_t i = 0; i < len; i += PAGE_SIZE) {
     void *phys = vmm_unmap_page(t->pml4, (void *)(addr + i));
     if (phys) pmm_free_page(phys);
@@ -1897,19 +1994,36 @@ static void sys_mprotect(struct registers *regs) {
   size_t len = regs->rsi;
   int prot = regs->rdx;
   thread_t *t = get_current_thread();
-  if (!t || !t->pml4 || !mmap_range(addr, len) || (prot & ~7)) {
+  if (!t || !t->pml4 || !len || len > MMAP_END - MMAP_BASE || (prot & ~7)) {
     regs->rax = -EINVAL; return;
   }
-  // Validate the complete range before changing any page
+  len = (len + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+  if (!mmap_range(addr, len)) {
+    regs->rax = -EINVAL; return;
+  }
+  // Validate the complete range and resolve COW before granting write access
   for (size_t i = 0; i < len; i += PAGE_SIZE) {
-    if (!vmm_get_phys_addr(t->pml4, (void *)(addr + i))) {
+    void *va = (void *)(addr + i);
+    uint64_t pte = vmm_get_pte(t->pml4, va);
+    if (!pte) {
       regs->rax = -ENOMEM; return;
+    }
+    if ((prot & 2) && (pte & PAGE_COW)) {
+      if (!vmm_handle_page_fault((uint64_t)va, 2)) {
+        regs->rax = -ENOMEM; return;
+      }
     }
   }
   for (size_t i = 0; i < len; i += PAGE_SIZE) {
     void *va = (void *)(addr + i);
-    uint64_t phys = vmm_get_phys_addr(t->pml4, va);
-    vmm_map_page(t->pml4, va, (void *)phys, mmap_protection(prot));
+    uint64_t pte = vmm_get_pte(t->pml4, va);
+    uint64_t phys = pte & PHYSICAL_ADDR_MASK;
+    uint64_t flags = mmap_protection(prot);
+    if (pte & PAGE_COW) {
+      flags |= PAGE_COW;
+      flags &= ~PAGE_WRITE;
+    }
+    vmm_map_page(t->pml4, va, (void *)phys, flags);
   }
   regs->rax = 0;
 }
@@ -1919,16 +2033,15 @@ static char kernel_hostname[64] = "kyroos";
 static void sys_gethostname(struct registers *regs) {
   char *user_name = (char *)regs->rdi;
   size_t len = (size_t)regs->rsi;
-  if (validate_user_write(user_name, len) != 0) {
-    regs->rax = (uint64_t)-EFAULT;
-    return;
-  }
   size_t hlen = strlen(kernel_hostname);
   if (len < hlen + 1) {
     regs->rax = (uint64_t)-ENAMETOOLONG;
     return;
   }
-  strncpy(user_name, kernel_hostname, len);
+  if (copy_to_user(user_name, kernel_hostname, hlen + 1) != 0) {
+    regs->rax = (uint64_t)-EFAULT;
+    return;
+  }
   regs->rax = 0;
 }
 
@@ -1944,11 +2057,12 @@ static void sys_sethostname(struct registers *regs) {
     regs->rax = (uint64_t)-EINVAL;
     return;
   }
-  if (validate_user_pointer((void*)user_name, len) != 0) {
+  char tmp[64];
+  if (copy_from_user(tmp, user_name, len) != 0) {
     regs->rax = (uint64_t)-EFAULT;
     return;
   }
-  strncpy(kernel_hostname, user_name, len);
+  memcpy(kernel_hostname, tmp, len);
   kernel_hostname[len] = '\0';
   regs->rax = 0;
 }
@@ -2031,7 +2145,10 @@ static void sys_get_gpu_info(struct registers *regs) {
     }
   }
 
-  memcpy(user_gpu, &info, sizeof(gpu_info_t));
+  if (copy_to_user(user_gpu, &info, sizeof(gpu_info_t)) != 0) {
+    regs->rax = (uint64_t)-EFAULT;
+    return;
+  }
   regs->rax = 0;
 }
 

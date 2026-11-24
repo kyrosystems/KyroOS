@@ -26,6 +26,7 @@ static int fat32_read_sector(fat32_fs_t *fs, uint32_t lba, uint8_t *buf) {
 }
 
 static uint32_t fat32_next_cluster(fat32_fs_t *fs, uint32_t cluster) {
+    if (!fs || cluster < 2) return 0x0FFFFFFF;
     uint32_t fat_sector = fs->fat_begin_lba + ((cluster * 4) / 512);
     uint32_t fat_offset = (cluster * 4) % 512;
 
@@ -37,6 +38,7 @@ static uint32_t fat32_next_cluster(fat32_fs_t *fs, uint32_t cluster) {
 }
 
 static int fat32_read_cluster(fat32_fs_t *fs, uint32_t cluster, uint8_t *buf) {
+    if (!fs || cluster < 2 || !buf) return -1;
     uint32_t lba = fs->cluster_begin_lba + (cluster - 2) * fs->sectors_per_cluster;
     ide_read_blocks_t rb = {.lba = lba, .count = fs->sectors_per_cluster, .buffer = buf};
     return fs->dev->ioctl(fs->dev, IDE_IOCTL_READ_BLOCKS, &rb);
@@ -72,7 +74,7 @@ static uint32_t fat32_vfs_read(vfs_node_t *node, uint64_t offset, uint32_t size,
     uint32_t cur_offset = 0;
 
     // Skip clusters until reaching offset
-    while (cluster < 0x0FFFFFF8 && cur_offset + fs->bytes_per_cluster <= offset) {
+    while (cluster >= 2 && cluster < 0x0FFFFFF8 && cur_offset + fs->bytes_per_cluster <= offset) {
         cur_offset += fs->bytes_per_cluster;
         cluster = fat32_next_cluster(fs, cluster);
     }
@@ -81,7 +83,7 @@ static uint32_t fat32_vfs_read(vfs_node_t *node, uint64_t offset, uint32_t size,
     if (!clus_buf) return (uint32_t)-1;
 
     size_t bytes_done = 0;
-    while (cluster < 0x0FFFFFF8 && bytes_done < to_read) {
+    while (cluster >= 2 && cluster < 0x0FFFFFF8 && bytes_done < to_read) {
         if (fat32_read_cluster(fs, cluster, clus_buf) != 0) break;
 
         size_t clus_off = (offset + bytes_done) - cur_offset;
@@ -137,7 +139,7 @@ static vfs_node_t *fat32_vfs_finddir(vfs_node_t *dir, char *name) {
     uint8_t *clus_buf = (uint8_t *)kmalloc(fs->bytes_per_cluster);
     if (!clus_buf) return NULL;
 
-    while (cluster < 0x0FFFFFF8) {
+    while (cluster >= 2 && cluster < 0x0FFFFFF8) {
         if (fat32_read_cluster(fs, cluster, clus_buf) != 0) break;
 
         fat32_dirent_t *d = (fat32_dirent_t *)clus_buf;
@@ -174,7 +176,7 @@ static int fat32_vfs_readdir(vfs_node_t *dir, uint32_t index, struct dirent *ent
     if (!clus_buf) return 0;
 
     uint32_t count = 0;
-    while (cluster < 0x0FFFFFF8) {
+    while (cluster >= 2 && cluster < 0x0FFFFFF8) {
         if (fat32_read_cluster(fs, cluster, clus_buf) != 0) break;
 
         fat32_dirent_t *d = (fat32_dirent_t *)clus_buf;
@@ -214,7 +216,8 @@ int fat32_mount(vfs_node_t *mount_point, vfs_node_t *device_node) {
     }
 
     fat32_bpb_t *bpb = (fat32_bpb_t *)sector0;
-    if (bpb->bytes_per_sector != 512 || bpb->sectors_per_cluster == 0 || bpb->fat_size_32 == 0) {
+    if (bpb->bytes_per_sector != 512 || bpb->sectors_per_cluster == 0 ||
+        bpb->fat_size_32 == 0 || bpb->root_cluster < 2) {
         klog(LOG_ERROR, "FAT32: Device does not contain a valid FAT32 filesystem.");
         return -1;
     }
@@ -228,8 +231,16 @@ int fat32_mount(vfs_node_t *mount_point, vfs_node_t *device_node) {
     fs->sectors_per_cluster = bpb->sectors_per_cluster;
     fs->root_cluster = bpb->root_cluster;
     fs->bytes_per_cluster = bpb->sectors_per_cluster * 512;
+    if (fs->bytes_per_cluster == 0) {
+        kfree(fs);
+        return -1;
+    }
 
     fat32_file_info_t *root_fi = (fat32_file_info_t *)kmalloc(sizeof(fat32_file_info_t));
+    if (!root_fi) {
+        kfree(fs);
+        return -1;
+    }
     root_fi->fs = fs;
     root_fi->first_cluster = fs->root_cluster;
     root_fi->size_bytes = 0;

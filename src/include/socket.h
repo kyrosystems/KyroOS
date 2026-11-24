@@ -37,10 +37,11 @@ struct timeval {
 
 // Socket states
 typedef enum {
-    SOCK_STATE_CLOSED,
+    SOCK_STATE_CREATED,
     SOCK_STATE_BOUND,
     SOCK_STATE_CONNECTED, // For TCP
-    SOCK_STATE_LISTENING // For TCP
+    SOCK_STATE_LISTENING, // For TCP
+    SOCK_STATE_CLOSED
 } socket_state_t;
 
 // Forward declaration for generic socket_t in fd_entry_t

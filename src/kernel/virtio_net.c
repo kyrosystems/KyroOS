@@ -80,7 +80,13 @@ static void virtio_net_poll(net_dev_t *dev, uint8_t *buffer, size_t size) {
         uint32_t id = vn->rx_used->ring[cur_used].id;
         uint32_t total_len = vn->rx_used->ring[cur_used].len;
 
-        if (total_len > sizeof(virtio_net_hdr_t)) {
+        if (id >= vn->rx_qsize) {
+            dev->rx_errors++;
+            vn->rx_last_used_idx++;
+            continue;
+        }
+
+        if (total_len > sizeof(virtio_net_hdr_t) && total_len <= 2048) {
             uint32_t pkt_len = total_len - sizeof(virtio_net_hdr_t);
             uint8_t *pkt_data = vn->rx_buffers + (id * 2048) + sizeof(virtio_net_hdr_t);
 
@@ -95,11 +101,13 @@ static void virtio_net_poll(net_dev_t *dev, uint8_t *buffer, size_t size) {
                     ip_handle_packet(dev, pkt_data + sizeof(ethernet_header_t), pkt_len - sizeof(ethernet_header_t));
                 }
             }
+        } else if (total_len > 2048) {
+            dev->rx_errors++;
         }
 
         // Put buffer back into avail ring
         uint16_t avail_idx = vn->rx_avail->idx;
-        vn->rx_avail->ring[avail_idx % vn->rx_qsize] = id;
+        vn->rx_avail->ring[avail_idx % vn->rx_qsize] = (uint16_t)id;
         __asm__ volatile("" ::: "memory");
         vn->rx_avail->idx = avail_idx + 1;
 
@@ -127,8 +135,18 @@ void virtio_net_init(pci_device_t *dev) {
     // Configure RX Queue (Queue 0)
     outw(g_virtio_net.io_base + VIRTIO_REG_QUEUE_SELECT, 0);
     g_virtio_net.rx_qsize = inw(g_virtio_net.io_base + VIRTIO_REG_QUEUE_SIZE);
+    if (g_virtio_net.rx_qsize == 0) {
+        klog(LOG_ERROR, "virtio-net: RX queue size is 0.");
+        outb(g_virtio_net.io_base + VIRTIO_REG_DEVICE_STATUS, 0);
+        return;
+    }
 
     void *rx_q_phys = pmm_alloc_pages(2);
+    if (!rx_q_phys) {
+        klog(LOG_ERROR, "virtio-net: Failed to allocate RX queue.");
+        outb(g_virtio_net.io_base + VIRTIO_REG_DEVICE_STATUS, 0);
+        return;
+    }
     void *rx_q_virt = vmm_phys_to_virt(rx_q_phys);
     memset(rx_q_virt, 0, PAGE_SIZE * 2);
 
@@ -137,12 +155,44 @@ void virtio_net_init(pci_device_t *dev) {
     uint64_t rx_used_off = ((uint64_t)g_virtio_net.rx_avail + sizeof(vring_avail_t) + g_virtio_net.rx_qsize * sizeof(uint16_t) + 4095) & ~4095ULL;
     g_virtio_net.rx_used = (vring_used_t *)rx_used_off;
 
-    outl(g_virtio_net.io_base + VIRTIO_REG_QUEUE_ADDRESS, (uint32_t)((uint64_t)rx_q_phys >> 12));
-
     // Allocate RX packet buffers
-    void *rx_bufs_phys = pmm_alloc_pages((g_virtio_net.rx_qsize * 2048 + PAGE_SIZE - 1) / PAGE_SIZE);
+    size_t rx_buf_pages = ((size_t)g_virtio_net.rx_qsize * 2048 + PAGE_SIZE - 1) / PAGE_SIZE;
+    void *rx_bufs_phys = pmm_alloc_pages(rx_buf_pages);
+    if (!rx_bufs_phys) {
+        klog(LOG_ERROR, "virtio-net: Failed to allocate RX buffers.");
+        for (size_t p = 0; p < 2; p++) pmm_free_page((uint8_t *)rx_q_phys + p * PAGE_SIZE);
+        outb(g_virtio_net.io_base + VIRTIO_REG_DEVICE_STATUS, 0);
+        return;
+    }
     g_virtio_net.rx_buffers = (uint8_t *)vmm_phys_to_virt(rx_bufs_phys);
-    memset(g_virtio_net.rx_buffers, 0, g_virtio_net.rx_qsize * 2048);
+    memset(g_virtio_net.rx_buffers, 0, (size_t)g_virtio_net.rx_qsize * 2048);
+
+    // Configure TX Queue (Queue 1)
+    outw(g_virtio_net.io_base + VIRTIO_REG_QUEUE_SELECT, 1);
+    g_virtio_net.tx_qsize = inw(g_virtio_net.io_base + VIRTIO_REG_QUEUE_SIZE);
+    if (g_virtio_net.tx_qsize == 0) {
+        klog(LOG_ERROR, "virtio-net: TX queue size is 0.");
+        for (size_t p = 0; p < rx_buf_pages; p++) pmm_free_page((uint8_t *)rx_bufs_phys + p * PAGE_SIZE);
+        for (size_t p = 0; p < 2; p++) pmm_free_page((uint8_t *)rx_q_phys + p * PAGE_SIZE);
+        outb(g_virtio_net.io_base + VIRTIO_REG_DEVICE_STATUS, 0);
+        return;
+    }
+
+    void *tx_q_phys = pmm_alloc_pages(2);
+    if (!tx_q_phys) {
+        klog(LOG_ERROR, "virtio-net: Failed to allocate TX queue.");
+        for (size_t p = 0; p < rx_buf_pages; p++) pmm_free_page((uint8_t *)rx_bufs_phys + p * PAGE_SIZE);
+        for (size_t p = 0; p < 2; p++) pmm_free_page((uint8_t *)rx_q_phys + p * PAGE_SIZE);
+        outb(g_virtio_net.io_base + VIRTIO_REG_DEVICE_STATUS, 0);
+        return;
+    }
+    void *tx_q_virt = vmm_phys_to_virt(tx_q_phys);
+    memset(tx_q_virt, 0, PAGE_SIZE * 2);
+
+    g_virtio_net.tx_desc = (vring_desc_t *)tx_q_virt;
+    g_virtio_net.tx_avail = (vring_avail_t *)((uint8_t *)tx_q_virt + g_virtio_net.tx_qsize * sizeof(vring_desc_t));
+    uint64_t tx_used_off = ((uint64_t)g_virtio_net.tx_avail + sizeof(vring_avail_t) + g_virtio_net.tx_qsize * sizeof(uint16_t) + 4095) & ~4095ULL;
+    g_virtio_net.tx_used = (vring_used_t *)tx_used_off;
 
     for (uint16_t i = 0; i < g_virtio_net.rx_qsize; i++) {
         g_virtio_net.rx_desc[i].addr = (uint64_t)vmm_virt_to_phys(g_virtio_net.rx_buffers + (i * 2048));
@@ -154,19 +204,9 @@ void virtio_net_init(pci_device_t *dev) {
     g_virtio_net.rx_avail->idx = g_virtio_net.rx_qsize;
     g_virtio_net.rx_last_used_idx = 0;
 
-    // Configure TX Queue (Queue 1)
+    outw(g_virtio_net.io_base + VIRTIO_REG_QUEUE_SELECT, 0);
+    outl(g_virtio_net.io_base + VIRTIO_REG_QUEUE_ADDRESS, (uint32_t)((uint64_t)rx_q_phys >> 12));
     outw(g_virtio_net.io_base + VIRTIO_REG_QUEUE_SELECT, 1);
-    g_virtio_net.tx_qsize = inw(g_virtio_net.io_base + VIRTIO_REG_QUEUE_SIZE);
-
-    void *tx_q_phys = pmm_alloc_pages(2);
-    void *tx_q_virt = vmm_phys_to_virt(tx_q_phys);
-    memset(tx_q_virt, 0, PAGE_SIZE * 2);
-
-    g_virtio_net.tx_desc = (vring_desc_t *)tx_q_virt;
-    g_virtio_net.tx_avail = (vring_avail_t *)((uint8_t *)tx_q_virt + g_virtio_net.tx_qsize * sizeof(vring_desc_t));
-    uint64_t tx_used_off = ((uint64_t)g_virtio_net.tx_avail + sizeof(vring_avail_t) + g_virtio_net.tx_qsize * sizeof(uint16_t) + 4095) & ~4095ULL;
-    g_virtio_net.tx_used = (vring_used_t *)tx_used_off;
-
     outl(g_virtio_net.io_base + VIRTIO_REG_QUEUE_ADDRESS, (uint32_t)((uint64_t)tx_q_phys >> 12));
 
     // Driver ready

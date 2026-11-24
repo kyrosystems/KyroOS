@@ -5,9 +5,12 @@
 #include "isr.h"
 #include "kstring.h"
 #include "port_io.h"
+#include "spinlock.h"
 #include <stdbool.h>
 #include <stdarg.h>
 #include <stdint.h>
+
+extern int vksnprintf(char *buffer, size_t size, const char *format, va_list args);
 
 #define FB_DEFAULT_FG_COLOR 0xFFFFFFFF
 #define FB_DEFAULT_BG_COLOR 0x00000000
@@ -27,15 +30,20 @@ static bool cursor_drawn = false;
 static uint32_t cursor_saved_x = 0;
 static uint32_t cursor_saved_y = 0;
 static uint32_t cursor_saved_pixels[16];
+static spinlock_t console_lock = {0};
 log_level_t current_log_level = LOG_INFO;
 
+static void console_clear_unlocked(bool draw_cursor);
+
 void log_update_console_dimensions(void) {
+  uint64_t iflags = spinlock_acquire_irqsave(&console_lock);
   const fb_info_t *info = fb_get_info();
   if (info) {
     console_cols = info->width / char_width;
     console_rows = info->height / char_height;
   }
-  console_clear();
+  console_clear_unlocked(true);
+  spinlock_release_irqrestore(&console_lock, iflags);
 }
 
 static void serial_putchar(char c) {
@@ -55,13 +63,36 @@ void serial_print_hex(uint64_t value) {
 }
 
 void log_set_fg_color(uint32_t color) {
+  uint64_t iflags = spinlock_acquire_irqsave(&console_lock);
   current_fg_color = color;
+  spinlock_release_irqrestore(&console_lock, iflags);
 }
 
-void klog_draw_cursor(void) {
-  if (!cursor_visible || cursor_drawn) return;
+static void klog_clear_cursor_unlocked(bool do_flush) {
+  if (!cursor_drawn) return;
+  if (console_cols > 0 && console_rows > 0 &&
+      cursor_saved_x < console_cols && cursor_saved_y < console_rows) {
+    uint32_t px = cursor_saved_x * char_width;
+    uint32_t py = cursor_saved_y * char_height;
+    for (uint32_t dy = 0; dy < 2; dy++) {
+      for (uint32_t dx = 0; dx < char_width; dx++) {
+        fb_set_pixel(px + dx, py + char_height - 2 + dy,
+                     cursor_saved_pixels[dy * char_width + dx]);
+      }
+    }
+    if (do_flush) fb_flush_dirty();
+  }
+  cursor_drawn = false;
+}
+
+static void klog_draw_cursor_unlocked(bool do_flush) {
+  if (!cursor_visible) return;
   if (console_cols == 0 || console_rows == 0) return;
   if (console_x >= console_cols || console_y >= console_rows) return;
+  if (cursor_drawn) {
+    if (cursor_saved_x == console_x && cursor_saved_y == console_y) return;
+    klog_clear_cursor_unlocked(false);
+  }
 
   uint32_t px = console_x * char_width;
   uint32_t py = console_y * char_height;
@@ -74,28 +105,31 @@ void klog_draw_cursor(void) {
   cursor_saved_x = console_x;
   cursor_saved_y = console_y;
   cursor_drawn = true;
-  fb_flush_dirty();
+  if (do_flush) fb_flush_dirty();
+}
+
+void klog_draw_cursor(void) {
+  uint64_t iflags = spinlock_acquire_irqsave(&console_lock);
+  klog_draw_cursor_unlocked(true);
+  spinlock_release_irqrestore(&console_lock, iflags);
 }
 
 void klog_clear_cursor(void) {
-  if (!cursor_drawn) return;
-  uint32_t px = cursor_saved_x * char_width;
-  uint32_t py = cursor_saved_y * char_height;
-  for (uint32_t dy = 0; dy < 2; dy++) {
-    for (uint32_t dx = 0; dx < char_width; dx++) {
-      fb_set_pixel(px + dx, py + char_height - 2 + dy, cursor_saved_pixels[dy * char_width + dx]);
-    }
-  }
-  cursor_drawn = false;
-  fb_flush_dirty();
+  uint64_t iflags = spinlock_acquire_irqsave(&console_lock);
+  klog_clear_cursor_unlocked(true);
+  spinlock_release_irqrestore(&console_lock, iflags);
 }
 
 void klog_clear_line(void) {
-  klog_clear_cursor();
-  uint32_t bg = sgr_invert ? current_fg_color : current_bg_color;
-  fb_draw_rect(0, console_y * char_height, console_cols * char_width, char_height, bg);
+  uint64_t iflags = spinlock_acquire_irqsave(&console_lock);
+  klog_clear_cursor_unlocked(false);
+  if (console_cols > 0 && console_y < console_rows) {
+    uint32_t bg = sgr_invert ? current_fg_color : current_bg_color;
+    fb_draw_rect(0, console_y * char_height, console_cols * char_width, char_height, bg);
+  }
   console_x = 0;
-  klog_draw_cursor();
+  klog_draw_cursor_unlocked(true);
+  spinlock_release_irqrestore(&console_lock, iflags);
 }
 
 /* Comprehensive ANSI CSI parser for terminal TUIs (nano, edit, sh, sysmon):
@@ -125,6 +159,11 @@ static void ansi_consume(char c) {
   }
 
   /* ansi_state == 2: collecting CSI */
+  if (c == 0x1B) {
+    ansi_state = 1;
+    return;
+  }
+
   if (c == '?') {
     csi_is_private = true;
     return;
@@ -145,9 +184,14 @@ static void ansi_consume(char c) {
     return;
   }
 
+  /* Private/intermediate bytes (0x20..0x2F, 0x3C..0x3F) */
+  if ((c >= 0x20 && c <= 0x2F) || (c >= 0x3C && c <= 0x3F)) {
+    return;
+  }
+
   /* Final byte (@ through ~) terminates CSI */
   if (c >= '@' && c <= '~') {
-    klog_clear_cursor();
+    klog_clear_cursor_unlocked(false);
     if (c == 'H' || c == 'f') { // Cursor Position: \033[row;colH
       int row = (csi_has_param[0] && csi_params[0] > 0) ? csi_params[0] : 1;
       int col = (csi_param_count >= 1 && csi_has_param[1] && csi_params[1] > 0) ? csi_params[1] : 1;
@@ -170,14 +214,14 @@ static void ansi_consume(char c) {
     } else if (c == 'J') { // Erase in Display: \033[2J
       int mode = csi_has_param[0] ? csi_params[0] : 0;
       if (mode == 2 || mode == 3) {
-        console_clear();
+        console_clear_unlocked(false);
       } else if (mode == 0) {
         uint32_t bg = sgr_invert ? current_fg_color : current_bg_color;
-        if (console_x < console_cols) {
+        if (console_x < console_cols && console_y < console_rows) {
           fb_draw_rect(console_x * char_width, console_y * char_height,
                        (console_cols - console_x) * char_width, char_height, bg);
         }
-        if (console_y + 1 < console_rows) {
+        if (console_y + 1 < console_rows && console_cols > 0) {
           fb_draw_rect(0, (console_y + 1) * char_height,
                        console_cols * char_width, (console_rows - (console_y + 1)) * char_height, bg);
         }
@@ -185,16 +229,18 @@ static void ansi_consume(char c) {
     } else if (c == 'K') { // Erase in Line: \033[K, \033[2K
       int mode = csi_has_param[0] ? csi_params[0] : 0;
       uint32_t bg = sgr_invert ? current_fg_color : current_bg_color;
-      if (mode == 0) {
-        if (console_x < console_cols) {
-          fb_draw_rect(console_x * char_width, console_y * char_height,
-                       (console_cols - console_x) * char_width, char_height, bg);
+      if (console_cols > 0 && console_y < console_rows) {
+        if (mode == 0) {
+          if (console_x < console_cols) {
+            fb_draw_rect(console_x * char_width, console_y * char_height,
+                         (console_cols - console_x) * char_width, char_height, bg);
+          }
+        } else if (mode == 1) {
+          uint32_t w = (console_x + 1 < console_cols) ? (console_x + 1) : console_cols;
+          fb_draw_rect(0, console_y * char_height, w * char_width, char_height, bg);
+        } else if (mode == 2) {
+          fb_draw_rect(0, console_y * char_height, console_cols * char_width, char_height, bg);
         }
-      } else if (mode == 1) {
-        uint32_t w = (console_x + 1 < console_cols) ? (console_x + 1) : console_cols;
-        fb_draw_rect(0, console_y * char_height, w * char_width, char_height, bg);
-      } else if (mode == 2) {
-        fb_draw_rect(0, console_y * char_height, console_cols * char_width, char_height, bg);
       }
     } else if (c == 'm') { // SGR attributes: \033[m
       int total = csi_has_param[0] ? (csi_param_count + 1) : 1;
@@ -241,15 +287,18 @@ static void ansi_consume(char c) {
     } else if (c == 'h' || c == 'l') { // Set / Reset mode
       if (csi_is_private && csi_has_param[0] && csi_params[0] == 25) {
         cursor_visible = (c == 'h');
-        if (!cursor_visible) klog_clear_cursor();
+        if (!cursor_visible) klog_clear_cursor_unlocked(false);
       }
     }
     ansi_state = 0;
     return;
   }
+
+  /* Abort malformed CSI sequence (e.g. control character) so state cannot stick */
+  ansi_state = 0;
 }
 
-void klog_putchar(char c) {
+static void klog_putchar_unlocked(char c) {
   if (ansi_state != 0) { ansi_consume(c); return; }
 
   if (c == 0x1B) {
@@ -257,7 +306,7 @@ void klog_putchar(char c) {
     return;
   }
 
-  klog_clear_cursor();
+  klog_clear_cursor_unlocked(false);
 
   if (c == '\n') {
     console_x = 0;
@@ -272,6 +321,17 @@ void klog_putchar(char c) {
                    char_width, char_height, bg);
     }
   } else {
+    if (console_cols > 0 && console_x >= console_cols) {
+      console_x = 0;
+      console_y++;
+    }
+    if (console_rows > 0 && console_y >= console_rows) {
+      fb_copy_region(char_height, 0, (console_rows - 1) * char_height);
+      uint32_t bg = sgr_invert ? current_fg_color : current_bg_color;
+      fb_draw_rect(0, (console_rows - 1) * char_height,
+                   console_cols * char_width, char_height, bg);
+      console_y = console_rows - 1;
+    }
     uint32_t eff_fg = sgr_invert ? current_bg_color : current_fg_color;
     uint32_t eff_bg = sgr_invert ? current_fg_color : current_bg_color;
     fb_draw_char(c, console_x * char_width, console_y * char_height,
@@ -292,36 +352,54 @@ void klog_putchar(char c) {
   }
 }
 
+void klog_putchar(char c) {
+  uint64_t iflags = spinlock_acquire_irqsave(&console_lock);
+  klog_putchar_unlocked(c);
+  spinlock_release_irqrestore(&console_lock, iflags);
+}
+
 void klog_print_str(const char *s, bool do_flush) {
-  while (*s) klog_putchar(*s++);
+  if (!s) return;
+  uint64_t iflags = spinlock_acquire_irqsave(&console_lock);
+  while (*s) klog_putchar_unlocked(*s++);
   if (do_flush) {
-    klog_draw_cursor();
+    klog_draw_cursor_unlocked(false);
     fb_flush_dirty();
   }
+  spinlock_release_irqrestore(&console_lock, iflags);
 }
 
 void klog_write(const char *s, size_t len, bool do_flush) {
   if (!s) return;
+  uint64_t iflags = spinlock_acquire_irqsave(&console_lock);
   for (size_t i = 0; i < len; i++) {
-    klog_putchar(s[i]);
+    klog_putchar_unlocked(s[i]);
   }
   if (do_flush) {
-    klog_draw_cursor();
+    klog_draw_cursor_unlocked(false);
     fb_flush_dirty();
   }
+  spinlock_release_irqrestore(&console_lock, iflags);
 }
 
-void console_clear(void) {
-  klog_clear_cursor();
+static void console_clear_unlocked(bool draw_cursor) {
+  klog_clear_cursor_unlocked(false);
   uint32_t bg = sgr_invert ? current_fg_color : current_bg_color;
   fb_clear(bg);
   console_x = 0;
   console_y = 0;
   fb_flush();
-  klog_draw_cursor();
+  if (draw_cursor) klog_draw_cursor_unlocked(true);
+}
+
+void console_clear(void) {
+  uint64_t iflags = spinlock_acquire_irqsave(&console_lock);
+  console_clear_unlocked(true);
+  spinlock_release_irqrestore(&console_lock, iflags);
 }
 
 void log_init(void) {
+  spinlock_init(&console_lock);
   outb(COM1 + 1, 0x00);
   outb(COM1 + 3, 0x80);
   outb(COM1 + 0, 0x03);
@@ -335,17 +413,20 @@ void klog(log_level_t level, const char *fmt, ...) {
   char buf[256];
   va_list args;
   va_start(args, fmt);
-  vksprintf(buf, fmt, args);
+  vksnprintf(buf, sizeof(buf), fmt, args);
   va_end(args);
+
+  uint64_t iflags = spinlock_acquire_irqsave(&console_lock);
   serial_print(buf);
   serial_print("\n");
 
-  if (level == LOG_DEBUG) return;
-  if (epstein == 1 || level >= LOG_WARN) {
-    klog_print_str(buf, false);
-    klog_putchar('\n');
+  if (level != LOG_DEBUG && (epstein == 1 || level >= LOG_WARN)) {
+    const char *p = buf;
+    while (*p) klog_putchar_unlocked(*p++);
+    klog_putchar_unlocked('\n');
     fb_flush_dirty();
   }
+  spinlock_release_irqrestore(&console_lock, iflags);
 }
 
 void log_get_entries(char *entries, int *count, int num_to_get) {
@@ -357,12 +438,19 @@ void log_get_entries(char *entries, int *count, int num_to_get) {
 void panic(const char *message, struct registers *regs) {
   __asm__ __volatile__("cli");
   (void)regs;
+  cursor_drawn = false;
+  ansi_state = 0;
   fb_set_graphics_owner(0);
   fb_clear(0xFF770000);
   console_x = 0;
   console_y = 0;
-  klog_print_str("PANIC: ", false);
-  klog_print_str(message, true);
+  const char *prefix = "PANIC: ";
+  while (*prefix) klog_putchar_unlocked(*prefix++);
+  if (message) {
+    while (*message) klog_putchar_unlocked(*message++);
+  }
+  klog_draw_cursor_unlocked(false);
+  fb_flush_dirty();
   for (;;) __asm__ __volatile__("hlt");
 }
 

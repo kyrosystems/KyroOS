@@ -187,35 +187,87 @@ int vfs_create(vfs_node_t *parent, const char *name, uint16_t mode) {
     return -1;
 }
 
-// Legacy wrappers kept for compatibility with existing callers (syscall.c,
-// ide.c). They route through the victim node's remove/rmdir ops with
-// permission checks; -ENOSYS when the filesystem lacks the op.
+// Resolve parent directory and basename for path relative to root/parent.
+// Returns 0 on success, -errno on failure.
+static int vfs_resolve_parent_and_name(vfs_node_t *parent, const char *path,
+                                       vfs_node_t **out_parent, char *out_name,
+                                       size_t out_name_sz) {
+    if (!parent || !path || path[0] == '\0') return -ENOENT;
+    size_t plen = strlen(path);
+    if (plen >= MAX_FILENAME_LEN) return -ENAMETOOLONG;
+
+    char buf[MAX_FILENAME_LEN];
+    memcpy(buf, path, plen + 1);
+    while (plen > 1 && buf[plen - 1] == '/') {
+        buf[--plen] = '\0';
+    }
+    if (strcmp(buf, "/") == 0) return -EBUSY;
+
+    char *last_slash = strrchr(buf, '/');
+    vfs_node_t *parent_dir;
+    const char *name;
+    if (!last_slash) {
+        parent_dir = parent;
+        name = buf;
+    } else if (last_slash == buf) {
+        parent_dir = vfs_root;
+        name = last_slash + 1;
+    } else {
+        *last_slash = '\0';
+        parent_dir = vfs_resolve_path(parent, buf);
+        name = last_slash + 1;
+    }
+
+    if (!parent_dir) return -ENOENT;
+    if (!(parent_dir->flags & VFS_DIRECTORY)) return -ENOTDIR;
+    if (name[0] == '\0' || strcmp(name, ".") == 0 || strcmp(name, "..") == 0) return -EINVAL;
+    if (strlen(name) >= out_name_sz) return -ENAMETOOLONG;
+
+    strncpy(out_name, name, out_name_sz - 1);
+    out_name[out_name_sz - 1] = '\0';
+    *out_parent = parent_dir;
+    return 0;
+}
+
 int vfs_remove(vfs_node_t *parent, const char *path) {
-    if (!parent) return -ENOENT;
-    int ac = vfs_check_parent_write(parent);
+    vfs_node_t *parent_dir = NULL;
+    char basename[MAX_FILENAME_LEN];
+    int rc = vfs_resolve_parent_and_name(parent, path, &parent_dir, basename, sizeof(basename));
+    if (rc != 0) return rc;
+
+    int ac = vfs_check_parent_write(parent_dir);
     if (ac != 0) return ac;
-    vfs_node_t *victim = vfs_resolve_path(parent, path);
+
+    vfs_node_t *victim = vfs_finddir(parent_dir, basename);
     if (!victim) return -ENOENT;
+
     thread_t *caller = get_current_thread();
-    if ((parent->mode & 01000) && caller && caller->euid != 0 &&
-        caller->euid != parent->uid && caller->euid != victim->uid) return -EPERM;
+    if ((parent_dir->mode & 01000) && caller && caller->euid != 0 &&
+        caller->euid != parent_dir->uid && caller->euid != victim->uid) return -EPERM;
+
     if (victim->flags & VFS_DIRECTORY) return -EISDIR;
-    if (victim->remove) return victim->remove(victim, (char *)path);
+    if (parent_dir->remove) return parent_dir->remove(parent_dir, basename);
     return -ENOSYS;
 }
 
 int vfs_rmdir(vfs_node_t *parent, const char *path, uint16_t mode) {
-    (void)mode;
-    if (!parent) return -ENOENT;
-    int ac = vfs_check_parent_write(parent);
+    vfs_node_t *parent_dir = NULL;
+    char basename[MAX_FILENAME_LEN];
+    int rc = vfs_resolve_parent_and_name(parent, path, &parent_dir, basename, sizeof(basename));
+    if (rc != 0) return rc;
+
+    int ac = vfs_check_parent_write(parent_dir);
     if (ac != 0) return ac;
-    vfs_node_t *victim = vfs_resolve_path(parent, path);
+
+    vfs_node_t *victim = vfs_finddir(parent_dir, basename);
     if (!victim) return -ENOENT;
+
     thread_t *caller = get_current_thread();
-    if ((parent->mode & 01000) && caller && caller->euid != 0 &&
-        caller->euid != parent->uid && caller->euid != victim->uid) return -EPERM;
+    if ((parent_dir->mode & 01000) && caller && caller->euid != 0 &&
+        caller->euid != parent_dir->uid && caller->euid != victim->uid) return -EPERM;
+
     if (!(victim->flags & VFS_DIRECTORY)) return -ENOTDIR;
-    if (victim->rmdir) return victim->rmdir(victim, (char *)path, mode);
+    if (parent_dir->rmdir) return parent_dir->rmdir(parent_dir, basename, mode);
     return -ENOSYS;
 }
 

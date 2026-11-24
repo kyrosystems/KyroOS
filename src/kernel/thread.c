@@ -96,7 +96,7 @@ thread_t *thread_create_userspace(uint64_t entry_point, pml4_t *pml4,
                                   const char *name) {
   klog(LOG_INFO, "thread_create_userspace: entered");
   uint64_t iflags = save_interrupts_and_disable();
-  if (!pml4 || argc < 0 || (argc > 0 && !argv)) {
+  if (!pml4 || argc < 0 || argc > 64 || (argc > 0 && !argv)) {
     restore_interrupts(iflags);
     return NULL;
   }
@@ -140,6 +140,43 @@ thread_t *thread_create_userspace(uint64_t entry_point, pml4_t *pml4,
     restore_interrupts(iflags);
     return NULL;
   }
+
+  uint64_t *user_argv = (uint64_t *)kmalloc((size_t)(argc + 1) * sizeof(uint64_t));
+  if (!user_argv) {
+    goto fail_cleanup;
+  }
+
+  uint64_t user_sp = USER_STACK_TOP;
+  for (int i = 0; i < argc; i++) {
+    if (!argv[i]) goto fail_cleanup;
+    size_t len = strlen(argv[i]) + 1;
+    if (len > user_sp - stack_base) goto fail_cleanup;
+    user_sp = (user_sp - len) & ~0xFULL;
+    if (user_sp < stack_base) goto fail_cleanup;
+    vmm_memcpy_to_userspace(pml4, (void *)user_sp, argv[i], len);
+    user_argv[i] = user_sp;
+  }
+  user_argv[argc] = 0;
+  size_t argv_bytes = (size_t)(argc + 1) * sizeof(uint64_t);
+  if (argv_bytes > user_sp - stack_base) goto fail_cleanup;
+  user_sp = (user_sp - argv_bytes) & ~0xFULL;
+  if (user_sp < stack_base) goto fail_cleanup;
+  vmm_memcpy_to_userspace(pml4, (void *)user_sp, user_argv, argv_bytes);
+  kfree(user_argv);
+  user_argv = NULL;
+
+  uint64_t argv_ptr = user_sp;
+  if (sizeof(uint64_t) > user_sp - stack_base) goto fail_cleanup;
+  user_sp = (user_sp - sizeof(uint64_t)) & ~0xFULL;
+  if (user_sp < stack_base) goto fail_cleanup;
+  vmm_memcpy_to_userspace(pml4, (void *)user_sp, &argv_ptr, sizeof(argv_ptr));
+
+  if (sizeof(uint64_t) > user_sp - stack_base) goto fail_cleanup;
+  user_sp = (user_sp - sizeof(uint64_t)) & ~0xFULL;
+  if (user_sp < stack_base) goto fail_cleanup;
+  uint64_t argc64 = (uint64_t)argc;
+  vmm_memcpy_to_userspace(pml4, (void *)user_sp, &argc64, sizeof(argc64));
+
   thread->id = next_thread_id++;
   thread->state = THREAD_READY;
   thread->program_break = program_break;
@@ -175,26 +212,6 @@ thread_t *thread_create_userspace(uint64_t entry_point, pml4_t *pml4,
       thread->fd_table[i].data.file.flags = i == 0 ? O_RDONLY : O_WRONLY;
     }
   }
-  uint64_t user_sp = USER_STACK_TOP;
-  uint64_t user_argv[argc + 1];
-  for (int i = 0; i < argc; i++) {
-    size_t len = strlen(argv[i]) + 1;
-    user_sp = (user_sp - len) & ~0xFULL;
-    if (user_sp < stack_base) panic("Userspace argv exceeds stack", NULL);
-    vmm_memcpy_to_userspace(pml4, (void *)user_sp, argv[i], len);
-    user_argv[i] = user_sp;
-  }
-  user_argv[argc] = 0;
-  user_sp = (user_sp - (argc + 1) * sizeof(uint64_t)) & ~0xFULL;
-  if (user_sp < stack_base) panic("Userspace argv exceeds stack", NULL);
-  vmm_memcpy_to_userspace(pml4, (void *)user_sp, user_argv,
-                          (argc + 1) * sizeof(uint64_t));
-  uint64_t argv_ptr = user_sp;
-  user_sp = (user_sp - sizeof(uint64_t)) & ~0xFULL;
-  vmm_memcpy_to_userspace(pml4, (void *)user_sp, &argv_ptr, sizeof(argv_ptr));
-  user_sp = (user_sp - sizeof(uint64_t)) & ~0xFULL;
-  uint64_t argc64 = (uint64_t)argc;
-  vmm_memcpy_to_userspace(pml4, (void *)user_sp, &argc64, sizeof(argc64));
   uint64_t *sp = (uint64_t *)((uint64_t)thread->stack + KERNEL_STACK_SIZE);
   klog(LOG_DEBUG, "Userspace IRETQ frame setup: entry_point = %p, USER_STACK_TOP = %p",
        (void *)entry_point, (void *)USER_STACK_TOP);
@@ -213,6 +230,18 @@ thread_t *thread_create_userspace(uint64_t entry_point, pml4_t *pml4,
   scheduler_add_thread(thread);
   restore_interrupts(iflags);
   return thread;
+
+fail_cleanup:
+  if (user_argv) kfree(user_argv);
+  if (thread->stack) kfree(thread->stack);
+  for (uint64_t i = 0; i < USER_STACK_SIZE; i += PAGE_SIZE) {
+    void *phys = vmm_unmap_page(pml4, (void *)(stack_base + i));
+    if (phys) pmm_free_page(phys);
+  }
+  vmm_destroy_address_space(pml4);
+  kfree(thread);
+  restore_interrupts(iflags);
+  return NULL;
 }
 
 extern void userspace_fork_entry(void);
@@ -267,7 +296,14 @@ thread_t *thread_fork(struct registers *parent_regs) {
 
   for (int i = 0; i < MAX_FILES; i++) {
     if (parent->fd_table[i].type != FD_TYPE_NONE) {
-      fd_duplicate(&child->fd_table[i], &parent->fd_table[i]);
+      if (fd_duplicate(&child->fd_table[i], &parent->fd_table[i]) < 0) {
+        for (int j = 0; j < i; j++) fd_release(&child->fd_table[j]);
+        kfree(child->stack);
+        vmm_destroy_address_space(child_pml4);
+        kfree(child);
+        restore_interrupts(iflags);
+        return NULL;
+      }
     }
   }
 

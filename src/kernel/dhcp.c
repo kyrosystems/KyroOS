@@ -33,6 +33,7 @@ static void dhcp_send_packet(uint8_t type, uint32_t requested_ip) {
         return;
     }
     dhcp_packet_t *pkt = kmalloc(sizeof(dhcp_packet_t));
+    if (!pkt) return;
     memset(pkt, 0, sizeof(dhcp_packet_t));
 
     pkt->op           = 1; /* Boot Request */
@@ -100,28 +101,35 @@ void dhcp_poll() {
 }
 
 void dhcp_handle_packet(dhcp_packet_t *pkt, size_t len) {
-    (void)len;
+    if (!pkt || len < offsetof(dhcp_packet_t, options)) return;
     if (pkt->op != 2 || __builtin_bswap32(pkt->xid) != dhcp_xid) return;
 
     uint8_t  msg_type   = 0;
     uint32_t opt_server = 0;
     uint32_t opt_subnet = 0;
     uint32_t opt_gw     = 0;
+    uint32_t opt_dns    = 0;
 
-    uint8_t *opt = pkt->options;
-    uint32_t opt_dns = 0;
-    while (*opt != 255 && (size_t)(opt - pkt->options) < sizeof(pkt->options)) {
-        uint8_t code = *opt++;
+    size_t opt_max = len - offsetof(dhcp_packet_t, options);
+    if (opt_max > sizeof(pkt->options)) opt_max = sizeof(pkt->options);
+
+    size_t pos = 0;
+    while (pos < opt_max) {
+        uint8_t code = pkt->options[pos++];
+        if (code == 255) break; /* End */
         if (code == 0) continue; /* PAD */
-        uint8_t olen = *opt++;
+        if (pos >= opt_max) break;
+        uint8_t olen = pkt->options[pos++];
+        if ((size_t)olen > opt_max - pos) break;
+        const uint8_t *odata = &pkt->options[pos];
         switch (code) {
-            case 53: msg_type   = opt[0];                      break; /* DHCP Msg Type */
-            case 54: memcpy(&opt_server, opt, 4);              break; /* Server ID */
-            case  1: memcpy(&opt_subnet, opt, 4);              break; /* Subnet Mask */
-            case  3: memcpy(&opt_gw,     opt, 4);              break; /* Router/GW */
-            case  6: if (olen >= 4) memcpy(&opt_dns, opt, 4); break; /* DNS Server */
+            case 53: if (olen >= 1) msg_type = odata[0];           break; /* DHCP Msg Type */
+            case 54: if (olen >= 4) memcpy(&opt_server, odata, 4); break; /* Server ID */
+            case  1: if (olen >= 4) memcpy(&opt_subnet, odata, 4); break; /* Subnet Mask */
+            case  3: if (olen >= 4) memcpy(&opt_gw,     odata, 4); break; /* Router/GW */
+            case  6: if (olen >= 4) memcpy(&opt_dns,    odata, 4); break; /* DNS Server */
         }
-        opt += olen;
+        pos += olen;
     }
 
     if (msg_type == 2 && dhcp_state == DHCP_STATE_SELECTING) { /* OFFER */

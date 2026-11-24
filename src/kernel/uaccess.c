@@ -77,7 +77,7 @@ int validate_user_write(void *user_dst, size_t size) {
     return -EFAULT;
   }
 
-  // Check if pages are writable
+  // Check if pages are writable (resolving COW pages on demand)
   pml4_t *pml4 = vmm_get_current_pml4();
   uint64_t addr = (uint64_t)user_dst;
   uint64_t end_addr = addr + size;
@@ -87,11 +87,20 @@ int validate_user_write(void *user_dst, size_t size) {
       uint64_t pd_index = (curr >> 21) & 0x1FF;
       uint64_t pt_index = (curr >> 12) & 0x1FF;
 
+      if (!(pml4->entries[pml4_index] & PAGE_PRESENT)) return -EFAULT;
       pdpt_t *pdpt = (pdpt_t *)vmm_phys_to_virt((void *)(pml4->entries[pml4_index] & PHYSICAL_ADDR_MASK));
+      if (!(pdpt->entries[pdpt_index] & PAGE_PRESENT)) return -EFAULT;
       pd_t *pd = (pd_t *)vmm_phys_to_virt((void *)(pdpt->entries[pdpt_index] & PHYSICAL_ADDR_MASK));
+      if (!(pd->entries[pd_index] & PAGE_PRESENT)) return -EFAULT;
       pt_t *pt = (pt_t *)vmm_phys_to_virt((void *)(pd->entries[pd_index] & PHYSICAL_ADDR_MASK));
+      if (!(pt->entries[pt_index] & PAGE_PRESENT)) return -EFAULT;
 
       if (!(pt->entries[pt_index] & PAGE_WRITE)) {
+          if ((pt->entries[pt_index] & PAGE_COW) && vmm_handle_page_fault(curr, 2)) {
+              if (pt->entries[pt_index] & PAGE_WRITE) {
+                  continue;
+              }
+          }
           klog(LOG_WARN, "UACCESS: Page at %p is not WRITABLE", (void*)curr);
           return -EFAULT;
       }
@@ -101,15 +110,35 @@ int validate_user_write(void *user_dst, size_t size) {
 }
 
 int copy_to_user(void *user_dst, const void *kernel_src, size_t size) {
+  if (size == 0) return 0;
   if (validate_user_write(user_dst, size) != 0) return -EFAULT;
   memcpy(user_dst, kernel_src, size);
   return 0;
 }
 
 int copy_user_string(char *dest, const char *src, size_t capacity) {
+  if (!dest || !src) return -EFAULT;
+  if (capacity == 0) return -ENAMETOOLONG;
+
+  uint64_t last_valid_page = ~0ULL;
   for (size_t i = 0; i < capacity; i++) {
-    if (copy_from_user(&dest[i], src + i, 1) != 0) return -EFAULT;
-    if (!dest[i]) return 0;
+    uint64_t addr = (uint64_t)(src + i);
+    if (addr >= USERSPACE_END || addr < (uint64_t)src) {
+      dest[0] = '\0';
+      return -EFAULT;
+    }
+    uint64_t curr_page = addr & ~(PAGE_SIZE - 1);
+    if (curr_page != last_valid_page) {
+      if (validate_user_pointer((const void *)addr, 1) != 0) {
+        dest[0] = '\0';
+        return -EFAULT;
+      }
+      last_valid_page = curr_page;
+    }
+    char c = src[i];
+    dest[i] = c;
+    if (c == '\0') return 0;
   }
+  dest[capacity - 1] = '\0';
   return -ENAMETOOLONG;
 }

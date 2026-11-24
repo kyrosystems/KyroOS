@@ -29,13 +29,16 @@ static uint16_t tcp_checksum(const void *data, size_t len,
     ph.protocol  = 0x06;
     ph.tcp_len   = __builtin_bswap16((uint16_t)len);
 
-    uint32_t  sum = 0;
-    uint16_t *ptr = (uint16_t *)&ph;
-    for (size_t i = 0; i < sizeof(pseudo_hdr_t) / 2; i++) sum += ptr[i];
+    uint32_t sum = 0;
+    uint16_t ph_words[sizeof(pseudo_hdr_t) / 2];
+    memcpy(ph_words, &ph, sizeof(ph));
+    for (size_t i = 0; i < sizeof(pseudo_hdr_t) / 2; i++) sum += ph_words[i];
 
-    ptr = (uint16_t *)data;
-    for (size_t i = 0; i < len / 2; i++) sum += ptr[i];
-    if (len % 2) sum += (uint32_t)((uint8_t *)data)[len - 1] << 8; // odd byte is high 
+    const uint8_t *p = (const uint8_t *)data;
+    for (size_t i = 0; i + 1 < len; i += 2) {
+        sum += (uint16_t)p[i] | ((uint16_t)p[i + 1] << 8);
+    }
+    if (len % 2) sum += (uint32_t)p[len - 1];
 
     while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
     return (uint16_t)~sum;
@@ -45,6 +48,7 @@ static void tcp_send_packet(tcp_tcb_t *tcb, uint8_t flags,
                             const void *data, size_t len) {
     size_t   tcp_len = sizeof(tcp_header_t) + len;
     uint8_t *buf     = kmalloc(tcp_len);
+    if (!buf) return;
     memset(buf, 0, tcp_len);
 
     tcp_header_t *hdr = (tcp_header_t *)buf;
@@ -72,10 +76,15 @@ void tcp_init() {
 
 tcp_tcb_t *tcp_create_tcb() {
     tcp_tcb_t *tcb = (tcp_tcb_t *)kmalloc(sizeof(tcp_tcb_t));
+    if (!tcb) return NULL;
     memset(tcb, 0, sizeof(tcp_tcb_t));
     tcb->state            = TCP_STATE_CLOSED;
     tcb->recv_buffer_size = 65536;
     tcb->recv_buffer      = kmalloc(tcb->recv_buffer_size);
+    if (!tcb->recv_buffer) {
+        kfree(tcb);
+        return NULL;
+    }
     tcb->recv_data_len    = 0;
     tcb->recv_read_idx    = 0;
     waitqueue_init(&tcb->connect_wq);
@@ -150,9 +159,11 @@ int tcp_recv_tcb(tcp_tcb_t *tcb, void *buf, size_t len) {
 void tcp_handle_packet(net_dev_t *net_dev, const ipv4_header_t *ip_hdr,
                        const uint8_t *packet, size_t size) {
     (void)net_dev;
-    if (size < sizeof(tcp_header_t)) return;
+    if (!packet || !ip_hdr || size < sizeof(tcp_header_t)) return;
 
     tcp_header_t *hdr      = (tcp_header_t *)packet;
+    size_t        hlen     = (size_t)(hdr->data_offset_res >> 4) * 4;
+    if (hlen < sizeof(tcp_header_t) || hlen > size) return;
     uint32_t      src_ip   = __builtin_bswap32(ip_hdr->src_ip);
     uint16_t      src_port = __builtin_bswap16(hdr->src_port);
     uint16_t      dst_port = __builtin_bswap16(hdr->dest_port);
@@ -177,7 +188,6 @@ void tcp_handle_packet(net_dev_t *net_dev, const ipv4_header_t *ip_hdr,
 
             } else if (tcb->state == TCP_STATE_ESTABLISHED) {
                 tcb->snd_una = ack;
-                size_t hlen        = (hdr->data_offset_res >> 4) * 4;
                 size_t payload_len = size - hlen;
 
                 if (payload_len > 0) {
@@ -229,36 +239,38 @@ void tcp_handle_packet(net_dev_t *net_dev, const ipv4_header_t *ip_hdr,
         }
 
         if (lsock) {
-            uint32_t seq = __builtin_bswap32(hdr->seq_num);
-            tcp_tcb_t *child_tcb = tcp_create_tcb();
-            if (child_tcb) {
-                child_tcb->local_ip = __builtin_bswap32(ip_hdr->dest_ip);
-                child_tcb->local_port = dst_port;
-                child_tcb->remote_ip = src_ip;
-                child_tcb->remote_port = src_port;
-                child_tcb->rcv_nxt = seq + 1;
-                uint32_t isn = 2000 + (seq ^ 0x5A5A);
-                child_tcb->snd_nxt = isn;
-                child_tcb->state = TCP_STATE_ESTABLISHED;
+            if (lsock->backlog_count >= 16) return;
 
-                tcp_send_packet(child_tcb, TCP_FLAG_SYN | TCP_FLAG_ACK, NULL, 0);
-                child_tcb->snd_nxt++;
+            socket_t *client_sock = sock_create(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+            if (!client_sock) return;
 
-                socket_t *client_sock = sock_create(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-                if (client_sock) {
-                    client_sock->state = SOCK_STATE_CONNECTED;
-                    client_sock->proto_data.tcp_tcb = child_tcb;
-                    client_sock->local_addr = lsock->local_addr;
-                    client_sock->remote_addr.sin_family = AF_INET;
-                    client_sock->remote_addr.sin_port = hdr->src_port;
-                    client_sock->remote_addr.sin_addr = ip_hdr->src_ip;
-
-                    if (lsock->backlog_count < 16) {
-                        lsock->backlog_queue[lsock->backlog_count++] = client_sock;
-                        waitqueue_wakeup_all(&lsock->waiting_threads);
-                    }
-                }
+            tcp_tcb_t *child_tcb = client_sock->proto_data.tcp_tcb;
+            if (!child_tcb) {
+                sock_close(client_sock);
+                return;
             }
+
+            uint32_t seq = __builtin_bswap32(hdr->seq_num);
+            child_tcb->local_ip = __builtin_bswap32(ip_hdr->dest_ip);
+            child_tcb->local_port = dst_port;
+            child_tcb->remote_ip = src_ip;
+            child_tcb->remote_port = src_port;
+            child_tcb->rcv_nxt = seq + 1;
+            uint32_t isn = 2000 + (seq ^ 0x5A5A);
+            child_tcb->snd_nxt = isn;
+            child_tcb->state = TCP_STATE_ESTABLISHED;
+
+            tcp_send_packet(child_tcb, TCP_FLAG_SYN | TCP_FLAG_ACK, NULL, 0);
+            child_tcb->snd_nxt++;
+
+            client_sock->state = SOCK_STATE_CONNECTED;
+            client_sock->local_addr = lsock->local_addr;
+            client_sock->remote_addr.sin_family = AF_INET;
+            client_sock->remote_addr.sin_port = hdr->src_port;
+            client_sock->remote_addr.sin_addr = ip_hdr->src_ip;
+
+            lsock->backlog_queue[lsock->backlog_count++] = client_sock;
+            waitqueue_wakeup_all(&lsock->waiting_threads);
             return;
         }
     }

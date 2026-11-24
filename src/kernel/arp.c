@@ -62,6 +62,7 @@ void arp_queue_packet(uint32_t dest_ip, const uint8_t *data, size_t len) {
 
 /* Called when we receive an ARP reply — flush all queued packets for that IP. */
 void arp_flush_pending(uint32_t resolved_ip, const uint8_t *mac) {
+    if (!network_devices || !network_devices->send_packet) return;
     for (int i = 0; i < ARP_PENDING_QUEUE_SIZE; i++) {
         if (arp_pending[i].used && arp_pending[i].dest_ip == resolved_ip) {
             /* Patch destination MAC directly into the Ethernet header */
@@ -77,7 +78,7 @@ void arp_flush_pending(uint32_t resolved_ip, const uint8_t *mac) {
 }
 
 void arp_send_request(uint32_t target_ip) {
-    if (!network_devices) {
+    if (!network_devices || !network_devices->send_packet) {
         klog(LOG_WARN, "ARP: No network device to send request.");
         return;
     }

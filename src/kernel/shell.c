@@ -68,8 +68,10 @@ static void flush_out() {
     }
 }
 
+extern int vksnprintf(char *buffer, size_t size, const char *format, va_list args);
+
 static void kprintf(const char *fmt, ...) {
-    char buf[1024]; va_list args; va_start(args, fmt); vksprintf(buf, fmt, args); va_end(args);
+    char buf[1024]; va_list args; va_start(args, fmt); vksnprintf(buf, sizeof(buf), fmt, args); va_end(args);
     int len = strlen(buf);
     if (out_buf_idx + len >= OUT_BUF_SIZE - 1) flush_out();
     if (len < OUT_BUF_SIZE) { memcpy(out_buf + out_buf_idx, buf, len); out_buf_idx += len; }
@@ -81,6 +83,7 @@ static void net_poll_all() {
     net_poll();
 }
 
+static bool check_interrupt() __attribute__((unused));
 static bool check_interrupt() {
     event_t ev; while (event_pop(&ev)) {
         if (ev.type == EVENT_KEY_DOWN) {
@@ -92,6 +95,7 @@ static bool check_interrupt() {
     return false;
 }
 
+static uint32_t parse_ip(const char *ip_str) __attribute__((unused));
 static uint32_t parse_ip(const char *ip_str) {
     int parts[4] = {0}; int current = 0; const char *p = ip_str;
     while (*p) {
@@ -105,9 +109,16 @@ static uint32_t parse_ip(const char *ip_str) {
 
 static void canonicalize_path(const char *input, char *output) {
     char combined[512];
-    if (input[0] == '/') strncpy(combined, input, 512);
-    else ksprintf(combined, "%s/%s", cwd_path, input);
-    char stack[16][64]; int top = 0; char temp[512]; strncpy(temp, combined, 512); char *p = temp;
+    if (input[0] == '/') {
+        strncpy(combined, input, sizeof(combined) - 1);
+        combined[sizeof(combined) - 1] = '\0';
+    } else {
+        ksprintf(combined, "%s/%s", cwd_path, input);
+    }
+    char stack[16][64]; int top = 0; char temp[512];
+    strncpy(temp, combined, sizeof(temp) - 1);
+    temp[sizeof(temp) - 1] = '\0';
+    char *p = temp;
     while (*p) {
         while (*p == '/') {
             p++;
@@ -118,10 +129,25 @@ static void canonicalize_path(const char *input, char *output) {
         char token[64]; memcpy(token, start, len); token[len] = '\0';
         if (strcmp(token, ".") == 0) continue;
         if (strcmp(token, "..") == 0) { if (top > 0) top--; continue; }
-        strncpy(stack[top++], token, 64); if (top >= 16) break;
+        if (top < 16) {
+            strncpy(stack[top], token, sizeof(stack[top]) - 1);
+            stack[top][sizeof(stack[top]) - 1] = '\0';
+            top++;
+        }
+        if (top >= 16) break;
     }
-    strncpy(output, "/", 256);
-    for (int i = 0; i < top; i++) { if (i > 0 || output[1] != '\0') strncat(output, "/", 256); strncat(output, stack[i], 256); }
+    strncpy(output, "/", 255);
+    output[255] = '\0';
+    for (int i = 0; i < top; i++) {
+        size_t cur_len = strlen(output);
+        if ((i > 0 || output[1] != '\0') && cur_len < 255) {
+            strncat(output, "/", 255 - cur_len);
+            cur_len = strlen(output);
+        }
+        if (cur_len < 255) {
+            strncat(output, stack[i], 255 - cur_len);
+        }
+    }
 }
 
 static void cmd_ls(int argc, char **argv) {
@@ -345,8 +371,15 @@ static void cmd_rmmod(int argc, char **argv) {
 
 static void execute_command(char *cmd) {
     if (strlen(cmd) == 0) return;
-    if (history_count < HISTORY_MAX) strncpy(history[history_count++], cmd, SHELL_BUFFER_SIZE);
-    else { for(int i=0; i<HISTORY_MAX-1; i++) memcpy(history[i], history[i+1], SHELL_BUFFER_SIZE); strncpy(history[HISTORY_MAX-1], cmd, SHELL_BUFFER_SIZE); }
+    if (history_count < HISTORY_MAX) {
+        strncpy(history[history_count], cmd, SHELL_BUFFER_SIZE - 1);
+        history[history_count][SHELL_BUFFER_SIZE - 1] = '\0';
+        history_count++;
+    } else {
+        for (int i = 0; i < HISTORY_MAX - 1; i++) memcpy(history[i], history[i + 1], SHELL_BUFFER_SIZE);
+        strncpy(history[HISTORY_MAX - 1], cmd, SHELL_BUFFER_SIZE - 1);
+        history[HISTORY_MAX - 1][SHELL_BUFFER_SIZE - 1] = '\0';
+    }
     history_index = history_count;
     char *argv[MAX_ARGS]; int argc = 0; char *p = cmd;
     while (*p && argc < MAX_ARGS - 1) { while (*p == ' ') p++; if (!*p) break; argv[argc++] = p; while (*p && *p != ' ') p++; if (*p) *p++ = '\0'; }
@@ -373,10 +406,14 @@ static void execute_command(char *cmd) {
     else if (strcmp(argv[0], "ls") == 0) cmd_ls(argc, argv);
     else if (strcmp(argv[0], "cat") == 0) cmd_cat(argc, argv);
     else if (strcmp(argv[0], "cd") == 0) {
-        char target[256]; if (argc<2) strncpy(target, "/", 256); else canonicalize_path(argv[1], target);
+        char target[256];
+        if (argc < 2) { strncpy(target, "/", sizeof(target) - 1); target[sizeof(target) - 1] = '\0'; }
+        else canonicalize_path(argv[1], target);
         vfs_node_t *n = vfs_resolve_path(vfs_root, target);
         if (n && (n->flags & VFS_DIRECTORY)) {
-            cwd_node = n; strncpy(cwd_path, target, 256);
+            cwd_node = n;
+            strncpy(cwd_path, target, sizeof(cwd_path) - 1);
+            cwd_path[sizeof(cwd_path) - 1] = '\0';
         } else if (n) {
             kprintf("cd: %s: not a directory\n", target);
         } else {
@@ -487,8 +524,8 @@ void shell_main(void *arg) {
             net_poll_all(); event_t ev; if (event_pop(&ev)) {
                 if (ev.type == EVENT_KEY_DOWN) {
                     char c = (char)ev.data1; uint8_t sc = (uint8_t)ev.data2;
-                    if (sc == 0x48 && history_index > 0) { history_index--; while(buffer_index > 0) { klog_putchar('\b'); buffer_index--; } strncpy(line_buffer, history[history_index], SHELL_BUFFER_SIZE); buffer_index = strlen(line_buffer); cursor_pos = buffer_index; klog_print_str(line_buffer, false); }
-                    else if (sc == 0x50 && history_index < history_count - 1) { history_index++; while(buffer_index > 0) { klog_putchar('\b'); buffer_index--; } strncpy(line_buffer, history[history_index], SHELL_BUFFER_SIZE); buffer_index = strlen(line_buffer); cursor_pos = buffer_index; klog_print_str(line_buffer, false); }
+                    if (sc == 0x48 && history_index > 0) { history_index--; while(buffer_index > 0) { klog_putchar('\b'); buffer_index--; } strncpy(line_buffer, history[history_index], SHELL_BUFFER_SIZE - 1); line_buffer[SHELL_BUFFER_SIZE - 1] = '\0'; buffer_index = strlen(line_buffer); cursor_pos = buffer_index; klog_print_str(line_buffer, false); }
+                    else if (sc == 0x50 && history_index < history_count - 1) { history_index++; while(buffer_index > 0) { klog_putchar('\b'); buffer_index--; } strncpy(line_buffer, history[history_index], SHELL_BUFFER_SIZE - 1); line_buffer[SHELL_BUFFER_SIZE - 1] = '\0'; buffer_index = strlen(line_buffer); cursor_pos = buffer_index; klog_print_str(line_buffer, false); }
                     else if (sc == 0x4B && cursor_pos > 0) { cursor_pos--; }
                     else if (sc == 0x4D && cursor_pos < buffer_index) { cursor_pos++; }
                     else if (c == '\n') { klog_putchar('\n'); line_buffer[buffer_index] = '\0'; execute_command(line_buffer); buffer_index = 0; cursor_pos = 0; break; }

@@ -134,8 +134,11 @@ void e1000_poll(net_dev_t *dev, uint8_t *buffer, size_t size) {
     while (d->rx_ring[d->rx_ptr].status & 0x01) {
         uint8_t *buf = d->rx_buffers + (d->rx_ptr * E1000_RX_BUF_SIZE);
         uint16_t len = d->rx_ring[d->rx_ptr].length;
+        uint8_t  err = d->rx_ring[d->rx_ptr].errors;
 
-        if (len >= sizeof(ethernet_header_t)) {
+        if (err) {
+            dev->rx_errors++;
+        } else if (len >= sizeof(ethernet_header_t) && len <= E1000_RX_BUF_SIZE) {
             dev->rx_packets++;
             dev->rx_bytes += len;
             ethernet_header_t *eth = (ethernet_header_t *)buf;
@@ -159,8 +162,16 @@ void e1000_poll(net_dev_t *dev, uint8_t *buffer, size_t size) {
 
 void e1000_driver_init(pci_device_t *pdev) {
     klog(LOG_INFO, "E1000: Initializing Driver...");
+    if (!pdev || !pdev->bars[0].base) {
+        klog(LOG_ERROR, "E1000: Invalid BAR0 base.");
+        return;
+    }
 
     e1000_t *d = kmalloc(sizeof(e1000_t));
+    if (!d) {
+        klog(LOG_ERROR, "E1000: Failed to allocate device struct.");
+        return;
+    }
     memset(d, 0, sizeof(e1000_t));
 
     extern uint64_t kernel_hhdm_offset;
@@ -174,6 +185,18 @@ void e1000_driver_init(pci_device_t *pdev) {
 
     d->tx_ring = kmalloc(TX_NUM_DESC * sizeof(struct e1000_tx_desc));
     d->tx_buffers = kmalloc(TX_NUM_DESC * E1000_TX_BUF_SIZE);
+    d->rx_ring = kmalloc(RX_NUM_DESC * sizeof(struct e1000_rx_desc));
+    d->rx_buffers = kmalloc(RX_NUM_DESC * E1000_RX_BUF_SIZE);
+    if (!d->tx_ring || !d->tx_buffers || !d->rx_ring || !d->rx_buffers) {
+        klog(LOG_ERROR, "E1000: Failed to allocate DMA rings/buffers.");
+        if (d->tx_ring) kfree(d->tx_ring);
+        if (d->tx_buffers) kfree(d->tx_buffers);
+        if (d->rx_ring) kfree(d->rx_ring);
+        if (d->rx_buffers) kfree(d->rx_buffers);
+        kfree(d);
+        return;
+    }
+
     memset(d->tx_ring, 0, TX_NUM_DESC * sizeof(struct e1000_tx_desc));
     for (int i = 0; i < TX_NUM_DESC; i++) {
         d->tx_ring[i].addr = (uint64_t)d->tx_buffers + (i * E1000_TX_BUF_SIZE) - kernel_hhdm_offset;
@@ -185,8 +208,6 @@ void e1000_driver_init(pci_device_t *pdev) {
     d->mmio[E1000_REG_TDT / 4] = 0;
     d->mmio[E1000_REG_TCTL / 4] = (1 << 1) | (1 << 3) | (0xF << 4) | (0x40 << 12);
 
-    d->rx_ring = kmalloc(RX_NUM_DESC * sizeof(struct e1000_rx_desc));
-    d->rx_buffers = kmalloc(RX_NUM_DESC * E1000_RX_BUF_SIZE);
     memset(d->rx_ring, 0, RX_NUM_DESC * sizeof(struct e1000_rx_desc));
     for (int i = 0; i < RX_NUM_DESC; i++) {
         d->rx_ring[i].addr = (uint64_t)d->rx_buffers + (i * E1000_RX_BUF_SIZE) - kernel_hhdm_offset;

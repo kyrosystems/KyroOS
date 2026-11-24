@@ -73,14 +73,32 @@ void print_u32(uint32_t n);
 void print_u64(uint64_t n);
 void print_hex(uint32_t n);
 
-static inline int vsprintf(char *buffer, const char *format, va_list args) {
-  char *buf_ptr = buffer;
+static inline int _kyro_vsnprintf(char *buffer, size_t size, const char *format, va_list args) {
+  size_t total = 0;
+  size_t limit = (size > 0 && buffer) ? (size - 1) : 0;
+
+#define KYRO_EMIT(ch)                                                          \
+  do {                                                                         \
+    if (total < limit) {                                                       \
+      buffer[total] = (ch);                                                    \
+    }                                                                          \
+    total++;                                                                   \
+  } while (0)
+
+  if (!format) {
+    if (size > 0 && buffer) buffer[0] = '\0';
+    return 0;
+  }
 
   while (*format) {
     if (*format == '%') {
       format++;
+      if (!*format) {
+        KYRO_EMIT('%');
+        break;
+      }
       if (*format == '%') {
-        *buf_ptr++ = '%';
+        KYRO_EMIT('%');
         format++;
         continue;
       }
@@ -114,6 +132,11 @@ static inline int vsprintf(char *buffer, const char *format, va_list args) {
         }
       }
 
+      if (!*format) {
+        KYRO_EMIT('%');
+        break;
+      }
+
       switch (*format) {
       case 's': {
         char *s = va_arg(args, char *);
@@ -122,17 +145,17 @@ static inline int vsprintf(char *buffer, const char *format, va_list args) {
         int slen = 0;
         while (s[slen]) slen++;
         if (!left_align && padding > slen) {
-          for (int p = 0; p < padding - slen; p++) *buf_ptr++ = ' ';
+          for (int p = 0; p < padding - slen; p++) KYRO_EMIT(' ');
         }
-        for (int p = 0; p < slen; p++) *buf_ptr++ = s[p];
+        for (int p = 0; p < slen; p++) KYRO_EMIT(s[p]);
         if (left_align && padding > slen) {
-          for (int p = 0; p < padding - slen; p++) *buf_ptr++ = ' ';
+          for (int p = 0; p < padding - slen; p++) KYRO_EMIT(' ');
         }
         break;
       }
       case 'c': {
         char c = (char)va_arg(args, int);
-        *buf_ptr++ = c;
+        KYRO_EMIT(c);
         break;
       }
       case 'p':
@@ -140,8 +163,8 @@ static inline int vsprintf(char *buffer, const char *format, va_list args) {
         uint64_t val;
         if (*format == 'p') {
           val = (uint64_t)va_arg(args, void *);
-          *buf_ptr++ = '0';
-          *buf_ptr++ = 'x';
+          KYRO_EMIT('0');
+          KYRO_EMIT('x');
         } else {
           if (is_long_long || is_long) {
             val = va_arg(args, uint64_t);
@@ -162,18 +185,19 @@ static inline int vsprintf(char *buffer, const char *format, va_list args) {
           }
         }
 
-        int h_padding = padding > i ? padding : i;
+        int orig_i = i;
+        int h_padding = padding > orig_i ? padding : orig_i;
         if (!left_align) {
-          for (int j = 0; j < h_padding - i; j++) {
-            *buf_ptr++ = pad_char;
+          for (int j = 0; j < h_padding - orig_i; j++) {
+            KYRO_EMIT(pad_char);
           }
         }
         while (i > 0) {
-          *buf_ptr++ = hex_buf[--i];
+          KYRO_EMIT(hex_buf[--i]);
         }
         if (left_align) {
-          for (int j = 0; j < h_padding - i; j++) {
-            *buf_ptr++ = ' ';
+          for (int j = 0; j < h_padding - orig_i; j++) {
+            KYRO_EMIT(' ');
           }
         }
         break;
@@ -191,7 +215,7 @@ static inline int vsprintf(char *buffer, const char *format, va_list args) {
           }
           if (sval < 0) {
             is_negative = true;
-            val = (uint64_t)(-sval);
+            val = (uint64_t)0 - (uint64_t)sval;
           } else {
             val = (uint64_t)sval;
           }
@@ -203,7 +227,7 @@ static inline int vsprintf(char *buffer, const char *format, va_list args) {
           }
         }
 
-        char num_str[21]; 
+        char num_str[21];
         int i = 0;
         if (val == 0) {
           num_str[i++] = '0';
@@ -219,54 +243,72 @@ static inline int vsprintf(char *buffer, const char *format, va_list args) {
 
         if (!left_align) {
           if (pad_char == '0') {
-            if (is_negative) *buf_ptr++ = '-';
-            for (int j = 0; j < pad_len; j++) *buf_ptr++ = '0';
+            if (is_negative) KYRO_EMIT('-');
+            for (int j = 0; j < pad_len; j++) KYRO_EMIT('0');
           } else {
-            for (int j = 0; j < pad_len; j++) *buf_ptr++ = ' ';
-            if (is_negative) *buf_ptr++ = '-';
+            for (int j = 0; j < pad_len; j++) KYRO_EMIT(' ');
+            if (is_negative) KYRO_EMIT('-');
           }
         } else {
-          if (is_negative) *buf_ptr++ = '-';
+          if (is_negative) KYRO_EMIT('-');
         }
 
         while (i > 0) {
-          *buf_ptr++ = num_str[--i];
+          KYRO_EMIT(num_str[--i]);
         }
 
         if (left_align) {
-          for (int j = 0; j < pad_len; j++) *buf_ptr++ = ' ';
+          for (int j = 0; j < pad_len; j++) KYRO_EMIT(' ');
         }
         break;
       }
       default:
-        *buf_ptr++ = '%';
-        *buf_ptr++ = *format;
+        KYRO_EMIT('%');
+        KYRO_EMIT(*format);
         break;
       }
     } else {
-      *buf_ptr++ = *format;
+      KYRO_EMIT(*format);
     }
     format++;
   }
-  *buf_ptr = '\0';
-  return buf_ptr - buffer;
+
+#undef KYRO_EMIT
+
+  if (size > 0 && buffer) {
+    size_t nul = (total < limit) ? total : limit;
+    buffer[nul] = '\0';
+  }
+  return (int)total;
+}
+
+int vsnprintf(char *str, size_t size, const char *format, va_list ap);
+
+static inline int vsprintf(char *buffer, const char *format, va_list args) {
+  return _kyro_vsnprintf(buffer, (size_t)-1, format, args);
 }
 
 static inline int sprintf(char *buffer, const char *format, ...) {
   va_list args;
   va_start(args, format);
-  int ret = vsprintf(buffer, format, args);
+  int ret = _kyro_vsnprintf(buffer, (size_t)-1, format, args);
   va_end(args);
   return ret;
 }
 
-#define snprintf(buf, sz, fmt, ...) sprintf(buf, fmt, ##__VA_ARGS__)
+static inline int snprintf(char *buffer, size_t size, const char *format, ...) {
+  va_list args;
+  va_start(args, format);
+  int ret = _kyro_vsnprintf(buffer, size, format, args);
+  va_end(args);
+  return ret;
+}
 
 static inline int printf(const char *format, ...) {
   char buf[1024];
   va_list args;
   va_start(args, format);
-  int ret = vsprintf(buf, format, args);
+  int ret = _kyro_vsnprintf(buf, sizeof(buf), format, args);
   va_end(args);
   print(buf);
   print_flush();
@@ -359,7 +401,7 @@ static inline int sha256(const uint8_t* data, size_t len, uint8_t* hash_out) {
   return (int)syscall(SYS_SHA256, (uint64_t)data, (uint64_t)len, (uint64_t)hash_out);
 }
 
-static int strncmp(const char *a, const char *b, size_t n) {
+static inline int strncmp(const char *a, const char *b, size_t n) {
     for (size_t i = 0; i < n; i++) {
         if (a[i] != b[i]) return (unsigned char)a[i] - (unsigned char)b[i];
         if (a[i] == '\0') return 0;
@@ -431,6 +473,7 @@ char *strchr(const char *s, int c);
 char *strstr(const char *haystack, const char *needle);
 char *strncpy(char *dest, const char *src, size_t n);
 void *memcpy(void *dest, const void *src, size_t n);
+void *memmove(void *dest, const void *src, size_t n);
 void *memset(void *s, int c, size_t n);
 int atoi(const char *s);
 void *malloc(size_t size);

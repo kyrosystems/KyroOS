@@ -10,9 +10,38 @@
 #include "tcp.h"
 #include "thread.h"
 #include "scheduler.h"
+#include "spinlock.h"
 #include "dhcp.h"
 
 socket_t *active_sockets = NULL;
+static spinlock_t sock_lock = {0};
+
+static int sock_should_abort(void) {
+    thread_t *cur = get_current_thread();
+    if (!cur) return 0;
+    if (cur->state == THREAD_DEAD) return 1;
+    if (cur->sig_pending & ((1U << SIGINT) | (1U << SIGKILL) | (1U << SIGTERM))) return 1;
+    return 0;
+}
+
+static size_t sock_dgram_consume_locked(socket_t *sock, void *buf, size_t len) {
+    size_t avail = sock->proto_data.udp_data.recv_data_len;
+    size_t to_copy = len < avail ? len : avail;
+    memcpy(buf,
+           sock->proto_data.udp_data.recv_buffer
+           + sock->proto_data.udp_data.recv_read_idx,
+           to_copy);
+    sock->proto_data.udp_data.recv_read_idx += to_copy;
+    sock->proto_data.udp_data.recv_data_len -= to_copy;
+    if (sock->proto_data.udp_data.recv_data_len > 0) {
+        memmove(sock->proto_data.udp_data.recv_buffer,
+                sock->proto_data.udp_data.recv_buffer
+                + sock->proto_data.udp_data.recv_read_idx,
+                sock->proto_data.udp_data.recv_data_len);
+    }
+    sock->proto_data.udp_data.recv_read_idx = 0;
+    return to_copy;
+}
 
 /* Full network service tick from blocking receive paths: drain NIC RX
  * rings and drive ARP/DHCP retransmissions, so a ping (or any datagram
@@ -38,53 +67,63 @@ void sock_udp_receive_packet_handler(net_dev_t *net_dev, const ipv4_header_t *ip
     /* Hand off to kernel UDP protocol handlers (e.g. DNS client on port 5300) */
     udp_handle_packet(net_dev, ip_hdr, (const uint8_t *)udp_hdr, len + sizeof(udp_header_t));
 
+    uint64_t iflags = spinlock_acquire_irqsave(&sock_lock);
     socket_t *sock = active_sockets;
     while (sock) {
         if (sock->protocol == IPPROTO_UDP &&
             sock->local_addr.sin_port == udp_hdr->dest_port) {
-            size_t space = sock->proto_data.udp_data.recv_buffer_size
-                         - sock->proto_data.udp_data.recv_data_len;
+            size_t data_len = sock->proto_data.udp_data.recv_data_len;
+            size_t buf_size = sock->proto_data.udp_data.recv_buffer_size;
+            size_t space = (buf_size > data_len) ? (buf_size - data_len) : 0;
             if (len > space) {
-                klog(LOG_WARN, "SOCKET: UDP recv buffer overflow, dropping.");
                 sock->rx_dropped_ctr++;
+                spinlock_release_irqrestore(&sock_lock, iflags);
+                klog(LOG_WARN, "SOCKET: UDP recv buffer overflow, dropping.");
                 return;
             }
             /* Record datagram source for recvfrom() */
             if (ip_hdr)
                 sock->recv_src_ip = __builtin_bswap32(ip_hdr->src_ip);
             sock->recv_src_port = __builtin_bswap16(udp_hdr->src_port);
-            memcpy(sock->proto_data.udp_data.recv_buffer
-                   + sock->proto_data.udp_data.recv_data_len, data, len);
-            sock->proto_data.udp_data.recv_data_len += len;
+            if (len > 0) {
+                memcpy(sock->proto_data.udp_data.recv_buffer + data_len, data, len);
+                sock->proto_data.udp_data.recv_data_len = data_len + len;
+            }
+            spinlock_release_irqrestore(&sock_lock, iflags);
             waitqueue_wakeup_all(&sock->waiting_threads);
             return;
         }
         sock = sock->next;
     }
+    spinlock_release_irqrestore(&sock_lock, iflags);
 }
 
 /* ── RAW (ICMP) delivery: route echo replies to raw ICMP sockets ─────────── */
 void sock_raw_icmp_receive(net_dev_t *net_dev, const ipv4_header_t *ip_hdr,
                            const uint8_t *data, size_t len) {
     (void)net_dev;
+    uint64_t iflags = spinlock_acquire_irqsave(&sock_lock);
     socket_t *sock = active_sockets;
     while (sock) {
         if (sock->type == SOCK_RAW && sock->protocol == IPPROTO_ICMP) {
-            size_t space = sock->proto_data.udp_data.recv_buffer_size
-                         - sock->proto_data.udp_data.recv_data_len;
+            size_t data_len = sock->proto_data.udp_data.recv_data_len;
+            size_t buf_size = sock->proto_data.udp_data.recv_buffer_size;
+            size_t space = (buf_size > data_len) ? (buf_size - data_len) : 0;
             if (len > space) {
                 sock = sock->next;
                 continue;
             }
             sock->recv_src_ip = __builtin_bswap32(ip_hdr ? ip_hdr->src_ip : 0);
             sock->recv_src_port = 0;
-            memcpy(sock->proto_data.udp_data.recv_buffer
-                   + sock->proto_data.udp_data.recv_data_len, data, len);
-            sock->proto_data.udp_data.recv_data_len += len;
+            if (len > 0) {
+                memcpy(sock->proto_data.udp_data.recv_buffer + data_len, data, len);
+                sock->proto_data.udp_data.recv_data_len = data_len + len;
+            }
             waitqueue_wakeup_all(&sock->waiting_threads);
         }
         sock = sock->next;
     }
+    spinlock_release_irqrestore(&sock_lock, iflags);
 }
 
 /* ── Dispatcher called from IP layer ─────────────────────────────────────── */
@@ -93,6 +132,7 @@ void sock_handle_incoming_packet(net_dev_t *net_dev, const ipv4_header_t *ip_hdr
                                  uint8_t protocol) {
     switch (protocol) {
         case IPPROTO_UDP: {
+            if (payload_size < sizeof(udp_header_t)) return;
             udp_header_t  *udp_hdr  = (udp_header_t *)payload;
             const uint8_t *udp_data = payload + sizeof(udp_header_t);
             size_t         udp_len  = payload_size - sizeof(udp_header_t);
@@ -129,7 +169,7 @@ socket_t *sock_create(int domain, int type, int protocol) {
     sock->domain   = domain;
     sock->type     = type;
     sock->protocol = protocol;
-    sock->state    = SOCK_STATE_CLOSED;
+    sock->state    = SOCK_STATE_CREATED;
     waitqueue_init(&sock->waiting_threads);
 
     if (is_udp || is_raw) {
@@ -145,8 +185,10 @@ socket_t *sock_create(int domain, int type, int protocol) {
         if (!sock->proto_data.tcp_tcb) { kfree(sock); return NULL; }
     }
 
+    uint64_t iflags = spinlock_acquire_irqsave(&sock_lock);
     sock->next    = active_sockets;
     active_sockets = sock;
+    spinlock_release_irqrestore(&sock_lock, iflags);
     klog(LOG_INFO, "SOCKET: Created (%s).",
          is_tcp ? "TCP" : (is_raw ? "RAW/ICMP" : "UDP"));
     return sock;
@@ -157,10 +199,12 @@ int sock_bind(socket_t *sock, const sockaddr_in_t *addr) {
     if (!sock || !addr) return -1;
 
     if (sock->protocol == IPPROTO_UDP) {
+        uint64_t iflags = spinlock_acquire_irqsave(&sock_lock);
         socket_t *s = active_sockets;
         while (s) {
             if (s != sock && s->protocol == IPPROTO_UDP &&
                 s->local_addr.sin_port == addr->sin_port) {
+                spinlock_release_irqrestore(&sock_lock, iflags);
                 klog(LOG_ERROR, "SOCKET: Port already in use.");
                 return -1;
             }
@@ -168,6 +212,7 @@ int sock_bind(socket_t *sock, const sockaddr_in_t *addr) {
         }
         memcpy(&sock->local_addr, addr, sizeof(sockaddr_in_t));
         sock->state = SOCK_STATE_BOUND;
+        spinlock_release_irqrestore(&sock_lock, iflags);
         udp_register_handler(__builtin_bswap16(addr->sin_port),
                              sock_udp_receive_packet_handler);
         klog(LOG_INFO, "SOCKET: UDP bound to port %d.", __builtin_bswap16(addr->sin_port));
@@ -232,24 +277,29 @@ int sock_recv(socket_t *sock, void *buf, size_t len, int flags) {
     (void)flags;
 
     if (sock->protocol == IPPROTO_UDP) {
-        while (sock->proto_data.udp_data.recv_data_len == 0) {
+        for (;;) {
+            if (sock->state == SOCK_STATE_CLOSED) return -EBADF;
+            if (sock_should_abort()) return -EINTR;
+            uint64_t iflags = spinlock_acquire_irqsave(&sock_lock);
+            if (sock->proto_data.udp_data.recv_data_len != 0) {
+                size_t to_copy = sock_dgram_consume_locked(sock, buf, len);
+                spinlock_release_irqrestore(&sock_lock, iflags);
+                return (int)to_copy;
+            }
+            spinlock_release_irqrestore(&sock_lock, iflags);
+
             sockets_poll_nics();
-            if (sock->proto_data.udp_data.recv_data_len != 0) break;
+            if (sock_should_abort()) return -EINTR;
+            if (sock->proto_data.udp_data.recv_data_len != 0) continue;
+
             waitqueue_add(&sock->waiting_threads, get_current_thread());
+            if (sock->proto_data.udp_data.recv_data_len != 0 || sock_should_abort()) {
+                get_current_thread()->state = THREAD_READY;
+                continue;
+            }
             get_current_thread()->state = THREAD_BLOCKED;
             schedule();
         }
-        size_t to_copy = len < sock->proto_data.udp_data.recv_data_len
-                         ? len : sock->proto_data.udp_data.recv_data_len;
-        memcpy(buf,
-               sock->proto_data.udp_data.recv_buffer
-               + sock->proto_data.udp_data.recv_read_idx,
-               to_copy);
-        sock->proto_data.udp_data.recv_read_idx  += to_copy;
-        sock->proto_data.udp_data.recv_data_len  -= to_copy;
-        if (sock->proto_data.udp_data.recv_data_len == 0)
-            sock->proto_data.udp_data.recv_read_idx = 0;
-        return (int)to_copy;
     }
     if (sock->protocol == IPPROTO_TCP) {
         return tcp_recv_tcb(sock->proto_data.tcp_tcb, buf, len);
@@ -298,10 +348,31 @@ int sock_recvfrom(socket_t *sock, void *buf, size_t len, int flags,
         uint64_t deadline_ticks = 0;
         if (sock->recv_timeout_ms)
             deadline_ticks = timer_get_ticks() + sock->recv_timeout_ms / 10;
-        while (sock->proto_data.udp_data.recv_data_len == 0) {
+        for (;;) {
             if (sock->state == SOCK_STATE_CLOSED) return -EBADF;
+            if (sock_should_abort()) return -EINTR;
+            uint64_t iflags = spinlock_acquire_irqsave(&sock_lock);
+            if (sock->proto_data.udp_data.recv_data_len != 0) {
+                size_t to_copy = sock_dgram_consume_locked(sock, buf, len);
+                uint32_t src_ip = sock->recv_src_ip;
+                uint16_t src_port = sock->recv_src_port;
+                spinlock_release_irqrestore(&sock_lock, iflags);
+
+                if (src_addr) {
+                    memset(src_addr, 0, sizeof(sockaddr_in_t));
+                    src_addr->sin_family = AF_INET;
+                    src_addr->sin_port   = __builtin_bswap16(src_port);
+                    src_addr->sin_addr   = src_ip;
+                }
+                if (addrlen) *addrlen = sizeof(sockaddr_in_t);
+                return (int)to_copy;
+            }
+            spinlock_release_irqrestore(&sock_lock, iflags);
+
             sockets_poll_nics(); /* deliver pending packets before waiting */
-            if (sock->proto_data.udp_data.recv_data_len != 0) break;
+            if (sock_should_abort()) return -EINTR;
+            if (sock->proto_data.udp_data.recv_data_len != 0) continue;
+
             if (deadline_ticks) {
                 /* With a timeout we cannot block permanently: a blocked
                    thread is never woken to re-check its deadline (no
@@ -314,29 +385,14 @@ int sock_recvfrom(socket_t *sock, void *buf, size_t len, int flags,
             } else {
                 /* No timeout: proper block until packet/shutdown wake */
                 waitqueue_add(&sock->waiting_threads, get_current_thread());
+                if (sock->proto_data.udp_data.recv_data_len != 0 || sock_should_abort()) {
+                    get_current_thread()->state = THREAD_READY;
+                    continue;
+                }
                 get_current_thread()->state = THREAD_BLOCKED;
                 schedule();
             }
         }
-        size_t to_copy = len < sock->proto_data.udp_data.recv_data_len
-                         ? len : sock->proto_data.udp_data.recv_data_len;
-        memcpy(buf,
-               sock->proto_data.udp_data.recv_buffer
-               + sock->proto_data.udp_data.recv_read_idx,
-               to_copy);
-        sock->proto_data.udp_data.recv_read_idx  += to_copy;
-        sock->proto_data.udp_data.recv_data_len  -= to_copy;
-        if (sock->proto_data.udp_data.recv_data_len == 0)
-            sock->proto_data.udp_data.recv_read_idx = 0;
-
-        if (src_addr) {
-            memset(src_addr, 0, sizeof(sockaddr_in_t));
-            src_addr->sin_family = AF_INET;
-            src_addr->sin_port   = __builtin_bswap16(sock->recv_src_port);
-            src_addr->sin_addr   = sock->recv_src_ip;
-        }
-        if (addrlen) *addrlen = sizeof(sockaddr_in_t);
-        return (int)to_copy;
     }
     if (sock->protocol == IPPROTO_TCP) return sock_recv(sock, buf, len, flags);
     return -EINVAL;
@@ -391,34 +447,68 @@ socket_t *sock_accept(socket_t *sock, sockaddr_in_t *addr) {
         return NULL;
     }
 
-    while (sock->backlog_count == 0) {
+    for (;;) {
+        if (sock->state != SOCK_STATE_LISTENING || sock_should_abort()) return NULL;
+        uint64_t iflags = spinlock_acquire_irqsave(&sock_lock);
+        if (sock->backlog_count > 0) {
+            socket_t *client_sock = sock->backlog_queue[0];
+            for (int i = 0; i < sock->backlog_count - 1; i++) {
+                sock->backlog_queue[i] = sock->backlog_queue[i + 1];
+            }
+            sock->backlog_count--;
+            spinlock_release_irqrestore(&sock_lock, iflags);
+
+            if (addr) {
+                memcpy(addr, &client_sock->remote_addr, sizeof(sockaddr_in_t));
+            }
+            return client_sock;
+        }
+        spinlock_release_irqrestore(&sock_lock, iflags);
+
         sockets_poll_nics();
-        if (sock->backlog_count > 0) break;
+        if (sock_should_abort()) return NULL;
+        if (sock->backlog_count > 0) continue;
+
         waitqueue_add(&sock->waiting_threads, get_current_thread());
+        if (sock->backlog_count > 0 || sock_should_abort() || sock->state != SOCK_STATE_LISTENING) {
+            get_current_thread()->state = THREAD_READY;
+            continue;
+        }
         get_current_thread()->state = THREAD_BLOCKED;
         schedule();
     }
-
-    socket_t *client_sock = sock->backlog_queue[0];
-    for (int i = 0; i < sock->backlog_count - 1; i++) {
-        sock->backlog_queue[i] = sock->backlog_queue[i + 1];
-    }
-    sock->backlog_count--;
-
-    if (addr) {
-        memcpy(addr, &client_sock->remote_addr, sizeof(sockaddr_in_t));
-    }
-    return client_sock;
 }
 
 /* ── sock_close ──────────────────────────────────────────────────────────── */
 int sock_close(socket_t *sock) {
     if (!sock) return -1;
 
+    uint64_t iflags = spinlock_acquire_irqsave(&sock_lock);
     socket_t **cur = &active_sockets;
     while (*cur) {
         if (*cur == sock) { *cur = sock->next; break; }
         cur = &(*cur)->next;
+    }
+    socket_t *pending_children[16];
+    int pending_count = 0;
+    if (sock->state == SOCK_STATE_LISTENING && sock->backlog_count > 0) {
+        pending_count = sock->backlog_count;
+        if (pending_count > 16) pending_count = 16;
+        for (int i = 0; i < pending_count; i++) {
+            pending_children[i] = sock->backlog_queue[i];
+            sock->backlog_queue[i] = NULL;
+        }
+        sock->backlog_count = 0;
+    }
+    sock->state = SOCK_STATE_CLOSED;
+    spinlock_release_irqrestore(&sock_lock, iflags);
+
+    waitqueue_wakeup_all(&sock->waiting_threads);
+
+    for (int i = 0; i < pending_count; i++) {
+        if (pending_children[i]) {
+            sock_close(pending_children[i]);
+        }
     }
 
     if ((sock->protocol == IPPROTO_UDP ||

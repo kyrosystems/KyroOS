@@ -152,29 +152,42 @@ static void keyboard_handler(struct registers *regs) {
     if (c == 3) {
       extern thread_t *console_focus;
       extern thread_t *scheduler_find_thread(uint64_t pid);
-      thread_t *target = console_focus ? console_focus : get_current_thread();
-      if (target && target->id > 1) {
+      thread_t *target = console_focus;
+      if (target && scheduler_find_thread(target->id) != target) {
+        console_focus = NULL;
+        target = NULL;
+      }
+      if (!target) target = get_current_thread();
+      if (target && target->id > 1 && target->state != THREAD_DEAD) {
         bool is_shell = (strcmp(target->name, "sh") == 0 ||
                          strcmp(target->name, "/bin/sh") == 0 ||
                          strcmp(target->name, "init") == 0 ||
                          target->id <= 2);
         if (!is_shell) {
+          bool swallow_event = false;
           if (target->sig_handlers[2] == SIG_IGN) {
             // Ignored by process
           } else if (target->sig_handlers[2] != SIG_DFL) {
             target->sig_pending |= (1 << 2); // Deliver custom SIGINT
+            swallow_event = true;
           } else {
-            // Terminate foreground application immediately
+            // Signal/terminate foreground application safely
+            target->sig_pending |= (1 << 2);
             target->exit_status = 130;
-            target->state = THREAD_DEAD;
+            if ((regs->cs & 3) == 3 || target != get_current_thread() ||
+                target->state == THREAD_BLOCKED) {
+              target->state = THREAD_DEAD;
+            }
             if (target->parent_id) {
               thread_t *parent = scheduler_find_thread(target->parent_id);
               if (parent) parent->sig_pending |= (1 << 17); // SIGCHLD
             }
             if (console_focus == target) console_focus = NULL;
             fb_release_graphics_owner(target->id);
+            swallow_event = true;
           }
           klog_print_str("^C\n", true);
+          if (swallow_event) return;
         }
       }
     }

@@ -206,6 +206,7 @@ static uint32_t ide_partition_write_sectors(vfs_node_t *node, uint64_t offset, u
 }
 
 static int ide_partition_ioctl(vfs_node_t *node, int request, void* argp) {
+    if (!node || !argp) return -1;
     ide_partition_data_t *part_data = (ide_partition_data_t*)node->ptr;
     if (!part_data) {
         klog(LOG_ERROR, "IDE_PART: Invalid partition data for node %s.", node->name);
@@ -214,41 +215,35 @@ static int ide_partition_ioctl(vfs_node_t *node, int request, void* argp) {
 
     if (request == IDE_IOCTL_GET_DISK_INFO) {
         ide_disk_info_t *info = (ide_disk_info_t *)argp;
-        if (info) {
-            info->total_sectors = part_data->partition_size;
-            info->bytes_per_sector = 512;
-            return 0;
-        }
+        info->total_sectors = part_data->partition_size;
+        info->bytes_per_sector = 512;
+        return 0;
     } else if (request == IDE_IOCTL_READ_BLOCKS) {
         ide_read_blocks_t *rb = (ide_read_blocks_t *)argp;
-        if (rb) {
-            // LBA passed to IOCTL is relative to partition
-            uint32_t absolute_lba = part_data->partition_lba_start + rb->lba;
-            // Ensure read does not go beyond partition boundary
-            if (rb->lba + rb->count > part_data->partition_size) {
-                klog(LOG_ERROR, "IDE_PART: IOCTL READ_BLOCKS for %s goes beyond partition boundary.", node->name);
-                return -1;
-            }
-            return ide_read_sectors(part_data->drive_id, absolute_lba, rb->count, (uint16_t*)rb->buffer);
+        if (!rb->buffer) return -1;
+        if (rb->count == 0) return 0;
+        // LBA passed to IOCTL is relative to partition
+        if ((uint64_t)rb->lba + rb->count > part_data->partition_size) {
+            klog(LOG_ERROR, "IDE_PART: IOCTL READ_BLOCKS for %s goes beyond partition boundary.", node->name);
+            return -1;
         }
+        uint32_t absolute_lba = part_data->partition_lba_start + rb->lba;
+        return ide_read_sectors(part_data->drive_id, absolute_lba, rb->count, (uint16_t*)rb->buffer);
     } else if (request == IDE_IOCTL_WRITE_BLOCKS) {
         ide_write_blocks_t *wb = (ide_write_blocks_t *)argp;
-        if (wb) {
-            // LBA passed to IOCTL is relative to partition
-            uint32_t absolute_lba = part_data->partition_lba_start + wb->lba;
-            // Ensure write does not go beyond partition boundary
-            if (wb->lba + wb->count > part_data->partition_size) {
-                klog(LOG_ERROR, "IDE_PART: IOCTL WRITE_BLOCKS for %s goes beyond partition boundary.", node->name);
-                return -1;
-            }
-            return ide_write_sectors(part_data->drive_id, absolute_lba, wb->count, (const uint16_t*)wb->buffer);
+        if (!wb->buffer) return -1;
+        if (wb->count == 0) return 0;
+        // LBA passed to IOCTL is relative to partition
+        if ((uint64_t)wb->lba + wb->count > part_data->partition_size) {
+            klog(LOG_ERROR, "IDE_PART: IOCTL WRITE_BLOCKS for %s goes beyond partition boundary.", node->name);
+            return -1;
         }
+        uint32_t absolute_lba = part_data->partition_lba_start + wb->lba;
+        return ide_write_sectors(part_data->drive_id, absolute_lba, wb->count, (const uint16_t*)wb->buffer);
     } else if (request == IDE_IOCTL_FORMAT) {
         ide_ioctl_format_t *fmt_req = (ide_ioctl_format_t *)argp;
-        if (fmt_req) {
-            // The LBA here is relative to the partition, and fs_format will add it to partition_lba_start
-            return fs_format(node, part_data->partition_lba_start + fmt_req->partition_lba, fmt_req->partition_size);
-        }
+        // The LBA here is relative to the partition, and fs_format will add it to partition_lba_start
+        return fs_format(node, part_data->partition_lba_start + fmt_req->partition_lba, fmt_req->partition_size);
     }
     klog(LOG_WARN, "IDE_PART: Unsupported IOCTL request %x for node %s", request, node->name);
     return -1;
@@ -290,6 +285,17 @@ static int ide_wait_for_ready() {
         }
     }
     return -1; // Timeout
+}
+
+// Wait until BSY clears and DRQ sets (or ERR/DF sets). Returns 0 on DRQ, -1 on error/timeout.
+static int ide_wait_for_drq(void) {
+    for (int i = 0; i < 100000; i++) {
+        uint8_t st = inb(ATA_PRIMARY_STATUS);
+        if (st & ATA_SR_BSY) continue;
+        if (st & (ATA_SR_DF | ATA_SR_ERR)) return -1;
+        if (st & ATA_SR_DRQ) return 0;
+    }
+    return -1;
 }
 
 static int ide_probe(device_t* dev);
@@ -404,38 +410,29 @@ static int ide_attach(device_t* dev) {
 
 // New IOCTL handler for IDE devices
 static int ide_ioctl(vfs_node_t *node, int request, void* argp) {
+    if (!argp) return -1;
 
     // The node->ptr could be used to store a drive ID if multiple IDE drives
     uint8_t drive = 0; 
 
     if (request == IDE_IOCTL_GET_DISK_INFO) {
         ide_disk_info_t *info = (ide_disk_info_t *)argp;
-        if (info) {
-
-            info->total_sectors = 0x0FFFFFFF; // Example: large enough
-            info->bytes_per_sector = 512;
-            return 0;
-        }
+        info->total_sectors = g_primary_disk_bytes / 512;
+        info->bytes_per_sector = 512;
+        return 0;
     } else if (request == IDE_IOCTL_READ_BLOCKS) {
         ide_read_blocks_t *rb = (ide_read_blocks_t *)argp;
-        if (rb) {
-            return ide_read_sectors(drive, rb->lba, rb->count, (uint16_t*)rb->buffer);
-        }
+        if (!rb->buffer) return -1;
+        if (rb->count == 0) return 0;
+        return ide_read_sectors(drive, rb->lba, rb->count, (uint16_t*)rb->buffer);
     } else if (request == IDE_IOCTL_WRITE_BLOCKS) {
         ide_write_blocks_t *wb = (ide_write_blocks_t *)argp;
-        if (wb) {
-            return ide_write_sectors(drive, wb->lba, wb->count, (const uint16_t*)wb->buffer);
-        }
+        if (!wb->buffer) return -1;
+        if (wb->count == 0) return 0;
+        return ide_write_sectors(drive, wb->lba, wb->count, (const uint16_t*)wb->buffer);
     } else if (request == IDE_IOCTL_FORMAT) {
         ide_ioctl_format_t *fmt_req = (ide_ioctl_format_t *)argp;
-        if (fmt_req) {
-            // fs_format expects a disk_fd.
-            // Since ide_ioctl is called from a vfs_node associated with a physical disk,
-            // we can pass the node->ptr (which holds the drive number) as a pseudo-fd for fs_format,
-            // or modify fs_format to take a vfs_node_t directly.
-
-            return fs_format(node, fmt_req->partition_lba, fmt_req->partition_size);
-        }
+        return fs_format(node, fmt_req->partition_lba, fmt_req->partition_size);
     }
     klog(LOG_WARN, "IDE: Unsupported IOCTL request %x", request);
     return -1;
@@ -480,7 +477,8 @@ void ide_test_read() {
 }
 
 uint32_t ide_read_sectors(uint8_t drive, uint32_t lba, uint8_t num_sectors, uint16_t* buffer) {
-    if (drive != 0 || !primary_master_present) return (uint32_t)-1;
+    if (num_sectors == 0) return 0;
+    if (!buffer || drive != 0 || !primary_master_present) return (uint32_t)-1;
 
     if (ide_wait_for_ready() != 0) return (uint32_t)-1;
 
@@ -493,9 +491,8 @@ uint32_t ide_read_sectors(uint8_t drive, uint32_t lba, uint8_t num_sectors, uint
 
     for (int i = 0; i < num_sectors; i++) {
         for (int k = 0; k < 4; k++) inb(ATA_PRIMARY_STATUS); // 400ns delay
-        if (ide_wait_for_ready() != 0) return (uint32_t)-1;
-        uint8_t st = inb(ATA_PRIMARY_STATUS);
-        if (st & (ATA_SR_DF | ATA_SR_ERR)) {
+        if (ide_wait_for_drq() != 0) {
+            uint8_t st = inb(ATA_PRIMARY_STATUS);
             klog(LOG_WARN, "IDE: Read error (status 0x%x).", st);
             return (uint32_t)-1;
         }
@@ -505,7 +502,8 @@ uint32_t ide_read_sectors(uint8_t drive, uint32_t lba, uint8_t num_sectors, uint
 }
 
 uint32_t ide_write_sectors(uint8_t drive, uint32_t lba, uint8_t num_sectors, const uint16_t* buffer) {
-    if (drive != 0 || !primary_master_present) return (uint32_t)-1;
+    if (num_sectors == 0) return 0;
+    if (!buffer || drive != 0 || !primary_master_present) return (uint32_t)-1;
     
     if (ide_wait_for_ready() != 0) return (uint32_t)-1;
 
@@ -517,9 +515,9 @@ uint32_t ide_write_sectors(uint8_t drive, uint32_t lba, uint8_t num_sectors, con
     outb(ATA_PRIMARY_COMMAND, ATA_CMD_WRITE_PIO);
 
     for (int i = 0; i < num_sectors; i++) {
-        if (ide_wait_for_ready() != 0) return (uint32_t)-1;
-        if (inb(ATA_PRIMARY_STATUS) & (ATA_SR_DF | ATA_SR_ERR)) {
-            klog(LOG_ERROR, "IDE: Write error.");
+        for (int k = 0; k < 4; k++) inb(ATA_PRIMARY_STATUS); // 400ns delay
+        if (ide_wait_for_drq() != 0) {
+            klog(LOG_ERROR, "IDE: Write error (status 0x%x).", inb(ATA_PRIMARY_STATUS));
             return (uint32_t)-1;
         }
         outsw(ATA_PRIMARY_DATA, buffer + (i * 256), 256);
@@ -597,25 +595,28 @@ static uint32_t sparse_disk_write(vfs_node_t *node, uint64_t offset, uint32_t si
 
 static int sparse_disk_ioctl(vfs_node_t *node, int request, void* argp) {
     (void)node;
+    if (!argp && request != IDE_IOCTL_FORMAT) return -1;
     if (request == IDE_IOCTL_GET_DISK_INFO) {
         ide_disk_info_t *info = (ide_disk_info_t *)argp;
-        if (info) {
-            info->total_sectors = SPARSE_RAMDISK_SECTORS;
-            info->bytes_per_sector = 512;
-            return 0;
-        }
+        info->total_sectors = SPARSE_RAMDISK_SECTORS;
+        info->bytes_per_sector = 512;
+        return 0;
     } else if (request == IDE_IOCTL_READ_BLOCKS) {
         ide_read_blocks_t *rb = (ide_read_blocks_t *)argp;
-        if (rb) {
-            sparse_disk_read(node, (uint64_t)rb->lba * 512, rb->count * 512, (uint8_t *)rb->buffer);
-            return 0;
-        }
+        if (!rb->buffer) return -1;
+        if (rb->count == 0) return 0;
+        if ((uint64_t)rb->lba + rb->count > SPARSE_RAMDISK_SECTORS) return -1;
+        if ((uint64_t)rb->count * 512 > 0xFFFFFFFFULL) return -1;
+        sparse_disk_read(node, (uint64_t)rb->lba * 512, rb->count * 512, (uint8_t *)rb->buffer);
+        return 0;
     } else if (request == IDE_IOCTL_WRITE_BLOCKS) {
         ide_write_blocks_t *wb = (ide_write_blocks_t *)argp;
-        if (wb) {
-            sparse_disk_write(node, (uint64_t)wb->lba * 512, wb->count * 512, (uint8_t *)wb->buffer);
-            return 0;
-        }
+        if (!wb->buffer) return -1;
+        if (wb->count == 0) return 0;
+        if ((uint64_t)wb->lba + wb->count > SPARSE_RAMDISK_SECTORS) return -1;
+        if ((uint64_t)wb->count * 512 > 0xFFFFFFFFULL) return -1;
+        sparse_disk_write(node, (uint64_t)wb->lba * 512, wb->count * 512, (uint8_t *)(uintptr_t)wb->buffer);
+        return 0;
     } else if (request == IDE_IOCTL_FORMAT) {
         return 0;
     }

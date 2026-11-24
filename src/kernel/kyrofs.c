@@ -62,14 +62,17 @@ static uint32_t kyrofs_read(vfs_node_t *node, uint64_t offset, uint32_t size, ui
 }
 
 static uint32_t kyrofs_write(vfs_node_t *node, uint64_t offset, uint32_t size, uint8_t *buffer) {
+    if (!node || !node->ptr || (!buffer && size > 0)) return 0;
+    if (size == 0) return 0;
+    if (offset > UINT32_MAX || size > UINT32_MAX - (uint32_t)offset) return 0;
     kyrofs_file_content_t *fc = (kyrofs_file_content_t *)node->ptr;
-    if (!fc) return 0;
-    if (!fc->content || offset + size > fc->capacity) {
-        uint32_t req = (uint32_t)(offset + size);
-        uint32_t new_cap = (fc->size == 0) ? ((req + 63) & ~63) : (req * 3 / 2 + 64);
-        if (new_cap < req) new_cap = req;
+    uint32_t req = (uint32_t)(offset + size);
+    if (!fc->content || req > fc->capacity) {
+        uint64_t cap64 = (fc->size == 0) ? (((uint64_t)req + 63) & ~63ULL) : ((uint64_t)req * 3 / 2 + 64);
+        if (cap64 > UINT32_MAX) cap64 = req;
+        uint32_t new_cap = (uint32_t)cap64;
         uint8_t *new_cont = (uint8_t *)kmalloc(new_cap);
-        if (!new_cont) panic("kyrofs_write: kmalloc failed", NULL);
+        if (!new_cont) return 0;
         if (fc->content && fc->size > 0) {
             memcpy(new_cont, fc->content, fc->size);
             kfree(fc->content);
@@ -80,9 +83,9 @@ static uint32_t kyrofs_write(vfs_node_t *node, uint64_t offset, uint32_t size, u
         fc->capacity = new_cap;
     }
     memcpy(fc->content + offset, buffer, size);
-    if (offset + size > fc->size) {
-        g_kyrofs_total_bytes_used += (offset + size - fc->size);
-        fc->size = offset + size;
+    if (req > fc->size) {
+        g_kyrofs_total_bytes_used += (req - fc->size);
+        fc->size = req;
     }
     node->length = fc->size;
     return size;
@@ -115,8 +118,9 @@ static int kyrofs_readdir(vfs_node_t *node, uint32_t index, struct dirent *dir_e
 }
 
 int kyrofs_create_node(vfs_node_t *parent, char *name, uint32_t flags) {
+    if (!parent || !name) return -1;
     kyrofs_ino_dirent_t *new_de = (kyrofs_ino_dirent_t *)kmalloc(sizeof(kyrofs_ino_dirent_t));
-    if (!new_de) panic("kyrofs_create_node: kmalloc failed", NULL);
+    if (!new_de) return -1;
     memset(new_de, 0, sizeof(kyrofs_ino_dirent_t));
     strncpy(new_de->node.name, name, MAX_FILENAME_LEN - 1);
     new_de->node.name[MAX_FILENAME_LEN - 1] = '\0';
@@ -135,11 +139,18 @@ int kyrofs_create_node(vfs_node_t *parent, char *name, uint32_t flags) {
 
     if (flags & VFS_FILE) {
         kyrofs_file_content_t *content = (kyrofs_file_content_t *)kmalloc(sizeof(kyrofs_file_content_t));
-        if (!content) panic("kyrofs_create_node: kmalloc failed", NULL);
+        if (!content) {
+            kfree(new_de);
+            return -1;
+        }
         content->size = 0;
         content->capacity = 128;
         content->content = (uint8_t *)kmalloc(content->capacity);
-        if (!content->content) panic("kyrofs_create_node: kmalloc failed", NULL);
+        if (!content->content) {
+            kfree(content);
+            kfree(new_de);
+            return -1;
+        }
         new_de->node.ptr = content;
         new_de->node.read = kyrofs_read;
         new_de->node.write = kyrofs_write;
@@ -431,6 +442,8 @@ static int kd_flush_superblock(void) {
 }
 
 static int kd_flush_group(uint32_t g) {
+    if (!kd_groups || g >= kd_sb.group_count) return -1;
+    if ((uint64_t)kd_sb.group_count * sizeof(kyrofs_group_desc_t) > KYROFS_BLOCK_SIZE) return -1;
     uint8_t buf[KYROFS_BLOCK_SIZE];
     memset(buf, 0, sizeof(buf));
     kd_groups[g].crc32 = 0;
@@ -442,9 +455,11 @@ static int kd_flush_group(uint32_t g) {
 static int64_t kd_alloc_block(void) {
     for (uint32_t g = 0; g < kd_sb.group_count; g++) {
         if (kd_groups[g].free_blocks_in_group == 0) continue;
+        uint32_t max_blocks = kd_groups[g].group_blocks;
+        if (max_blocks > KYROFS_BLOCK_SIZE * 8) max_blocks = KYROFS_BLOCK_SIZE * 8;
         uint8_t bm[KYROFS_BLOCK_SIZE];
         if (kd_read_block(kd_groups[g].block_bitmap_block, bm) != 0) return -1;
-        for (uint32_t i = 0; i < kd_groups[g].group_blocks; i++) {
+        for (uint32_t i = 0; i < max_blocks; i++) {
             if (!bit_test(bm, i)) {
                 bit_set(bm, i);
                 kd_write_block(kd_groups[g].block_bitmap_block, bm);
@@ -465,6 +480,7 @@ static void kd_free_block(uint64_t block) {
         uint64_t end = start + kd_groups[g].group_blocks;
         if (block >= start && block < end) {
             uint32_t idx = (uint32_t)(block - start);
+            if (idx >= KYROFS_BLOCK_SIZE * 8) return;
             uint8_t bm[KYROFS_BLOCK_SIZE];
             if (kd_read_block(kd_groups[g].block_bitmap_block, bm) != 0) return;
             if (bit_test(bm, idx)) {
@@ -483,9 +499,11 @@ static void kd_free_block(uint64_t block) {
 static int64_t kd_alloc_inode(void) {
     for (uint32_t g = 0; g < kd_sb.group_count; g++) {
         if (kd_groups[g].free_inodes_in_group == 0) continue;
+        uint32_t max_inodes = kd_groups[g].group_inodes;
+        if (max_inodes > KYROFS_BLOCK_SIZE * 8) max_inodes = KYROFS_BLOCK_SIZE * 8;
         uint8_t bm[KYROFS_BLOCK_SIZE];
         if (kd_read_block(kd_groups[g].inode_bitmap_block, bm) != 0) return -1;
-        for (uint32_t i = 0; i < kd_groups[g].group_inodes; i++) {
+        for (uint32_t i = 0; i < max_inodes; i++) {
             if (!bit_test(bm, i)) {
                 bit_set(bm, i);
                 kd_write_block(kd_groups[g].inode_bitmap_block, bm);
@@ -504,7 +522,7 @@ static void kd_free_inode(uint64_t ino) {
     if (ino < 1 || kd_sb.inodes_per_group == 0) return;
     uint32_t g = (uint32_t)((ino - 1) / kd_sb.inodes_per_group);
     uint32_t idx = (uint32_t)((ino - 1) % kd_sb.inodes_per_group);
-    if (g >= kd_sb.group_count) return;
+    if (g >= kd_sb.group_count || idx >= KYROFS_BLOCK_SIZE * 8) return;
     uint8_t bm[KYROFS_BLOCK_SIZE];
     if (kd_read_block(kd_groups[g].inode_bitmap_block, bm) != 0) return;
     if (bit_test(bm, idx)) {
@@ -634,11 +652,14 @@ static int64_t kd_file_write(kyrofs_inode_t *ino, uint64_t offset, uint32_t size
 }
 
 static int kd_dir_find(kyrofs_inode_t *dir_ino, const char *name, kyrofs_dirent_t *out, uint64_t *out_off) {
+    if (!dir_ino || !name) return -1;
+    size_t nlen = strlen(name);
     uint64_t off = 0;
     while (off < dir_ino->size) {
         kyrofs_dirent_t de;
         if (kd_file_read(dir_ino, off, sizeof(de), (uint8_t *)&de) != sizeof(de)) break;
-        if (de.inode != 0 && strncmp(de.name, name, de.name_len) == 0 && name[de.name_len] == '\0') {
+        if (de.inode != 0 && de.name_len < sizeof(de.name) &&
+            nlen == de.name_len && strncmp(de.name, name, de.name_len) == 0) {
             if (out) *out = de;
             if (out_off) *out_off = off;
             return 0;
@@ -766,6 +787,7 @@ static int kd_vfs_remove(vfs_node_t *node, char *name) {
 static int kd_vfs_rmdir(vfs_node_t *node, char *name, uint16_t mode) { (void)mode; return kd_vfs_remove(node, name); }
 
 static int kd_vfs_stat(vfs_node_t *node, struct stat *stat_buf) {
+    if (!node || !node->ptr || !stat_buf) return -1;
     kyrofs_inode_info_t *ii = (kyrofs_inode_info_t *)node->ptr;
     memset(stat_buf, 0, sizeof(*stat_buf));
     stat_buf->st_size = (uint32_t)ii->inode.size;
@@ -837,6 +859,11 @@ int kyrofs_format(vfs_node_t *disk_device_node, uint32_t partition_lba, uint64_t
     cursor += 1;
     sb.journal_start = cursor;
     cursor += sb.journal_blocks;
+
+    if ((uint64_t)sb.group_count * sizeof(kyrofs_group_desc_t) > KYROFS_BLOCK_SIZE) {
+        klog(LOG_ERROR, "KyroFS: format group_count %u exceeds descriptor block", sb.group_count);
+        return -1;
+    }
 
     kyrofs_group_desc_t *groups = (kyrofs_group_desc_t *)kmalloc(sizeof(kyrofs_group_desc_t) * sb.group_count);
     if (!groups) return -1;
@@ -966,7 +993,7 @@ int kyrofs_format(vfs_node_t *disk_device_node, uint32_t partition_lba, uint64_t
 }
 
 int kyrofs_mount(vfs_node_t *mount_point, vfs_node_t *device_node) {
-    if (!device_node || !device_node->ioctl) {
+    if (!mount_point || !device_node || !device_node->ioctl) {
         klog(LOG_ERROR, "KyroFS: invalid device node for mount");
         return -1;
     }
@@ -983,7 +1010,9 @@ int kyrofs_mount(vfs_node_t *mount_point, vfs_node_t *device_node) {
     }
 
     memcpy(&kd_sb, sb_buf, sizeof(kd_sb));
-    if (kd_sb.magic != KYROFS_MAGIC || kd_sb.inodes_per_group == 0 || kd_sb.group_count == 0 || kd_sb.block_size == 0) {
+    if (kd_sb.magic != KYROFS_MAGIC || kd_sb.inodes_per_group == 0 || kd_sb.group_count == 0 ||
+        kd_sb.block_size == 0 ||
+        (uint64_t)kd_sb.group_count * sizeof(kyrofs_group_desc_t) > KYROFS_BLOCK_SIZE) {
         klog(LOG_ERROR, "KyroFS: bad magic or invalid geometry on partition, not a KyroFS volume");
         return -1;
     }
@@ -1003,10 +1032,29 @@ int kyrofs_mount(vfs_node_t *mount_point, vfs_node_t *device_node) {
     kd_part_lba = partition_lba;
 
     kd_groups = (kyrofs_group_desc_t *)kmalloc(sizeof(kyrofs_group_desc_t) * kd_sb.group_count);
-    if (!kd_groups) return -1;
+    if (!kd_groups) {
+        kd_device = NULL;
+        return -1;
+    }
     uint8_t gd_buf[KYROFS_BLOCK_SIZE];
-    if (kd_read_block(kd_sb.group_desc_block, gd_buf) != 0) { kfree(kd_groups); return -1; }
+    if (kd_read_block(kd_sb.group_desc_block, gd_buf) != 0) {
+        kfree(kd_groups);
+        kd_groups = NULL;
+        kd_device = NULL;
+        return -1;
+    }
     memcpy(kd_groups, gd_buf, sizeof(kyrofs_group_desc_t) * kd_sb.group_count);
+
+    for (uint32_t g = 0; g < kd_sb.group_count; g++) {
+        if (kd_groups[g].group_blocks > KYROFS_BLOCK_SIZE * 8 ||
+            kd_groups[g].group_inodes > KYROFS_BLOCK_SIZE * 8) {
+            klog(LOG_ERROR, "KyroFS: group %u bitmap size exceeds block", g);
+            kfree(kd_groups);
+            kd_groups = NULL;
+            kd_device = NULL;
+            return -1;
+        }
+    }
 
     kyrofs_journal_replay();
 
@@ -1016,11 +1064,19 @@ int kyrofs_mount(vfs_node_t *mount_point, vfs_node_t *device_node) {
     kyrofs_inode_t root_ino;
     if (kd_read_inode(kd_sb.root_inode, &root_ino) != 0) {
         klog(LOG_ERROR, "KyroFS: failed to read root inode");
+        kfree(kd_groups);
+        kd_groups = NULL;
+        kd_device = NULL;
         return -1;
     }
 
     vfs_node_t *root_vfs = kd_make_vfs_node(kd_sb.root_inode, &root_ino, "/");
-    if (!root_vfs) return -1;
+    if (!root_vfs) {
+        kfree(kd_groups);
+        kd_groups = NULL;
+        kd_device = NULL;
+        return -1;
+    }
 
     mount_point->flags |= VFS_MOUNTPOINT | VFS_DIRECTORY;
     mount_point->ptr = root_vfs->ptr;

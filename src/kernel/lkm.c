@@ -7,6 +7,9 @@
 #include "vmm.h"
 #include "devfs.h"
 #include "isr.h"
+#include "scheduler.h"
+#include "uaccess.h"
+#include "errno.h"
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
@@ -15,8 +18,6 @@
 lkm_manager_t g_lkm_manager;
 
 // Forward declarations for kernel functions
-extern void schedule(void);
-extern int thread_create(void (*entry)(void *), void *arg);
 extern void vfs_close(vfs_node_t *node);
 
 // Kernel symbol table for module relocations
@@ -90,9 +91,14 @@ static uint32_t lkm_dev_read(vfs_node_t *node, uint64_t offset, uint32_t size, u
     if (!mod) {
         len += ksprintf(text + len, "(no modules loaded)\n");
     } else {
-        while (mod && len < 900) {
-            len += ksprintf(text + len, "%s  %u bytes  addr:0x%x  refs:%d\n",
-                            mod->name, (uint32_t)mod->size, (uint64_t)mod->base, mod->refcount);
+        while (mod) {
+            char line[256];
+            int n = ksprintf(line, "%s  %u bytes  addr:0x%x  refs:%d\n",
+                             mod->name, (uint32_t)mod->size, (uint64_t)mod->base, mod->refcount);
+            if (n <= 0 || len + n >= (int)sizeof(text)) break;
+            memcpy(text + len, line, (size_t)n);
+            len += n;
+            text[len] = '\0';
             mod = mod->next;
         }
     }
@@ -128,13 +134,18 @@ static uint32_t lkm_dev_write(vfs_node_t *node, uint64_t offset, uint32_t size, 
 
 static int lkm_dev_ioctl(vfs_node_t *node, int request, void *argp) {
     (void)node;
-    if (!argp) return -1;
+    thread_t *t = get_current_thread();
+    if (!t || t->euid != 0) return -EPERM;
+    if (!argp) return -EINVAL;
+    char buf[MAX_FILENAME_LEN];
+    int rc = copy_user_string(buf, (const char *)argp, sizeof(buf));
+    if (rc != 0) return rc;
     if (request == 1) { // Load path
-        return lkm_load_module(&g_lkm_manager, (const char *)argp);
+        return lkm_load_module(&g_lkm_manager, buf);
     } else if (request == 2) { // Unload name
-        return lkm_unload_module(&g_lkm_manager, (const char *)argp);
+        return lkm_unload_module(&g_lkm_manager, buf);
     }
-    return -1;
+    return -EINVAL;
 }
 
 void lkm_manager_init(lkm_manager_t *mgr) {
@@ -195,7 +206,23 @@ int lkm_load_from_buffer(const uint8_t *data, size_t size, kernel_module_t **out
         return -1;
     }
 
+    if (ehdr->e_shnum == 0 || ehdr->e_shentsize != sizeof(Elf64_Shdr) ||
+        ehdr->e_shoff > size ||
+        (uint64_t)ehdr->e_shnum > (size - ehdr->e_shoff) / sizeof(Elf64_Shdr)) {
+        klog(LOG_ERROR, "LKM: Invalid section header table bounds.");
+        return -1;
+    }
+
     const Elf64_Shdr *shdr = (const Elf64_Shdr *)(data + ehdr->e_shoff);
+
+    for (int i = 0; i < ehdr->e_shnum; i++) {
+        if (shdr[i].sh_type != SHT_NOBITS) {
+            if (shdr[i].sh_offset > size || shdr[i].sh_size > size - shdr[i].sh_offset) {
+                klog(LOG_ERROR, "LKM: Section %d exceeds module buffer.", i);
+                return -1;
+            }
+        }
+    }
 
     // Track loaded addresses for each section
     uint64_t *section_addrs = kmalloc(ehdr->e_shnum * sizeof(uint64_t));
@@ -210,6 +237,10 @@ int lkm_load_from_buffer(const uint8_t *data, size_t size, kernel_module_t **out
     for (int i = 0; i < ehdr->e_shnum; i++) {
         if (shdr[i].sh_flags & 0x2 /* SHF_ALLOC */) {
             size_t align = shdr[i].sh_addralign ? shdr[i].sh_addralign : 1;
+            if (shdr[i].sh_size > 0x10000000ULL || align > 0x100000ULL) {
+                kfree(section_addrs);
+                return -1;
+            }
             total_size = (total_size + align - 1) & ~(align - 1);
             total_size += shdr[i].sh_size;
         }
@@ -257,22 +288,45 @@ int lkm_load_from_buffer(const uint8_t *data, size_t size, kernel_module_t **out
         if (shdr[i].sh_type == SHT_RELA) {
             uint32_t target_sec = shdr[i].sh_info;
             if (target_sec >= ehdr->e_shnum || !section_addrs[target_sec]) continue;
+            if (shdr[i].sh_link >= ehdr->e_shnum) {
+                kfree(module_base);
+                kfree(section_addrs);
+                return -1;
+            }
+            const Elf64_Shdr *symsec = &shdr[shdr[i].sh_link];
+            if (symsec->sh_link >= ehdr->e_shnum) {
+                kfree(module_base);
+                kfree(section_addrs);
+                return -1;
+            }
+            const Elf64_Shdr *strsec = &shdr[symsec->sh_link];
+            uint32_t sym_count = (uint32_t)(symsec->sh_size / sizeof(Elf64_Sym));
             uint8_t *target_base = (uint8_t *)section_addrs[target_sec];
 
             const Elf64_Rela *rela = (const Elf64_Rela *)(data + shdr[i].sh_offset);
-            int rela_count = shdr[i].sh_size / sizeof(Elf64_Rela);
+            int rela_count = (int)(shdr[i].sh_size / sizeof(Elf64_Rela));
 
-            const Elf64_Shdr *symsec = &shdr[shdr[i].sh_link];
             const Elf64_Sym *syms = (const Elf64_Sym *)(data + symsec->sh_offset);
-            const char *sym_strs = (const char *)(data + shdr[symsec->sh_link].sh_offset);
+            const char *sym_strs = (const char *)(data + strsec->sh_offset);
 
             for (int r = 0; r < rela_count; r++) {
                 uint32_t sym_idx = ELF64_R_SYM(rela[r].r_info);
                 uint32_t type = ELF64_R_TYPE(rela[r].r_info);
+                if (sym_idx >= sym_count) continue;
                 const Elf64_Sym *sym = &syms[sym_idx];
+
+                size_t rel_sz = (type == 1) ? 8 : ((type == 2 || type == 4 || type == 10 || type == 11) ? 4 : 0);
+                if (rel_sz && (rela[r].r_offset > shdr[target_sec].sh_size ||
+                               rel_sz > shdr[target_sec].sh_size - rela[r].r_offset)) {
+                    klog(LOG_ERROR, "LKM: Relocation offset out of bounds.");
+                    kfree(module_base);
+                    kfree(section_addrs);
+                    return -1;
+                }
 
                 uint64_t S = 0;
                 if (sym->st_shndx == 0 /* SHN_UNDEF */) {
+                    if (sym->st_name >= strsec->sh_size) continue;
                     const char *sname = sym_strs + sym->st_name;
                     S = find_kernel_symbol(sname);
                     if (!S) {
@@ -338,10 +392,13 @@ int lkm_load_from_buffer(const uint8_t *data, size_t size, kernel_module_t **out
 
     for (int i = 0; i < ehdr->e_shnum; i++) {
         if (shdr[i].sh_type == SHT_SYMTAB) {
+            if (shdr[i].sh_link >= ehdr->e_shnum) continue;
+            const Elf64_Shdr *strsec = &shdr[shdr[i].sh_link];
             const Elf64_Sym *syms = (const Elf64_Sym *)(data + shdr[i].sh_offset);
-            const char *sym_strs = (const char *)(data + shdr[shdr[i].sh_link].sh_offset);
-            int count = shdr[i].sh_size / sizeof(Elf64_Sym);
+            const char *sym_strs = (const char *)(data + strsec->sh_offset);
+            int count = (int)(shdr[i].sh_size / sizeof(Elf64_Sym));
             for (int s = 0; s < count; s++) {
+                if (syms[s].st_name >= strsec->sh_size) continue;
                 const char *sname = sym_strs + syms[s].st_name;
                 if (syms[s].st_shndx < ehdr->e_shnum && section_addrs[syms[s].st_shndx]) {
                     uint64_t sym_addr = section_addrs[syms[s].st_shndx] + syms[s].st_value;

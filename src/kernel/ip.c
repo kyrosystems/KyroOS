@@ -45,6 +45,9 @@ static uint16_t ip_checksum(const void *data, size_t len) {
 
 void ip_send_packet(net_dev_t *net_dev, uint32_t dest_ip, uint8_t protocol,
                     const uint8_t *payload, size_t payload_size) {
+    if (payload_size > 65535 - sizeof(ipv4_header_t)) return;
+    if (!payload && payload_size > 0) return;
+
     /* Loopback traffic (127.0.0.0/8): build a full Ethernet+IP frame and
        hand it to the lo device, which loops it back into the RX path. */
     if ((dest_ip & 0xFF000000) == 0x7F000000) {
@@ -155,14 +158,16 @@ void ip_send_packet(net_dev_t *net_dev, uint32_t dest_ip, uint8_t protocol,
 }
 
 void ip_handle_packet(net_dev_t *net_dev, const uint8_t *packet, size_t size) {
-    if (size < sizeof(ipv4_header_t)) return;
+    if (!packet || size < sizeof(ipv4_header_t)) return;
     const ipv4_header_t *ip = (const ipv4_header_t *)packet;
     if (ip->version != 4) return;
 
-    size_t        hlen   = ip->ihl * 4;
-    if (size < hlen) return;
+    size_t   hlen    = (size_t)ip->ihl * 4;
+    if (hlen < sizeof(ipv4_header_t) || hlen > size) return;
+    uint16_t tot_len = __builtin_bswap16(ip->total_length);
+    if (tot_len < hlen || tot_len > size) return;
     const uint8_t *payload = packet + hlen;
-    size_t        psize  = __builtin_bswap16(ip->total_length) - hlen;
+    size_t         psize   = (size_t)tot_len - hlen;
 
     // DHCP packets (ports 67/68) must always be delivered regardless of local IP configuration
     if (ip->protocol == IP_PROTOCOL_UDP && psize >= sizeof(udp_header_t)) {

@@ -99,6 +99,7 @@ static bool parse_url(const char *url, parsed_url_t *out) {
 
 // Determine default filename from URL path
 static void default_filename(const char *path, char *out, size_t outsz) {
+    if (!out || outsz == 0) return;
     const char *slash = strrchr(path, '/');
     const char *name  = (slash && *(slash+1)) ? slash+1 : NULL;
     if (name && strlen(name) > 0) {
@@ -195,7 +196,7 @@ redirect:;
 
     // Send HTTP GET request
     char req[HTTP_REQ_BUF_SIZE];
-    int  req_len = sprintf(req,
+    int  req_len = snprintf(req, sizeof(req),
         "GET %s HTTP/1.1\r\n"
         "Host: %s\r\n"
         "User-Agent: KyroOS-wget/1.0\r\n"
@@ -203,6 +204,12 @@ redirect:;
         "Connection: close\r\n"
         "\r\n",
         current_path, pu.host);
+    if (req_len < 0 || req_len >= (int)sizeof(req)) {
+        print("wget: Request exceeds buffer size.\n");
+        if (tls) tls_destroy_session(tls);
+        close(sockfd);
+        return 1;
+    }
 
     if (wget_write(sockfd, tls, req, req_len) < 0) {
         print("wget: Failed to send request.\n");
@@ -245,7 +252,7 @@ redirect:;
     }
 
     if (verbose) {
-        print("wget: HTTP status "); char sc[8]; sprintf(sc, "%d\n", status_code); print(sc);
+        print("wget: HTTP status "); char sc[16]; snprintf(sc, sizeof(sc), "%d\n", status_code); print(sc);
     }
 
     // Handle redirects (301, 302, 303, 307, 308)
@@ -253,6 +260,7 @@ redirect:;
          status_code == 303 || status_code == 307 || status_code == 308)
          && redirect_count < max_redirect) {
         char *loc = strstr(hdr_buf, "Location:");
+        if (!loc) loc = strstr(hdr_buf, "location:");
         if (loc) {
             loc += 9;
             while (*loc == ' ') loc++;
@@ -262,11 +270,13 @@ redirect:;
             size_t ulen = (size_t)(eol - loc);
             if (ulen >= sizeof(new_url)) ulen = sizeof(new_url) - 1;
             memcpy(new_url, loc, ulen); new_url[ulen] = '\0';
+            if (tls) { tls_destroy_session(tls); tls = NULL; }
             close(sockfd);
             redirect_count++;
             print("wget: Redirect -> "); print(new_url); print("\n");
             if (!parse_url(new_url, &pu)) return 1;
             strncpy(current_path, pu.path, MAX_URL_PART_LEN - 1);
+            current_path[MAX_URL_PART_LEN - 1] = '\0';
             server_ip = resolve_host(pu.host);
             if (!server_ip) { print("wget: DNS failed after redirect.\n"); return 1; }
             goto redirect;
@@ -274,7 +284,8 @@ redirect:;
     }
 
     if (status_code != 200) {
-        print("wget: Server returned "); char sc[8]; sprintf(sc, "%d\n", status_code); print(sc);
+        print("wget: Server returned "); char sc[16]; snprintf(sc, sizeof(sc), "%d\n", status_code); print(sc);
+        if (tls) tls_destroy_session(tls);
         close(sockfd); return 1;
     }
 
@@ -293,12 +304,13 @@ redirect:;
     }
 
     if (verbose && has_cl) {
-        char cls[16]; sprintf(cls, "%u", content_length); print("wget: Content-Length: "); print(cls); print("\n");
+        char cls[16]; snprintf(cls, sizeof(cls), "%u", content_length); print("wget: Content-Length: "); print(cls); print("\n");
     }
 
     int file_fd = open(out_file, O_CREAT | O_TRUNC | O_WRONLY);
     if (file_fd < 0) {
         print("wget: Cannot create file: "); print(out_file); print("\n");
+        if (tls) tls_destroy_session(tls);
         close(sockfd); return 1;
     }
 
@@ -324,6 +336,6 @@ redirect:;
     close(sockfd);
 
     print("wget: Saved '"); print(out_file); print("' (");
-    char sz[16]; sprintf(sz, "%u bytes)\n", downloaded); print(sz);
+    char sz[24]; snprintf(sz, sizeof(sz), "%u bytes)\n", downloaded); print(sz);
     return 0;
 }

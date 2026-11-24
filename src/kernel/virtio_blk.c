@@ -70,12 +70,21 @@ static int virtio_blk_rw(uint64_t sector, uint32_t count, void *buffer, int is_w
 
 static int virtio_blk_ioctl(vfs_node_t *node, int request, void *arg) {
     (void)node;
+    if (!arg) return -1;
     if (request == IDE_IOCTL_READ_BLOCKS) {
         ide_read_blocks_t *rb = (ide_read_blocks_t *)arg;
+        if (!rb->buffer) return -1;
+        if (rb->count == 0) return 0;
+        if ((uint64_t)rb->lba + rb->count > g_capacity_sectors) return -1;
+        if ((uint64_t)rb->count * 512 > 0xFFFFFFFFULL) return -1;
         return virtio_blk_rw(rb->lba, rb->count, rb->buffer, 0);
     } else if (request == IDE_IOCTL_WRITE_BLOCKS) {
         ide_write_blocks_t *wb = (ide_write_blocks_t *)arg;
-        return virtio_blk_rw(wb->lba, wb->count, wb->buffer, 1);
+        if (!wb->buffer) return -1;
+        if (wb->count == 0) return 0;
+        if ((uint64_t)wb->lba + wb->count > g_capacity_sectors) return -1;
+        if ((uint64_t)wb->count * 512 > 0xFFFFFFFFULL) return -1;
+        return virtio_blk_rw(wb->lba, wb->count, (void *)(uintptr_t)wb->buffer, 1);
     }
     return -1;
 }
@@ -110,6 +119,10 @@ void virtio_blk_init(pci_device_t *dev) {
 
     // Allocate queue memory (page aligned)
     void *q_phys = pmm_alloc_pages(2);
+    if (!q_phys) {
+        klog(LOG_ERROR, "virtio-blk: Failed to allocate queue memory.");
+        return;
+    }
     void *q_virt = vmm_phys_to_virt(q_phys);
     memset(q_virt, 0, PAGE_SIZE * 2);
 

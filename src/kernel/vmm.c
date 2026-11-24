@@ -299,12 +299,19 @@ pml4_t *vmm_clone_address_space(pml4_t *src_pml4) {
     pml4_t *k = kernel_pml4 ? kernel_pml4 : vmm_get_current_pml4();
     memcpy(&new_pml4_virt->entries[256], &k->entries[256], 256 * sizeof(uint64_t));
 
+    const fb_info_t *fb = fb_get_info();
+    uint64_t fb_phys = (fb && fb->address) ? ((uint64_t)fb->address - kernel_hhdm_offset) : 0;
+    uint64_t fb_len = fb ? ((uint64_t)fb->pitch * fb->height) : 0;
+
     // Clone user space (lower half: 0..255) with COW
     for (int pml4_i = 0; pml4_i < 256; pml4_i++) {
         if (!(src_pml4->entries[pml4_i] & PAGE_PRESENT)) continue;
 
         void *new_pdpt_phys = pmm_alloc_page();
-        if (!new_pdpt_phys) return NULL;
+        if (!new_pdpt_phys) {
+            vmm_destroy_address_space(new_pml4_virt);
+            return NULL;
+        }
         pdpt_t *new_pdpt_virt = (pdpt_t *)vmm_phys_to_virt(new_pdpt_phys);
         memset(new_pdpt_virt, 0, PAGE_SIZE);
         new_pml4_virt->entries[pml4_i] = (uint64_t)new_pdpt_phys | PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
@@ -314,7 +321,10 @@ pml4_t *vmm_clone_address_space(pml4_t *src_pml4) {
             if (!(src_pdpt_virt->entries[pdpt_i] & PAGE_PRESENT)) continue;
 
             void *new_pd_phys = pmm_alloc_page();
-            if (!new_pd_phys) return NULL;
+            if (!new_pd_phys) {
+                vmm_destroy_address_space(new_pml4_virt);
+                return NULL;
+            }
             pd_t *new_pd_virt = (pd_t *)vmm_phys_to_virt(new_pd_phys);
             memset(new_pd_virt, 0, PAGE_SIZE);
             new_pdpt_virt->entries[pdpt_i] = (uint64_t)new_pd_phys | PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
@@ -324,7 +334,10 @@ pml4_t *vmm_clone_address_space(pml4_t *src_pml4) {
                 if (!(src_pd_virt->entries[pd_i] & PAGE_PRESENT)) continue;
 
                 void *new_pt_phys = pmm_alloc_page();
-                if (!new_pt_phys) return NULL;
+                if (!new_pt_phys) {
+                    vmm_destroy_address_space(new_pml4_virt);
+                    return NULL;
+                }
                 pt_t *new_pt_virt = (pt_t *)vmm_phys_to_virt(new_pt_phys);
                 memset(new_pt_virt, 0, PAGE_SIZE);
                 new_pd_virt->entries[pd_i] = (uint64_t)new_pt_phys | PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
@@ -335,14 +348,21 @@ pml4_t *vmm_clone_address_space(pml4_t *src_pml4) {
                     if (!(pte & PAGE_PRESENT)) continue;
 
                     uint64_t phys = pte & PHYSICAL_ADDR_MASK;
-                    // If writable user page, mark COW and remove write permissions in both
-                    if (pte & PAGE_WRITE) {
-                        pte &= ~PAGE_WRITE;
-                        pte |= PAGE_COW;
-                        src_pt_virt->entries[pt_i] = pte;
+                    // Never COW or refcount framebuffer / MMIO mappings
+                    if (fb_phys && phys >= fb_phys && phys < fb_phys + fb_len) {
+                        new_pt_virt->entries[pt_i] = pte;
+                        continue;
+                    }
+                    // For normal user/owned pages: mark writable pages COW and increment refcount
+                    if (pte & (PAGE_USER | PAGE_OWNED)) {
+                        if (pte & PAGE_WRITE) {
+                            pte &= ~PAGE_WRITE;
+                            pte |= PAGE_COW;
+                            src_pt_virt->entries[pt_i] = pte;
+                        }
+                        pmm_page_ref((void *)phys);
                     }
                     new_pt_virt->entries[pt_i] = pte;
-                    pmm_page_ref((void *)phys);
                 }
             }
         }

@@ -54,14 +54,31 @@ void scheduler_add_thread(thread_t *thread) {
 
 thread_t *get_current_thread() { return current_thread; }
 
-thread_t *scheduler_find_thread(uint64_t pid) {
-  if (!ready_queue) return NULL;
+static bool scheduler_pid_alive_locked(uint64_t pid) {
+  if (!ready_queue) return false;
   thread_t *c = ready_queue;
   do {
-    if (c->id == pid && c->state != THREAD_DEAD) return c;
+    if (c->id == pid && c->state != THREAD_DEAD) return true;
     c = c->next;
   } while (c && c != ready_queue);
-  return NULL;
+  return false;
+}
+
+thread_t *scheduler_find_thread(uint64_t pid) {
+  uint64_t iflags = spinlock_acquire_irqsave(&sched_lock);
+  thread_t *found = NULL;
+  if (ready_queue) {
+    thread_t *c = ready_queue;
+    do {
+      if (c->id == pid && c->state != THREAD_DEAD) {
+        found = c;
+        break;
+      }
+      c = c->next;
+    } while (c && c != ready_queue);
+  }
+  spinlock_release_irqrestore(&sched_lock, iflags);
+  return found;
 }
 
 // Reap THREAD_DEAD threads: free kernel stack, fd table (sockets/pipes) and the
@@ -69,47 +86,94 @@ thread_t *scheduler_find_thread(uint64_t pid) {
 // address space (~MBs per command). Called from schedule() after a context
 // switch, in the resumed thread's context, with interrupts disabled.
 static void scheduler_reap_dead(thread_t *guard) {
-  if (!ready_queue) return;
-  int count = 0;
-  thread_t *c = ready_queue;
-  do { count++; c = c->next; } while (c && c != ready_queue && count < 1024);
-  if (count >= 1024) return; // ring corrupt: refuse to walk 
-  thread_t *prev = ready_queue;
-  thread_t *cur = ready_queue->next;
-  for (int i = 0; i < count && cur && ready_queue; i++) {
-    thread_t *next = cur->next;
-    if (cur->state == THREAD_DEAD && cur != guard) {
-      for (int f = 0; f < MAX_FILES; f++) fd_release(&cur->fd_table[f]);
+  thread_t *dead_list = NULL;
 
-      // Record child termination for waitpid
-      for (int r = 0; r < MAX_DEAD_RECORDS; r++) {
-        if (!dead_records[r].active) {
-          dead_records[r].pid = cur->id;
-          dead_records[r].parent_id = cur->parent_id;
-          dead_records[r].status = cur->exit_status;
-          dead_records[r].active = 1;
-          break;
+  uint64_t iflags = spinlock_acquire_irqsave(&sched_lock);
+  if (ready_queue) {
+    int count = 0;
+    thread_t *c = ready_queue;
+    do { count++; c = c->next; } while (c && c != ready_queue && count < 1024);
+    if (count < 1024) {
+      thread_t *prev = ready_queue;
+      thread_t *cur = ready_queue->next;
+      for (int i = 0; i < count && cur && ready_queue; i++) {
+        thread_t *next = cur->next;
+        if (cur->state == THREAD_DEAD && cur != guard) {
+          // Unlink cur from ready_queue
+          if (cur->next == cur) {
+            ready_queue = NULL;
+          } else {
+            prev->next = cur->next;
+            if (ready_queue == cur) {
+              ready_queue = prev;
+            }
+          }
+          if (console_focus == cur) console_focus = NULL;
+
+          // Discard any orphaned dead records belonging to this dying parent
+          for (int r = 0; r < MAX_DEAD_RECORDS; r++) {
+            if (dead_records[r].active && dead_records[r].parent_id == cur->id) {
+              dead_records[r].active = 0;
+            }
+          }
+
+          // Only record child termination if parent is still alive to waitpid on it
+          if (scheduler_pid_alive_locked(cur->parent_id)) {
+            int slot = -1;
+            for (int r = 0; r < MAX_DEAD_RECORDS; r++) {
+              if (!dead_records[r].active) {
+                slot = r;
+                break;
+              }
+            }
+            if (slot < 0) {
+              // Reclaim stale records whose parents are no longer alive
+              for (int r = 0; r < MAX_DEAD_RECORDS; r++) {
+                if (dead_records[r].active &&
+                    !scheduler_pid_alive_locked(dead_records[r].parent_id)) {
+                  dead_records[r].active = 0;
+                  if (slot < 0) slot = r;
+                }
+              }
+            }
+            if (slot >= 0) {
+              dead_records[slot].pid = cur->id;
+              dead_records[slot].parent_id = cur->parent_id;
+              dead_records[slot].status = cur->exit_status;
+              dead_records[slot].active = 1;
+            }
+          }
+
+          cur->next = dead_list;
+          dead_list = cur;
+        } else {
+          prev = cur;
         }
+        cur = next;
       }
-
-      // destroy the user address space unless it is the active CR3 (kernel threads share the kernel pml4 and must never free it).
-      if (cur->pml4 && cur->pml4 != kernel_pml4 && cur->pml4 != vmm_get_current_pml4()) {
-        vmm_destroy_address_space(cur->pml4);
-      }
-      display_release(cur);
-      fb_release_graphics_owner(cur->id);
-      if (cur->stack) kfree(cur->stack);
-      prev->next = cur->next;
-      if (ready_queue == cur) {
-        ready_queue = (cur->next == cur) ? NULL : cur->next;
-      }
-      if (console_focus == cur) console_focus = NULL;
-      kfree(cur);
-      klog(LOG_DEBUG, "REAPER: reaped dead thread (address space freed)");
-    } else {
-      prev = cur;
     }
-    cur = next;
+  }
+  spinlock_release_irqrestore(&sched_lock, iflags);
+
+  while (dead_list) {
+    thread_t *cur = dead_list;
+    dead_list = cur->next;
+    cur->next = NULL;
+
+    for (int f = 0; f < MAX_FILES; f++) fd_release(&cur->fd_table[f]);
+
+    // Destroy user address space; switch away first if CR3 still points to it
+    if (cur->pml4 && cur->pml4 != kernel_pml4) {
+      if (cur->pml4 == vmm_get_current_pml4()) {
+        vmm_switch_address_space(kernel_pml4);
+      }
+      vmm_destroy_address_space(cur->pml4);
+    }
+    display_release(cur);
+    fb_release_graphics_owner(cur->id);
+    if (cur->stack) kfree(cur->stack);
+    kfree(cur);
+    klog(LOG_DEBUG, "REAPER: reaped dead thread (address space freed)");
   }
 }
 
@@ -118,7 +182,7 @@ int scheduler_waitpid(uint64_t target_pid, int *status_out, int options) {
   if (!cur) return -1;
 
   while (1) {
-    disable_interrupts();
+    uint64_t iflags = spinlock_acquire_irqsave(&sched_lock);
     // 1. Check if any dead record matches
     for (int r = 0; r < MAX_DEAD_RECORDS; r++) {
       if (dead_records[r].active) {
@@ -130,11 +194,12 @@ int scheduler_waitpid(uint64_t target_pid, int *status_out, int options) {
         }
         if (match) {
           uint64_t reaped_pid = dead_records[r].pid;
-          if (status_out) {
-            *status_out = (dead_records[r].status & 0xFF) << 8;
-          }
+          int status = (dead_records[r].status & 0xFF) << 8;
           dead_records[r].active = 0;
-          enable_interrupts();
+          spinlock_release_irqrestore(&sched_lock, iflags);
+          if (status_out) {
+            *status_out = status;
+          }
           return (int)reaped_pid;
         }
       }
@@ -154,18 +219,18 @@ int scheduler_waitpid(uint64_t target_pid, int *status_out, int options) {
     }
 
     if (!child_found) {
-      enable_interrupts();
+      spinlock_release_irqrestore(&sched_lock, iflags);
       return -10; // -ECHILD
     }
 
     // Child is running. If WNOHANG (options & 1), return 0 immediately.
     if (options & 1) {
-      enable_interrupts();
+      spinlock_release_irqrestore(&sched_lock, iflags);
       return 0;
     }
 
     // Yield and wait for child to terminate
-    enable_interrupts();
+    spinlock_release_irqrestore(&sched_lock, iflags);
     schedule();
   }
 }

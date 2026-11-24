@@ -20,6 +20,7 @@ static void win_save_cwd(void) {
     char cur[256];
     if (getcwd(cur, sizeof(cur)) == 0 && cur[0]) {
         strncpy(windows[active_win].cwd, cur, sizeof(windows[active_win].cwd) - 1);
+        windows[active_win].cwd[sizeof(windows[active_win].cwd) - 1] = '\0';
     }
 }
 
@@ -47,6 +48,7 @@ static void win_init(void) {
     }
     windows[0].active = true;
     strncpy(windows[0].name, "sh", sizeof(windows[0].name) - 1);
+    windows[0].name[sizeof(windows[0].name) - 1] = '\0';
     active_win = 0;
 }
 
@@ -88,8 +90,9 @@ static void win_new(const char *name) {
             windows[i].active = true;
             if (name && name[0]) {
                 strncpy(windows[i].name, name, sizeof(windows[i].name) - 1);
+                windows[i].name[sizeof(windows[i].name) - 1] = '\0';
             } else {
-                sprintf(windows[i].name, "sh-%d", i);
+                snprintf(windows[i].name, sizeof(windows[i].name), "sh-%d", i);
             }
             char cur[256];
             if (getcwd(cur, sizeof(cur)) == 0 && cur[0]) {
@@ -97,6 +100,7 @@ static void win_new(const char *name) {
             } else {
                 strncpy(windows[i].cwd, "/", sizeof(windows[i].cwd) - 1);
             }
+            windows[i].cwd[sizeof(windows[i].cwd) - 1] = '\0';
             win_switch(i);
             return;
         }
@@ -122,7 +126,7 @@ static void win_close(int target) {
     }
 }
 
-static char cmd_history[32][256];
+static char cmd_history[32][MAX_LINE];
 static int cmd_history_count = 0;
 
 static void read_line(char *buf, int max_len) {
@@ -130,6 +134,7 @@ static void read_line(char *buf, int max_len) {
     int pos = 0;
     int history_idx = -1;
 
+    if (!buf || max_len <= 0) return;
     buf[0] = '\0';
 
     while (1) {
@@ -322,10 +327,9 @@ static void read_line(char *buf, int max_len) {
                         }
                         print_flush();
                     }
-                } else if (seq[1] == '3') { // Delete key (\033[3~)
+                } else if (seq[1] >= '0' && seq[1] <= '9') { // CSI <n>~ (e.g. Delete \033[3~, Insert, PgUp, PgDn)
                     char tilde = 0;
-                    read(0, &tilde, 1);
-                    if (pos < len) {
+                    if (read(0, &tilde, 1) > 0 && seq[1] == '3' && tilde == '~' && pos < len) {
                         memmove(buf + pos, buf + pos + 1, len - pos);
                         len--;
                         buf[len] = '\0';
@@ -350,10 +354,13 @@ static void read_line(char *buf, int max_len) {
             if (len > 0) {
                 if (cmd_history_count == 0 || strcmp(cmd_history[cmd_history_count - 1], buf) != 0) {
                     if (cmd_history_count < 32) {
-                        strncpy(cmd_history[cmd_history_count++], buf, 255);
+                        strncpy(cmd_history[cmd_history_count], buf, sizeof(cmd_history[0]) - 1);
+                        cmd_history[cmd_history_count][sizeof(cmd_history[0]) - 1] = '\0';
+                        cmd_history_count++;
                     } else {
                         memmove(&cmd_history[0], &cmd_history[1], sizeof(cmd_history[0]) * 31);
-                        strncpy(cmd_history[31], buf, 255);
+                        strncpy(cmd_history[31], buf, sizeof(cmd_history[0]) - 1);
+                        cmd_history[31][sizeof(cmd_history[0]) - 1] = '\0';
                     }
                 }
             }
@@ -405,17 +412,26 @@ static void read_line(char *buf, int max_len) {
 static int parse_args(char *line, char *argv[], char **redir_in, char **redir_out, int *append_out) {
     int argc = 0;
     char *p = line;
+    char pending_op = '\0';
     *redir_in = NULL;
     *redir_out = NULL;
     *append_out = 0;
 
-    while (*p && argc < MAX_ARGS - 1) {
-        while (*p == ' ' || *p == '\t') p++;
-        if (*p == '\0') break;
+    while ((*p || pending_op) && argc < MAX_ARGS - 1) {
+        if (!pending_op) {
+            while (*p == ' ' || *p == '\t') p++;
+            if (*p == '\0') break;
+        }
+
+        char op = pending_op;
+        if (op) {
+            pending_op = '\0';
+        } else if (*p == '>' || *p == '<') {
+            op = *p++;
+        }
 
         // Check for redirection
-        if (*p == '>') {
-            p++;
+        if (op == '>') {
             if (*p == '>') {
                 *append_out = 1;
                 p++;
@@ -425,26 +441,45 @@ static int parse_args(char *line, char *argv[], char **redir_in, char **redir_ou
             while (*p == ' ' || *p == '\t') p++;
             char *start = p;
             while (*p && *p != ' ' && *p != '\t' && *p != '<' && *p != '>') p++;
-            if (*p) { *p = '\0'; p++; }
+            if (*p == '<' || *p == '>') {
+                pending_op = *p;
+                *p++ = '\0';
+            } else if (*p) {
+                *p++ = '\0';
+            }
+            if (*start == '\0') {
+                print("sh: syntax error near unexpected token '>'\n");
+                print_flush();
+                return -1;
+            }
             *redir_out = start;
             continue;
-        } else if (*p == '<') {
-            p++;
+        } else if (op == '<') {
             while (*p == ' ' || *p == '\t') p++;
             char *start = p;
             while (*p && *p != ' ' && *p != '\t' && *p != '<' && *p != '>') p++;
-            if (*p) { *p = '\0'; p++; }
+            if (*p == '<' || *p == '>') {
+                pending_op = *p;
+                *p++ = '\0';
+            } else if (*p) {
+                *p++ = '\0';
+            }
+            if (*start == '\0') {
+                print("sh: syntax error near unexpected token '<'\n");
+                print_flush();
+                return -1;
+            }
             *redir_in = start;
             continue;
         }
 
         char *start = p;
         while (*p && *p != ' ' && *p != '\t' && *p != '>' && *p != '<') p++;
-        if (*p && (*p == '>' || *p == '<')) {
-            // will be handled in next iteration
+        if (*p == '>' || *p == '<') {
+            pending_op = *p;
+            *p++ = '\0';
         } else if (*p) {
-            *p = '\0';
-            p++;
+            *p++ = '\0';
         }
         argv[argc++] = start;
     }
@@ -489,72 +524,120 @@ static void get_username(uint32_t uid, char *out, size_t out_len) {
     snprintf(out, out_len, "user%u", uid);
 }
 
-static int execute_command(int argc, char *argv[], char *redir_in, char *redir_out, int append_out) {
-    if (argc == 0 || !argv[0]) return 0;
+static int run_command_line(char *line);
+static int source_depth = 0;
 
-    // Builtins
+static int execute_command_ex(int argc, char *argv[], char *redir_in, char *redir_out, int append_out, int *async_pid_out) {
+    if (async_pid_out) *async_pid_out = -1;
+    if (argc <= 0 || !argv[0]) return 0;
+
+    // Builtin exit handles directly before setting up redirections
     if (strcmp(argv[0], "exit") == 0) {
         int code = (argc > 1) ? atoi(argv[1]) : 0;
         exit(code);
     }
 
+    // Handle I/O redirection for both builtins and external binaries
+    int orig_stdin = -1;
+    int orig_stdout = -1;
+
+    if (redir_in) {
+        int ifd = open(redir_in, O_RDONLY);
+        if (ifd < 0) {
+            printf("sh: cannot open input file '%s'\n", redir_in);
+            print_flush();
+            return 1;
+        }
+        orig_stdin = dup(0);
+        if (orig_stdin < 0) {
+            close(ifd);
+            print("sh: too many open files\n");
+            print_flush();
+            return 1;
+        }
+        dup2(ifd, 0);
+        close(ifd);
+    }
+
+    if (redir_out) {
+        int flags = O_WRONLY | O_CREAT | (append_out ? O_APPEND : O_TRUNC);
+        int ofd = open(redir_out, flags);
+        if (ofd < 0) {
+            printf("sh: cannot open output file '%s'\n", redir_out);
+            print_flush();
+            if (orig_stdin >= 0) { dup2(orig_stdin, 0); close(orig_stdin); }
+            return 1;
+        }
+        orig_stdout = dup(1);
+        if (orig_stdout < 0) {
+            close(ofd);
+            if (orig_stdin >= 0) { dup2(orig_stdin, 0); close(orig_stdin); }
+            print("sh: too many open files\n");
+            print_flush();
+            return 1;
+        }
+        print_flush();
+        dup2(ofd, 1);
+        close(ofd);
+    }
+
+    int ret = 0;
+    bool handled = true;
+
     if (strcmp(argv[0], "source") == 0 || strcmp(argv[0], ".") == 0) {
         if (argc < 2) {
             print("sh: source: filename argument required\n");
             print_flush();
-            return 1;
-        }
-        int sfd = open(argv[1], O_RDONLY);
-        if (sfd < 0) {
-            printf("sh: source: cannot open '%s'\n", argv[1]);
+            ret = 1;
+        } else if (source_depth >= 8) {
+            print("sh: source: recursion depth limit exceeded\n");
             print_flush();
-            return 1;
-        }
-        char sbuf[4096];
-        int n = read(sfd, sbuf, sizeof(sbuf) - 1);
-        close(sfd);
-        if (n > 0) {
-            sbuf[n] = '\0';
-            char *sline = sbuf;
-            while (sline && *sline) {
-                char *nl = strchr(sline, '\n');
-                if (nl) *nl = '\0';
-                while (*sline == ' ' || *sline == '\t') sline++;
-                if (*sline && *sline != '#') {
-                    char *sargv[MAX_ARGS];
-                    char *rin = NULL, *rout = NULL;
-                    int aout = 0;
-                    int s_argc = parse_args(sline, sargv, &rin, &rout, &aout);
-                    if (s_argc > 0) execute_command(s_argc, sargv, rin, rout, aout);
+            ret = 1;
+        } else {
+            int sfd = open(argv[1], O_RDONLY);
+            if (sfd < 0) {
+                printf("sh: source: cannot open '%s'\n", argv[1]);
+                print_flush();
+                ret = 1;
+            } else {
+                char sbuf[4096];
+                int n = read(sfd, sbuf, sizeof(sbuf) - 1);
+                close(sfd);
+                if (n > 0) {
+                    sbuf[n] = '\0';
+                    source_depth++;
+                    char *sline = sbuf;
+                    while (sline && *sline) {
+                        char *nl = strchr(sline, '\n');
+                        if (nl) *nl = '\0';
+                        while (*sline == ' ' || *sline == '\t') sline++;
+                        if (*sline && *sline != '#') {
+                            ret = run_command_line(sline);
+                        }
+                        sline = nl ? nl + 1 : NULL;
+                    }
+                    source_depth--;
                 }
-                sline = nl ? nl + 1 : NULL;
             }
         }
-        return 0;
-    }
-
-    if (strcmp(argv[0], "cd") == 0) {
+    } else if (strcmp(argv[0], "cd") == 0) {
         const char *target = (argc > 1) ? argv[1] : "/";
         if (chdir(target) != 0) {
             printf("sh: cd: %s: No such directory\n", target);
             print_flush();
-            return 1;
+            ret = 1;
+        } else {
+            win_save_cwd();
         }
-        win_save_cwd();
-        return 0;
-    }
-
-    if (strcmp(argv[0], "..") == 0) {
+    } else if (strcmp(argv[0], "..") == 0) {
         if (chdir("..") != 0) {
             printf("sh: cd: ..: No such directory\n");
             print_flush();
-            return 1;
+            ret = 1;
+        } else {
+            win_save_cwd();
         }
-        win_save_cwd();
-        return 0;
-    }
-
-    if (strcmp(argv[0], "pwd") == 0) {
+    } else if (strcmp(argv[0], "pwd") == 0) {
         char cwd[256];
         if (getcwd(cwd, sizeof(cwd)) == 0) {
             printf("%s\n", cwd);
@@ -562,31 +645,19 @@ static int execute_command(int argc, char *argv[], char *redir_in, char *redir_o
             print("/\n");
         }
         print_flush();
-        return 0;
-    }
-
-    if (strcmp(argv[0], "clear") == 0) {
+    } else if (strcmp(argv[0], "clear") == 0) {
         print("\033[2J\033[H");
         print_flush();
-        return 0;
-    }
-
-    if (strcmp(argv[0], "echo") == 0) {
+    } else if (strcmp(argv[0], "echo") == 0) {
         for (int i = 1; i < argc; i++) {
             printf("%s%s", argv[i], (i == argc - 1) ? "" : " ");
         }
         print("\n");
         print_flush();
-        return 0;
-    }
-
-    if (strcmp(argv[0], "version") == 0) {
+    } else if (strcmp(argv[0], "version") == 0) {
         print("KyroOS Beryllium 26.03.12 (Userspace Shell v2.0)\n");
         print_flush();
-        return 0;
-    }
-
-    if (strcmp(argv[0], "win") == 0 || strcmp(argv[0], "tab") == 0 || strcmp(argv[0], "tmux") == 0) {
+    } else if (strcmp(argv[0], "win") == 0 || strcmp(argv[0], "tab") == 0 || strcmp(argv[0], "tmux") == 0) {
         if (argc == 1 || strcmp(argv[1], "list") == 0) {
             print("Active Shell Windows (Tmux):\n");
             for (int i = 0; i < MAX_WINDOWS; i++) {
@@ -603,39 +674,24 @@ static int execute_command(int argc, char *argv[], char *redir_in, char *redir_o
             print("  win rename <name> Rename current window\n");
             print("Hotkeys: Ctrl+B then c (create), n (next), p (prev), 0-7 (switch), x (close)\n");
             print_flush();
-            return 0;
-        }
-        if (strcmp(argv[1], "new") == 0 || strcmp(argv[1], "new-window") == 0) {
+        } else if (strcmp(argv[1], "new") == 0 || strcmp(argv[1], "new-window") == 0) {
             const char *name = (argc > 2) ? argv[2] : NULL;
             win_new(name);
-            return 0;
-        }
-        if (strcmp(argv[1], "next") == 0 || strcmp(argv[1], "n") == 0) {
+        } else if (strcmp(argv[1], "next") == 0 || strcmp(argv[1], "n") == 0) {
             win_next();
-            return 0;
-        }
-        if (strcmp(argv[1], "prev") == 0 || strcmp(argv[1], "p") == 0) {
+        } else if (strcmp(argv[1], "prev") == 0 || strcmp(argv[1], "p") == 0) {
             win_prev();
-            return 0;
-        }
-        if (strcmp(argv[1], "close") == 0 || strcmp(argv[1], "kill") == 0) {
+        } else if (strcmp(argv[1], "close") == 0 || strcmp(argv[1], "kill") == 0) {
             int target = (argc > 2) ? atoi(argv[2]) : active_win;
             win_close(target);
-            return 0;
-        }
-        if (strcmp(argv[1], "rename") == 0 && argc > 2) {
+        } else if (strcmp(argv[1], "rename") == 0 && argc > 2) {
             strncpy(windows[active_win].name, argv[2], sizeof(windows[active_win].name) - 1);
+            windows[active_win].name[sizeof(windows[active_win].name) - 1] = '\0';
             win_show_status();
-            return 0;
-        }
-        if (argv[1][0] >= '0' && argv[1][0] <= '7') {
+        } else if (argv[1][0] >= '0' && argv[1][0] <= '7') {
             win_switch(atoi(argv[1]));
-            return 0;
         }
-        return 0;
-    }
-
-    if (strcmp(argv[0], "help") == 0) {
+    } else if (strcmp(argv[0], "help") == 0) {
         print("KyroOS Shell Builtins:\n");
         print("  cd [dir]       Change current working directory\n");
         print("  pwd            Show current working directory\n");
@@ -652,70 +708,45 @@ static int execute_command(int argc, char *argv[], char *redir_in, char *redir_o
         print("  gears, vkcube, useradd, userdel, chmod, chown\n");
         print("  insmod, rmmod, lsmod, installer\n");
         print_flush();
-        return 0;
-    }
-
-    // Handle I/O redirection for external binaries
-    int orig_stdin = -1;
-    int orig_stdout = -1;
-
-    if (redir_in) {
-        int ifd = open(redir_in, O_RDONLY);
-        if (ifd < 0) {
-            printf("sh: cannot open input file '%s'\n", redir_in);
-            print_flush();
-            return 1;
-        }
-        orig_stdin = dup(0);
-        dup2(ifd, 0);
-        close(ifd);
-    }
-
-    if (redir_out) {
-        int flags = O_WRONLY | O_CREAT | (append_out ? O_APPEND : O_TRUNC);
-        int ofd = open(redir_out, flags);
-        if (ofd < 0) {
-            printf("sh: cannot open output file '%s'\n", redir_out);
-            print_flush();
-            if (orig_stdin >= 0) { dup2(orig_stdin, 0); close(orig_stdin); }
-            return 1;
-        }
-        orig_stdout = dup(1);
-        dup2(ofd, 1);
-        close(ofd);
-    }
-
-    // Check for trailing & background job execution
-    bool background = false;
-    if (argc > 0 && strcmp(argv[argc - 1], "&") == 0) {
-        background = true;
-        argv[argc - 1] = NULL;
-        argc--;
-    }
-
-    // Execute external binary
-    int pid = execve(argv[0], argv, NULL);
-    if (pid < 0) {
-        // Try /bin/ prefix
-        char bin_path[128];
-        snprintf(bin_path, sizeof(bin_path), "/bin/%s", argv[0]);
-        pid = execve(bin_path, argv, NULL);
-    }
-
-    int ret = 0;
-    if (pid < 0) {
-        printf("sh: %s: command not found\n", argv[0]);
-        print_flush();
-        ret = 127;
     } else {
-        if (background) {
-            printf("[job] process %d running in background\n", pid);
-            print_flush();
-            ret = 0;
-        } else {
-            int status = 0;
-            waitpid(pid, &status, 0);
-            ret = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + (status & 0x7F);
+        handled = false;
+    }
+
+    if (!handled) {
+        // Check for trailing & background job execution
+        bool background = false;
+        if (argc > 0 && strcmp(argv[argc - 1], "&") == 0) {
+            background = true;
+            argv[argc - 1] = NULL;
+            argc--;
+        }
+
+        if (argc > 0) {
+            int pid = execve(argv[0], argv, NULL);
+            if (pid < 0) {
+                char bin_path[256];
+                int n = snprintf(bin_path, sizeof(bin_path), "/bin/%s", argv[0]);
+                if (n > 0 && n < (int)sizeof(bin_path)) {
+                    pid = execve(bin_path, argv, NULL);
+                }
+            }
+
+            if (pid < 0) {
+                printf("sh: %s: command not found\n", argv[0]);
+                print_flush();
+                ret = 127;
+            } else if (background) {
+                printf("[job] process %d running in background\n", pid);
+                print_flush();
+                ret = 0;
+            } else if (async_pid_out) {
+                *async_pid_out = pid;
+                ret = 0;
+            } else {
+                int status = 0;
+                waitpid(pid, &status, 0);
+                ret = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + (status & 0x7F);
+            }
         }
     }
 
@@ -725,6 +756,7 @@ static int execute_command(int argc, char *argv[], char *redir_in, char *redir_o
         close(orig_stdin);
     }
     if (orig_stdout >= 0) {
+        print_flush();
         dup2(orig_stdout, 1);
         close(orig_stdout);
     }
@@ -752,28 +784,51 @@ static int run_command_line(char *line) {
         int c1_argc = parse_args(cmd1_str, c1_argv, &r_in1, &r_out1, &a_out1);
         int c2_argc = parse_args(cmd2_str, c2_argv, &r_in2, &r_out2, &a_out2);
 
-        if (c1_argc > 0 && c2_argc > 0) {
-            int fds[2];
-            if (pipe(fds) == 0) {
-                int orig_out = dup(1);
-                dup2(fds[1], 1);
-                close(fds[1]);
-
-                execute_command(c1_argc, c1_argv, r_in1, NULL, 0);
-
-                dup2(orig_out, 1);
-                close(orig_out);
-
-                int orig_in = dup(0);
-                dup2(fds[0], 0);
-                close(fds[0]);
-
-                int ret = execute_command(c2_argc, c2_argv, NULL, r_out2, a_out2);
-
-                dup2(orig_in, 0);
-                close(orig_in);
-                return ret;
+        if (c1_argc <= 0 || c2_argc <= 0) {
+            if (c1_argc == 0 || c2_argc == 0) {
+                print("sh: syntax error near '|'\n");
+                print_flush();
             }
+            return 1;
+        }
+
+        int fds[2];
+        if (pipe(fds) == 0) {
+            int orig_out = dup(1);
+            if (orig_out < 0) {
+                close(fds[0]);
+                close(fds[1]);
+                return 1;
+            }
+            print_flush();
+            dup2(fds[1], 1);
+            close(fds[1]);
+
+            int c1_pid = -1;
+            execute_command_ex(c1_argc, c1_argv, r_in1, NULL, 0, &c1_pid);
+
+            print_flush();
+            dup2(orig_out, 1);
+            close(orig_out);
+
+            int orig_in = dup(0);
+            if (orig_in < 0) {
+                close(fds[0]);
+                if (c1_pid > 0) waitpid(c1_pid, NULL, 0);
+                return 1;
+            }
+            dup2(fds[0], 0);
+            close(fds[0]);
+
+            int ret = execute_command_ex(c2_argc, c2_argv, NULL, r_out2, a_out2, NULL);
+
+            dup2(orig_in, 0);
+            close(orig_in);
+
+            if (c1_pid > 0) {
+                waitpid(c1_pid, NULL, 0);
+            }
+            return ret;
         }
         return -1;
     }
@@ -783,8 +838,9 @@ static int run_command_line(char *line) {
     char *redir_out = NULL;
     int append_out = 0;
     int parsed_argc = parse_args(p, cmd_argv, &redir_in, &redir_out, &append_out);
+    if (parsed_argc < 0) return 1;
 
-    return execute_command(parsed_argc, cmd_argv, redir_in, redir_out, append_out);
+    return execute_command_ex(parsed_argc, cmd_argv, redir_in, redir_out, append_out, NULL);
 }
 
 int main(int argc, char *argv[]) {
@@ -808,8 +864,10 @@ int main(int argc, char *argv[]) {
     win_init();
 
     gethostname(current_hostname, sizeof(current_hostname));
+    current_hostname[sizeof(current_hostname) - 1] = '\0';
     if (current_hostname[0] == '\0') {
         strncpy(current_hostname, "kyroos", sizeof(current_hostname) - 1);
+        current_hostname[sizeof(current_hostname) - 1] = '\0';
     }
 
     win_show_status();
@@ -820,6 +878,7 @@ int main(int argc, char *argv[]) {
         char cwd[256];
         if (getcwd(cwd, sizeof(cwd)) != 0 || cwd[0] == '\0') {
             strncpy(cwd, "/", sizeof(cwd) - 1);
+            cwd[sizeof(cwd) - 1] = '\0';
         }
 
         uint32_t uid = getuid();

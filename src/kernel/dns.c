@@ -28,27 +28,31 @@ static uint16_t  dns_pending_id  = 0;
 static wait_queue_t dns_wq;
 static int       dns_got_reply   = 0;
 
-static void dns_encode_name(const char *hostname, uint8_t *out, size_t *out_len) {
+static int dns_encode_name(const char *hostname, uint8_t *out, size_t out_cap, size_t *out_len) {
     size_t pos = 0;
     const char *p = hostname;
     while (*p) {
         const char *dot = p;
         while (*dot && *dot != '.') dot++;
-        uint8_t label_len = (uint8_t)(dot - p);
-        out[pos++] = label_len;
-        for (uint8_t i = 0; i < label_len; i++) out[pos++] = (uint8_t)p[i];
+        size_t label_len = (size_t)(dot - p);
+        if (label_len == 0 || label_len > 63) return -1;
+        if (pos + 1 + label_len + 1 > out_cap) return -1;
+        out[pos++] = (uint8_t)label_len;
+        for (size_t i = 0; i < label_len; i++) out[pos++] = (uint8_t)p[i];
         p = dot;
         if (*p == '.') p++;
     }
+    if (pos + 1 > out_cap) return -1;
     out[pos++] = 0; /* root label */
     *out_len = pos;
+    return 0;
 }
 
 static void dns_reply_handler(net_dev_t *dev, const ipv4_header_t *ip_hdr,
                                udp_header_t *udp_hdr,
                                const uint8_t *data, size_t len) {
     (void)dev; (void)ip_hdr; (void)udp_hdr;
-    if (len < sizeof(dns_header_t)) return;
+    if (!data || len < sizeof(dns_header_t)) return;
 
     dns_header_t *hdr = (dns_header_t *)data;
     if (__builtin_bswap16(hdr->id) != dns_pending_id) return;
@@ -59,22 +63,46 @@ static void dns_reply_handler(net_dev_t *dev, const ipv4_header_t *ip_hdr,
     const uint8_t *end = data + len;
 
     /* Skip QNAME */
-    while (ptr < end && *ptr != 0) { ptr += *ptr + 1; }
+    while (ptr < end && *ptr != 0) {
+        if ((*ptr & 0xC0) == 0xC0) {
+            if (ptr + 2 > end) return;
+            ptr += 2;
+            goto qname_done;
+        }
+        uint8_t l = *ptr;
+        if ((size_t)(end - ptr) < (size_t)l + 1) return;
+        ptr += l + 1;
+    }
+    if (ptr >= end) return;
     ptr++; /* root label */
+qname_done:
+    if ((size_t)(end - ptr) < 4) return;
     ptr += 4; /* QTYPE + QCLASS */
 
     /* Parse answer RRs */
     uint16_t ancount = __builtin_bswap16(hdr->ancount);
     for (uint16_t i = 0; i < ancount && ptr < end; i++) {
         /* Skip NAME (possibly compressed pointer) */
-        if ((*ptr & 0xC0) == 0xC0) { ptr += 2; }
-        else { while (ptr < end && *ptr) { ptr += *ptr + 1; } ptr++; }
+        while (ptr < end && *ptr != 0) {
+            if ((*ptr & 0xC0) == 0xC0) {
+                if (ptr + 2 > end) return;
+                ptr += 2;
+                goto rr_name_done;
+            }
+            uint8_t l = *ptr;
+            if ((size_t)(end - ptr) < (size_t)l + 1) return;
+            ptr += l + 1;
+        }
+        if (ptr >= end) return;
+        ptr++; /* root label */
+rr_name_done:
+        if ((size_t)(end - ptr) < 10) break;
+        uint16_t rtype = (uint16_t)(((uint16_t)ptr[0] << 8) | ptr[1]);
+        ptr += 8; /* type(2) + class(2) + TTL(4) */
+        uint16_t rdlen = (uint16_t)(((uint16_t)ptr[0] << 8) | ptr[1]);
+        ptr += 2;
 
-        if (ptr + 10 > end) break;
-        uint16_t rtype  = __builtin_bswap16(*(uint16_t *)ptr); ptr += 2;
-        ptr += 2; /* class */
-        ptr += 4; /* TTL */
-        uint16_t rdlen = __builtin_bswap16(*(uint16_t *)ptr); ptr += 2;
+        if ((size_t)(end - ptr) < rdlen) break;
 
         if (rtype == 1 && rdlen == 4) { /* A record */
             uint32_t ip;
@@ -132,7 +160,10 @@ uint32_t dns_resolve(const char *hostname) {
 
         size_t   name_len = 0;
         uint8_t *qptr     = buf + sizeof(dns_header_t);
-        dns_encode_name(hostname, qptr, &name_len);
+        if (dns_encode_name(hostname, qptr, sizeof(buf) - sizeof(dns_header_t) - 4, &name_len) != 0) {
+            klog(LOG_WARN, "DNS: Hostname too long or invalid: %s", hostname);
+            return 0;
+        }
         qptr += name_len;
 
         *(uint16_t *)qptr = __builtin_bswap16(1); qptr += 2; /* QTYPE A */
