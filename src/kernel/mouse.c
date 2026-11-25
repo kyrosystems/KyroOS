@@ -74,31 +74,33 @@ void mouse_handler(struct registers *regs) {
     if (mouse_raw[0] & 0x10) delta_x |= 0xFFFFFF00;
     if (mouse_raw[0] & 0x20) delta_y |= 0xFFFFFF00;
 
-    mouse_x += delta_x;
-    mouse_y -= delta_y; // PS/2 Y is positive upwards, screen Y increases downwards
+    if (delta_x != 0 || delta_y != 0) {
+      mouse_x += delta_x;
+      mouse_y -= delta_y; // PS/2 Y is positive upwards, screen Y increases downwards
 
-    const fb_info_t *info = fb_get_info();
-    if (mouse_x < 0)
-      mouse_x = 0;
-    if (mouse_y < 0)
-      mouse_y = 0;
-    if (info && info->width > 0 && info->height > 0) {
-      if (mouse_x >= (int32_t)info->width)
-        mouse_x = info->width - 1;
-      if (mouse_y >= (int32_t)info->height)
-        mouse_y = info->height - 1;
+      const fb_info_t *info = fb_get_info();
+      if (mouse_x < 0)
+        mouse_x = 0;
+      if (mouse_y < 0)
+        mouse_y = 0;
+      if (info && info->width > 0 && info->height > 0) {
+        if (mouse_x >= (int32_t)info->width)
+          mouse_x = info->width - 1;
+        if (mouse_y >= (int32_t)info->height)
+          mouse_y = info->height - 1;
+      }
+
+      event_t event = {0};
+      event.type = EVENT_MOUSE_MOVE;
+      event.data1 = mouse_x;
+      event.data2 = mouse_y;
+      event_push(event);
     }
-
-    event_t event = {0};
-    event.type = EVENT_MOUSE_MOVE;
-    event.data1 = mouse_x;
-    event.data2 = mouse_y;
-    event_push(event);
 
     // Button presses
     uint8_t current_button_state = mouse_raw[0] & 0x07;
     if (current_button_state != last_button_state) {
-      event_t btn_event;
+      event_t btn_event = {0};
       // Check left button (bit 0)
       if ((current_button_state & 1) && !(last_button_state & 1)) {
         btn_event.type = EVENT_MOUSE_DOWN;
@@ -151,6 +153,9 @@ void mouse_handler(struct registers *regs) {
 }
 
 void mouse_init() {
+  uint32_t flush_guard = 256;
+  while (flush_guard-- && (inb(KBC_STATUS_PORT) & 1)) (void)inb(KBC_DATA_PORT);
+
   mouse_wait(0);
   outb(KBC_CMD_PORT, 0xA8);
 
@@ -169,6 +174,11 @@ void mouse_init() {
   mouse_read();
   mouse_write(0xF4);
   mouse_read();
+
+  flush_guard = 64;
+  while (flush_guard-- && (inb(KBC_STATUS_PORT) & 1)) (void)inb(KBC_DATA_PORT);
+  mouse_cycle = 0;
+  last_button_state = 0;
 
   register_irq_handler(12, mouse_handler);
   const fb_info_t *fbi = fb_get_info();

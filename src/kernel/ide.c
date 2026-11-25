@@ -12,7 +12,11 @@
 #include <stdbool.h>
 #include <string.h>
 
+static int ide_wait_for_ready(void);
+static int ide_wait_for_drq(void);
 static int ide_ioctl(vfs_node_t *node, int request, void* argp); // Forward declaration
+static uint32_t ide_write_sectors_mode(uint8_t drive, uint32_t lba, uint8_t num_sectors, const uint16_t* buffer, bool flush_cache);
+static int ide_flush_cache(void);
 
 static uint64_t g_primary_disk_bytes = 0;
 
@@ -38,7 +42,7 @@ static uint32_t ide_transfer_bytes(uint8_t drive, uint64_t abs_byte_offset, uint
             if (sectors_to_do > 128) sectors_to_do = 128;
 
             if (is_write) {
-                if (ide_write_sectors(drive, cur_lba, (uint8_t)sectors_to_do, (const uint16_t*)(buffer + bytes_transferred)) != 0) {
+                if (ide_write_sectors_mode(drive, cur_lba, (uint8_t)sectors_to_do, (const uint16_t*)(buffer + bytes_transferred), false) != 0) {
                     return bytes_transferred > 0 ? bytes_transferred : (uint32_t)-1;
                 }
             } else {
@@ -58,7 +62,7 @@ static uint32_t ide_transfer_bytes(uint8_t drive, uint64_t abs_byte_offset, uint
                     }
                 }
                 memcpy((uint8_t*)sector_buf + offset_in_sector, buffer + bytes_transferred, chunk);
-                if (ide_write_sectors(drive, cur_lba, 1, sector_buf) != 0) {
+                if (ide_write_sectors_mode(drive, cur_lba, 1, sector_buf, false) != 0) {
                     return bytes_transferred > 0 ? bytes_transferred : (uint32_t)-1;
                 }
             } else {
@@ -68,6 +72,12 @@ static uint32_t ide_transfer_bytes(uint8_t drive, uint64_t abs_byte_offset, uint
                 memcpy(buffer + bytes_transferred, (uint8_t*)sector_buf + offset_in_sector, chunk);
             }
             bytes_transferred += chunk;
+        }
+    }
+
+    if (is_write && bytes_transferred > 0) {
+        if (ide_flush_cache() != 0) {
+            return (uint32_t)-1;
         }
     }
 
@@ -501,7 +511,13 @@ uint32_t ide_read_sectors(uint8_t drive, uint32_t lba, uint8_t num_sectors, uint
     return 0;
 }
 
-uint32_t ide_write_sectors(uint8_t drive, uint32_t lba, uint8_t num_sectors, const uint16_t* buffer) {
+static int ide_flush_cache(void) {
+    if (!primary_master_present) return -1;
+    outb(ATA_PRIMARY_COMMAND, ATA_CMD_CACHE_FLUSH);
+    return ide_wait_for_ready();
+}
+
+static uint32_t ide_write_sectors_mode(uint8_t drive, uint32_t lba, uint8_t num_sectors, const uint16_t* buffer, bool flush_cache) {
     if (num_sectors == 0) return 0;
     if (!buffer || drive != 0 || !primary_master_present) return (uint32_t)-1;
     
@@ -523,10 +539,15 @@ uint32_t ide_write_sectors(uint8_t drive, uint32_t lba, uint8_t num_sectors, con
         outsw(ATA_PRIMARY_DATA, buffer + (i * 256), 256);
     }
     
-    outb(ATA_PRIMARY_COMMAND, ATA_CMD_CACHE_FLUSH);
-    if (ide_wait_for_ready() != 0) return (uint32_t)-1;
+    if (flush_cache) {
+        if (ide_flush_cache() != 0) return (uint32_t)-1;
+    }
     
     return 0;
+}
+
+uint32_t ide_write_sectors(uint8_t drive, uint32_t lba, uint8_t num_sectors, const uint16_t* buffer) {
+    return ide_write_sectors_mode(drive, lba, num_sectors, buffer, true);
 }
 
 void ide_driver_init() {

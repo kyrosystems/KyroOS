@@ -7,5 +7,9 @@ int main(int argc, char **argv) {
         new_argv[i] = argv[i];
     }
     new_argv[argc] = NULL;
-    return execve("/bin/cube3d", new_argv, NULL);
+    int pid = execve("/bin/cube3d", new_argv, NULL);
+    if (pid < 0) return 1;
+    int status = 0;
+    waitpid(pid, &status, 0);
+    return WEXITSTATUS(status);
 }

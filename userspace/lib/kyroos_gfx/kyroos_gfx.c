@@ -89,10 +89,11 @@ uint32_t gfx_get_pitch(void) {
 void gfx_clear(uint32_t color) {
     if (!fb_info.buffer) return;
     uint32_t *buf = gfx_get_buffer();
-    size_t pixels = (fb_info.pitch / 4) * fb_info.height;
-    for (size_t i = 0; i < pixels; i++) {
-        buf[i] = color;
-    }
+    size_t pixels = ((size_t)fb_info.pitch / 4) * fb_info.height;
+    __asm__ __volatile__("rep stosl"
+                         : "+D"(buf), "+c"(pixels)
+                         : "a"(color)
+                         : "memory");
 }
 
 static bool s_clip_active = false;
@@ -146,12 +147,15 @@ void gfx_draw_rect(uint32_t x, uint32_t y, uint32_t width, uint32_t height, uint
 
     uint32_t *buf = gfx_get_buffer();
     uint32_t stride = fb_info.pitch / 4;
+    size_t row_w = (size_t)(rx1 - rx0);
 
     for (int32_t j = ry0; j < ry1; j++) {
-        uint32_t row = (uint32_t)j * stride + (uint32_t)rx0;
-        for (int32_t i = 0; i < rx1 - rx0; i++) {
-            buf[row + i] = color;
-        }
+        uint32_t *dst = buf + (size_t)j * stride + (size_t)rx0;
+        size_t cnt = row_w;
+        __asm__ __volatile__("rep stosl"
+                             : "+D"(dst), "+c"(cnt)
+                             : "a"(color)
+                             : "memory");
     }
 }
 
@@ -180,11 +184,12 @@ void gfx_flip(void) {
     }
     if (!fb_info.buffer || !backbuffer || backbuffer == (uint32_t *)fb_info.buffer) return;
     uint64_t *dst = (uint64_t *)fb_info.buffer;
-    uint64_t *src = (uint64_t *)backbuffer;
+    const uint64_t *src = (const uint64_t *)backbuffer;
     size_t words = ((size_t)fb_info.pitch * fb_info.height) / sizeof(uint64_t);
-    for (size_t i = 0; i < words; i++) {
-        dst[i] = src[i];
-    }
+    __asm__ __volatile__("rep movsq"
+                         : "+D"(dst), "+S"(src), "+c"(words)
+                         :
+                         : "memory");
 }
 
 int gfx_poll_event(gfx_event_t *event) {
@@ -197,27 +202,63 @@ extern const uint32_t font_aa_points[];
 extern const uint8_t font_aa[][128];
 
 static void draw_codepoint(uint32_t x, uint32_t y, uint32_t code, uint32_t fg, uint32_t bg) {
-    unsigned lo = 0, hi = font_aa_count;
-    while (lo < hi) {
-        unsigned mid = (lo + hi) / 2;
-        if (font_aa_points[mid] < code) lo = mid + 1;
-        else hi = mid;
+    unsigned idx;
+    if (code >= 0x20 && code <= 0x7E) {
+        idx = code - 0x20;
+    } else {
+        unsigned lo = 0, hi = font_aa_count;
+        while (lo < hi) {
+            unsigned mid = (lo + hi) >> 1;
+            if (font_aa_points[mid] < code) lo = mid + 1;
+            else hi = mid;
+        }
+        if (lo == font_aa_count || font_aa_points[lo] != code) {
+            if (code == '?') return;
+            draw_codepoint(x, y, '?', fg, bg);
+            return;
+        }
+        idx = lo;
     }
-    if (lo == font_aa_count || font_aa_points[lo] != code) {
-        if (code == '?') return;
-        draw_codepoint(x, y, '?', fg, bg); return;
+    int32_t x0 = (int32_t)x, y0 = (int32_t)y;
+    int32_t x1 = x0 + 8, y1 = y0 + 16;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > (int32_t)fb_info.width) x1 = (int32_t)fb_info.width;
+    if (y1 > (int32_t)fb_info.height) y1 = (int32_t)fb_info.height;
+    if (s_clip_active) {
+        if (x0 < s_clip_x0) x0 = s_clip_x0;
+        if (y0 < s_clip_y0) y0 = s_clip_y0;
+        if (x1 > s_clip_x1) x1 = s_clip_x1;
+        if (y1 > s_clip_y1) y1 = s_clip_y1;
     }
+    if (x0 >= x1 || y0 >= y1) return;
+
     uint32_t *pixels = gfx_get_buffer();
     uint32_t stride = fb_info.pitch / 4;
-    for (unsigned row = 0; row < 16; row++) for (unsigned col = 0; col < 8; col++) {
-        uint32_t px = x + col, py = y + row;
-        if (px >= fb_info.width || py >= fb_info.height || gfx_is_clipped(px, py)) continue;
-        unsigned alpha = font_aa[lo][row * 8 + col];
-        uint32_t base = bg ? bg : pixels[py * stride + px];
-        unsigned red = (((fg >> 16) & 255) * alpha + ((base >> 16) & 255) * (255 - alpha)) / 255;
-        unsigned green = (((fg >> 8) & 255) * alpha + ((base >> 8) & 255) * (255 - alpha)) / 255;
-        unsigned blue = ((fg & 255) * alpha + (base & 255) * (255 - alpha)) / 255;
-        pixels[py * stride + px] = 0xff000000 | (red << 16) | (green << 8) | blue;
+    const uint8_t *glyph = font_aa[idx];
+    uint32_t fg_solid = 0xFF000000u | (fg & 0x00FFFFFFu);
+    unsigned fg_r = (fg >> 16) & 255u;
+    unsigned fg_g = (fg >> 8) & 255u;
+    unsigned fg_b = fg & 255u;
+
+    for (int32_t py = y0; py < y1; py++) {
+        const uint8_t *grow = glyph + (py - (int32_t)y) * 8;
+        uint32_t *prow = pixels + (uint32_t)py * stride;
+        for (int32_t px = x0; px < x1; px++) {
+            unsigned alpha = grow[px - (int32_t)x];
+            if (alpha == 0) {
+                if (bg) prow[px] = bg;
+            } else if (alpha == 255) {
+                prow[px] = fg_solid;
+            } else {
+                uint32_t base = bg ? bg : prow[px];
+                unsigned inv = 255u - alpha;
+                unsigned red   = (fg_r * alpha + ((base >> 16) & 255u) * inv + 128u) >> 8;
+                unsigned green = (fg_g * alpha + ((base >> 8) & 255u) * inv + 128u) >> 8;
+                unsigned blue  = (fg_b * alpha + (base & 255u) * inv + 128u) >> 8;
+                prow[px] = 0xFF000000u | (red << 16) | (green << 8) | blue;
+            }
+        }
     }
 }
 void gfx_draw_char(uint32_t x, uint32_t y, char c, uint32_t fg, uint32_t bg) {
@@ -350,26 +391,28 @@ static const uint16_t cursor_border[16] = {
 };
 
 void gfx_draw_cursor(int x, int y) {
+    uint32_t *pixels = gfx_get_buffer();
+    if (!pixels) return;
+    uint32_t stride = fb_info.pitch / 4;
+    int w = (int)fb_info.width;
+    int h = (int)fb_info.height;
     for (int r = 0; r < 16; r++) {
         int py = y + r;
-        if (py < 0 || (uint32_t)py >= fb_info.height) continue;
+        if (py < 0 || py >= h) continue;
+        uint32_t *row = pixels + (uint32_t)py * stride;
+        uint16_t mask = cursor_mask[r];
+        uint16_t border = cursor_border[r];
         for (int c = 0; c < 16; c++) {
             int px = x + c;
-            if (px < 0 || (uint32_t)px >= fb_info.width) continue;
-
-            // Draw subtle drop shadow first for extreme contrast
-            if ((cursor_border[r] >> (15 - c)) & 1) {
-                if (px + 1 < (int)fb_info.width && py + 1 < (int)fb_info.height) {
-                    gfx_draw_pixel(px + 1, py + 1, 0xFF0A0E14);
+            if (px < 0 || px >= w) continue;
+            uint16_t bit = (uint16_t)(1u << (15 - c));
+            if (border & bit) {
+                if (px + 1 < w && py + 1 < h) {
+                    pixels[(uint32_t)(py + 1) * stride + (uint32_t)(px + 1)] = 0xFF0A0E14u;
                 }
-            }
-            // Inner white fill
-            if ((cursor_mask[r] >> (15 - c)) & 1) {
-                gfx_draw_pixel(px, py, 0xFFFFFFFF);
-            }
-            // Crisp solid black outline
-            if ((cursor_border[r] >> (15 - c)) & 1) {
-                gfx_draw_pixel(px, py, 0xFF000000);
+                row[px] = 0xFF000000u;
+            } else if (mask & bit) {
+                row[px] = 0xFFFFFFFFu;
             }
         }
     }

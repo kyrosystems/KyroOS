@@ -843,12 +843,22 @@ int kyrofs_format(vfs_node_t *disk_device_node, uint32_t partition_lba, uint64_t
     sb.version = 2;
     sb.block_size = KYROFS_BLOCK_SIZE;
     sb.total_blocks = partition_blocks;
-    sb.blocks_per_group = KYROFS_BLOCKS_PER_GROUP;
-    sb.group_count = (uint32_t)((partition_blocks + KYROFS_BLOCKS_PER_GROUP - 1) / KYROFS_BLOCKS_PER_GROUP);
+    uint32_t max_groups = KYROFS_BLOCK_SIZE / (uint32_t)sizeof(kyrofs_group_desc_t);
+    if (max_groups > 64) max_groups = 64;
+    uint32_t bpg = KYROFS_BLOCKS_PER_GROUP;
+    if (partition_blocks > (uint64_t)bpg * max_groups) {
+        bpg = (uint32_t)((partition_blocks + max_groups - 1) / max_groups);
+        if (bpg > KYROFS_BLOCK_SIZE * 8) bpg = KYROFS_BLOCK_SIZE * 8;
+    }
+    sb.blocks_per_group = bpg;
+    sb.group_count = (uint32_t)((partition_blocks + bpg - 1) / bpg);
     if (sb.group_count == 0) sb.group_count = 1;
-    sb.total_inodes = partition_blocks / 4;
-    if (sb.total_inodes < 64) sb.total_inodes = 64;
+    if (sb.group_count > max_groups) sb.group_count = max_groups;
+    sb.total_inodes = partition_blocks / 16;
+    if (sb.total_inodes < 64ULL * sb.group_count) sb.total_inodes = 64ULL * sb.group_count;
+    if (sb.total_inodes > 1024ULL * sb.group_count) sb.total_inodes = 1024ULL * sb.group_count;
     sb.inodes_per_group = (uint32_t)(sb.total_inodes / sb.group_count);
+    sb.total_inodes = (uint64_t)sb.inodes_per_group * sb.group_count;
     sb.root_inode = KYROFS_ROOT_INODE;
     sb.journal_blocks = KYROFS_JOURNAL_SLOTS * 2;
     sb.journal_seq = 0;
@@ -895,24 +905,31 @@ int kyrofs_format(vfs_node_t *disk_device_node, uint32_t partition_lba, uint64_t
     sb.free_inodes = sb.total_inodes;
     for (uint32_t g = 0; g < sb.group_count; g++) sb.free_blocks += groups[g].free_blocks_in_group;
 
-    uint8_t zero_block[KYROFS_BLOCK_SIZE];
-    memset(zero_block, 0, sizeof(zero_block));
+    uint8_t *zero_buf = (uint8_t *)kmalloc(KYROFS_BLOCK_SIZE * 16);
+    if (!zero_buf) { kfree(groups); return -1; }
+    memset(zero_buf, 0, KYROFS_BLOCK_SIZE * 16);
     ide_write_blocks_t wb;
     for (uint32_t g = 0; g < sb.group_count; g++) {
-        wb = (ide_write_blocks_t){ .lba = partition_lba + (uint32_t)groups[g].block_bitmap_block, .count = 1, .buffer = zero_block };
-        disk_device_node->ioctl(disk_device_node, IDE_IOCTL_WRITE_BLOCKS, &wb);
-        wb.lba = partition_lba + (uint32_t)groups[g].inode_bitmap_block;
-        disk_device_node->ioctl(disk_device_node, IDE_IOCTL_WRITE_BLOCKS, &wb);
-        for (uint64_t i = 0; i < inode_table_blocks_per_group; i++) {
-            wb.lba = partition_lba + (uint32_t)(groups[g].inode_table_block + i);
+        uint64_t meta_start = groups[g].block_bitmap_block;
+        uint64_t meta_cnt = 2 + inode_table_blocks_per_group;
+        uint64_t done = 0;
+        while (done < meta_cnt) {
+            uint32_t batch = (uint32_t)(meta_cnt - done);
+            if (batch > 16) batch = 16;
+            wb = (ide_write_blocks_t){ .lba = partition_lba + (uint32_t)(meta_start + done), .count = batch, .buffer = zero_buf };
             disk_device_node->ioctl(disk_device_node, IDE_IOCTL_WRITE_BLOCKS, &wb);
+            done += batch;
         }
     }
 
-    for (uint64_t i = 0; i < sb.journal_blocks; i++) {
-        wb = (ide_write_blocks_t){ .lba = partition_lba + (uint32_t)(sb.journal_start + i), .count = 1, .buffer = zero_block };
+    for (uint64_t done = 0; done < sb.journal_blocks; ) {
+        uint32_t batch = (uint32_t)(sb.journal_blocks - done);
+        if (batch > 16) batch = 16;
+        wb = (ide_write_blocks_t){ .lba = partition_lba + (uint32_t)(sb.journal_start + done), .count = batch, .buffer = zero_buf };
         disk_device_node->ioctl(disk_device_node, IDE_IOCTL_WRITE_BLOCKS, &wb);
+        done += batch;
     }
+    kfree(zero_buf);
 
     {
         uint8_t bm[KYROFS_BLOCK_SIZE];

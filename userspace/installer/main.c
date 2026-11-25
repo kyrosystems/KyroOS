@@ -2,9 +2,15 @@
 #include "limine-bios-hdd.h"
 
 #define SECTOR_SIZE 512
-#define CLUSTER_SECTORS 8
-#define CLUSTER_SIZE (CLUSTER_SECTORS * SECTOR_SIZE) // 4096 bytes
+#define CLUSTER_SECTORS 1
+#define CLUSTER_SIZE (CLUSTER_SECTORS * SECTOR_SIZE) // 512 bytes (>= 65525 clusters -> valid FAT32)
 #define RESERVED_SECTORS 32
+
+#define IDE_IOCTL_GET_DISK_INFO 0x01
+typedef struct {
+    uint64_t total_sectors;
+    uint32_t bytes_per_sector;
+} inst_disk_info_t;
 
 // ============================================================================
 // KyroFS Filesystem Definitions (Native KyroOS Filesystem)
@@ -148,14 +154,16 @@ static uint32_t g_fat2_lba = 0;
 static uint32_t g_data_lba = 0;
 static uint32_t g_next_cluster = 3;
 
-#define MAX_FAT_CACHE_ENTRIES 32768
+#define MAX_FAT_CACHE_ENTRIES (1024 * (SECTOR_SIZE / 4))
 static uint32_t g_fat_table[MAX_FAT_CACHE_ENTRIES];
+static uint8_t  g_io_chunk[65536];
 
-#define MAX_DIR_ENTRIES 128
+#define MAX_DIR_CLUSTERS 32
 typedef struct {
-    uint32_t cluster;
+    uint32_t clusters[MAX_DIR_CLUSTERS];
+    int cluster_count;
     int entry_count;
-    uint8_t data[CLUSTER_SIZE];
+    uint8_t data[MAX_DIR_CLUSTERS * CLUSTER_SIZE];
 } fat_dir_t;
 
 static fat_dir_t g_dir_root;
@@ -173,6 +181,23 @@ static fat_dir_t g_dir_tmp;
 static fat_dir_t g_dir_var;
 static fat_dir_t g_dir_dev;
 static fat_dir_t g_dir_proc;
+
+static void lba_to_chs(uint32_t lba, uint8_t *head, uint8_t *sec, uint8_t *cyl) {
+    const uint32_t spt = 63, heads = 255;
+    if (lba >= 1023u * heads * spt) {
+        *head = 254;
+        *sec = 0xFF;
+        *cyl = 0xFF;
+        return;
+    }
+    uint32_t c = lba / (heads * spt);
+    uint32_t temp = lba % (heads * spt);
+    uint32_t h = temp / spt;
+    uint32_t s = (temp % spt) + 1;
+    *head = (uint8_t)h;
+    *sec = (uint8_t)((s & 0x3F) | ((c >> 2) & 0xC0));
+    *cyl = (uint8_t)(c & 0xFF);
+}
 
 static void read_input(char *buf, int max) {
     int idx = 0;
@@ -221,6 +246,7 @@ static void make_short_name(const char *long_name, char *short_name) {
             short_name[j++] = c;
         }
     }
+    if (j == 0) short_name[0] = '_';
 
     if (dot) {
         j = 8;
@@ -234,6 +260,19 @@ static void make_short_name(const char *long_name, char *short_name) {
     }
 }
 
+static int dir_ensure_slot(fat_dir_t *dir) {
+    int off = dir->entry_count * 32;
+    if (off + 32 <= dir->cluster_count * CLUSTER_SIZE) return 0;
+    if (dir->cluster_count >= MAX_DIR_CLUSTERS) return -1;
+    if (g_next_cluster >= MAX_FAT_CACHE_ENTRIES) return -1;
+    uint32_t nc = g_next_cluster++;
+    uint32_t prev = dir->clusters[dir->cluster_count - 1];
+    g_fat_table[prev] = nc;
+    g_fat_table[nc] = 0x0FFFFFFF;
+    dir->clusters[dir->cluster_count++] = nc;
+    return 0;
+}
+
 static void dir_add_entry(fat_dir_t *dir, const char *name, uint8_t attr, uint32_t cluster, uint32_t size) {
     char short_name[11];
     make_short_name(name, short_name);
@@ -243,6 +282,7 @@ static void dir_add_entry(fat_dir_t *dir, const char *name, uint8_t attr, uint32
     int lfn_entries = (name_len + 12) / 13;
 
     for (int l = lfn_entries; l >= 1; l--) {
+        if (dir_ensure_slot(dir) != 0) return;
         fat_lfn_dirent_t lfn;
         memset(&lfn, 0xFF, sizeof(lfn));
         lfn.seq_num = (uint8_t)l | (l == lfn_entries ? 0x40 : 0x00);
@@ -272,12 +312,11 @@ static void dir_add_entry(fat_dir_t *dir, const char *name, uint8_t attr, uint32
         }
 
         int off = dir->entry_count * 32;
-        if (off + 32 <= CLUSTER_SIZE) {
-            memcpy(dir->data + off, &lfn, 32);
-            dir->entry_count++;
-        }
+        memcpy(dir->data + off, &lfn, 32);
+        dir->entry_count++;
     }
 
+    if (dir_ensure_slot(dir) != 0) return;
     fat_dirent_t de;
     memset(&de, 0, sizeof(de));
     memcpy(de.name, short_name, 11);
@@ -287,16 +326,15 @@ static void dir_add_entry(fat_dir_t *dir, const char *name, uint8_t attr, uint32
     de.file_size = size;
 
     int off = dir->entry_count * 32;
-    if (off + 32 <= CLUSTER_SIZE) {
-        memcpy(dir->data + off, &de, 32);
-        dir->entry_count++;
-    }
+    memcpy(dir->data + off, &de, 32);
+    dir->entry_count++;
 }
 
 static void init_fat_dir(fat_dir_t *dir, uint32_t cluster, uint32_t parent_cluster) {
-    dir->cluster = cluster;
+    memset(dir, 0, sizeof(*dir));
+    dir->clusters[0] = cluster;
+    dir->cluster_count = 1;
     dir->entry_count = 0;
-    memset(dir->data, 0, CLUSTER_SIZE);
 
     if (cluster != 2) {
         fat_dirent_t dot;
@@ -321,28 +359,42 @@ static void init_fat_dir(fat_dir_t *dir, uint32_t cluster, uint32_t parent_clust
     }
 }
 
+static int write_exact_at(int fd, int64_t offset, const void *data, size_t size) {
+    if (lseek(fd, offset, SEEK_SET) < 0) return -1;
+    const uint8_t *p = (const uint8_t *)data;
+    size_t done = 0;
+    while (done < size) {
+        size_t chunk = size - done;
+        if (chunk > 65536) chunk = 65536;
+        int w = write(fd, p + done, chunk);
+        if (w <= 0) return -1;
+        done += (size_t)w;
+    }
+    return 0;
+}
+
 static uint32_t fat_write_file_data(const void *data, uint32_t size) {
     if (size == 0) return 0;
     uint32_t num_clusters = (size + CLUSTER_SIZE - 1) / CLUSTER_SIZE;
+    if (g_next_cluster + num_clusters >= MAX_FAT_CACHE_ENTRIES) return 0;
     uint32_t start_cluster = g_next_cluster;
 
     for (uint32_t i = 0; i < num_clusters; i++) {
         uint32_t cur = start_cluster + i;
         g_fat_table[cur] = (i == num_clusters - 1) ? 0x0FFFFFFF : (cur + 1);
+    }
 
-        uint32_t lba = g_data_lba + (cur - 2) * CLUSTER_SECTORS;
-        lseek(g_dfd, (int64_t)lba * SECTOR_SIZE, SEEK_SET);
-
-        uint8_t clus_buf[CLUSTER_SIZE];
-        memset(clus_buf, 0, sizeof(clus_buf));
-
-        uint32_t off = i * CLUSTER_SIZE;
-        uint32_t chunk = (size > off) ? (size - off) : 0;
-        if (chunk > CLUSTER_SIZE) chunk = CLUSTER_SIZE;
-        if (chunk > 0) {
-            memcpy(clus_buf, (const uint8_t *)data + off, chunk);
-        }
-        write(g_dfd, clus_buf, CLUSTER_SIZE);
+    int64_t base_off = (int64_t)(g_data_lba + (start_cluster - 2) * CLUSTER_SECTORS) * SECTOR_SIZE;
+    uint32_t full_bytes = size & ~(uint32_t)(CLUSTER_SIZE - 1);
+    if (full_bytes > 0) {
+        write_exact_at(g_dfd, base_off, data, full_bytes);
+    }
+    uint32_t rem = size - full_bytes;
+    if (rem > 0) {
+        uint8_t tail[CLUSTER_SIZE];
+        memset(tail, 0, sizeof(tail));
+        memcpy(tail, (const uint8_t *)data + full_bytes, rem);
+        write_exact_at(g_dfd, base_off + full_bytes, tail, CLUSTER_SIZE);
     }
 
     g_next_cluster += num_clusters;
@@ -383,12 +435,19 @@ static int install_file_to_fat(const char *src_path, fat_dir_t *parent_dir, cons
     }
 
     if (size > 0) {
-        read(sfd, buf, size);
+        uint32_t got = 0;
+        while (got < size) {
+            int n = read(sfd, (uint8_t *)buf + got, size - got);
+            if (n <= 0) break;
+            got += (uint32_t)n;
+        }
+        size = got;
     }
     close(sfd);
 
     uint32_t clus = fat_write_file_data(buf, size);
     free(buf);
+    if (size > 0 && clus == 0) return -1;
 
     dir_add_entry(parent_dir, dst_name, 0x20, clus, size);
     return 0;
@@ -396,29 +455,60 @@ static int install_file_to_fat(const char *src_path, fat_dir_t *parent_dir, cons
 
 static int install_buffer_to_fat(const void *data, uint32_t size, fat_dir_t *parent_dir, const char *dst_name) {
     uint32_t clus = fat_write_file_data(data, size);
+    if (size > 0 && clus == 0) return -1;
     dir_add_entry(parent_dir, dst_name, 0x20, clus, size);
     return 0;
 }
 
 static void flush_fat_dir(fat_dir_t *dir) {
-    uint32_t lba = g_data_lba + (dir->cluster - 2) * CLUSTER_SECTORS;
-    lseek(g_dfd, (int64_t)lba * SECTOR_SIZE, SEEK_SET);
-    write(g_dfd, dir->data, CLUSTER_SIZE);
+    for (int i = 0; i < dir->cluster_count; i++) {
+        uint32_t lba = g_data_lba + (dir->clusters[i] - 2) * CLUSTER_SECTORS;
+        write_exact_at(g_dfd, (int64_t)lba * SECTOR_SIZE,
+                       dir->data + (size_t)i * CLUSTER_SIZE, CLUSTER_SIZE);
+    }
 }
 
 // ============================================================================
 // KyroFS Formatter (Native Filesystem Formatter on /dev/sda2)
 // ============================================================================
+static int write_zero_blocks(int fd, uint32_t part2_lba, uint64_t start_block, uint64_t num_blocks) {
+    memset(g_io_chunk, 0, sizeof(g_io_chunk));
+    const uint64_t max_batch = sizeof(g_io_chunk) / KYROFS_BLOCK_SIZE; // 16 blocks = 64KB
+    uint64_t done = 0;
+    while (done < num_blocks) {
+        uint64_t batch = num_blocks - done;
+        if (batch > max_batch) batch = max_batch;
+        int64_t off = ((int64_t)part2_lba + (int64_t)(start_block + done) * 8) * SECTOR_SIZE;
+        if (lseek(fd, off, SEEK_SET) < 0) return -1;
+        size_t bytes = (size_t)(batch * KYROFS_BLOCK_SIZE);
+        if (write(fd, g_io_chunk, bytes) != (int)bytes) return -1;
+        done += batch;
+    }
+    return 0;
+}
+
 static int format_kyrofs_partition(int fd, uint32_t part2_lba, uint32_t part2_sectors) {
     uint64_t total_blocks = part2_sectors / (KYROFS_BLOCK_SIZE / SECTOR_SIZE);
     if (total_blocks < 64) total_blocks = 64;
 
-    uint32_t group_count = (uint32_t)((total_blocks + KYROFS_BLOCKS_PER_GROUP - 1) / KYROFS_BLOCKS_PER_GROUP);
-    if (group_count == 0) group_count = 1;
+    uint32_t max_groups = KYROFS_BLOCK_SIZE / (uint32_t)sizeof(kyrofs_group_desc_t);
+    if (max_groups > 64) max_groups = 64;
 
-    uint64_t total_inodes = total_blocks / 4;
-    if (total_inodes < 64) total_inodes = 64;
+    uint32_t bpg = KYROFS_BLOCKS_PER_GROUP;
+    if (total_blocks > (uint64_t)bpg * max_groups) {
+        bpg = (uint32_t)((total_blocks + max_groups - 1) / max_groups);
+        if (bpg > KYROFS_BLOCK_SIZE * 8) bpg = KYROFS_BLOCK_SIZE * 8; // 32768 max bits per bitmap block
+    }
+
+    uint32_t group_count = (uint32_t)((total_blocks + bpg - 1) / bpg);
+    if (group_count == 0) group_count = 1;
+    if (group_count > max_groups) group_count = max_groups;
+
+    uint64_t total_inodes = total_blocks / 16;
+    if (total_inodes < 64ULL * group_count) total_inodes = 64ULL * group_count;
+    if (total_inodes > 1024ULL * group_count) total_inodes = 1024ULL * group_count;
     uint32_t inodes_per_group = (uint32_t)(total_inodes / group_count);
+    total_inodes = (uint64_t)inodes_per_group * group_count;
 
     kyrofs_superblock_t sb;
     memset(&sb, 0, sizeof(sb));
@@ -426,7 +516,7 @@ static int format_kyrofs_partition(int fd, uint32_t part2_lba, uint32_t part2_se
     sb.version = 2;
     sb.block_size = KYROFS_BLOCK_SIZE;
     sb.total_blocks = total_blocks;
-    sb.blocks_per_group = KYROFS_BLOCKS_PER_GROUP;
+    sb.blocks_per_group = bpg;
     sb.group_count = group_count;
     sb.total_inodes = total_inodes;
     sb.inodes_per_group = inodes_per_group;
@@ -447,7 +537,7 @@ static int format_kyrofs_partition(int fd, uint32_t part2_lba, uint32_t part2_se
     uint32_t per_inode_block = KYROFS_BLOCK_SIZE / sizeof(kyrofs_inode_t);
     uint64_t inode_table_blocks_per_group = (inodes_per_group + per_inode_block - 1) / per_inode_block;
 
-    uint64_t blocks_left = total_blocks - cursor;
+    uint64_t blocks_left = (total_blocks > cursor) ? (total_blocks - cursor) : 0;
     for (uint32_t g = 0; g < group_count; g++) {
         uint64_t group_span = sb.blocks_per_group;
         if (group_span > blocks_left) group_span = blocks_left;
@@ -471,48 +561,34 @@ static int format_kyrofs_partition(int fd, uint32_t part2_lba, uint32_t part2_se
     sb.free_inodes = sb.total_inodes;
     for (uint32_t g = 0; g < group_count; g++) sb.free_blocks += groups[g].free_blocks_in_group;
 
-    uint8_t zero_block[KYROFS_BLOCK_SIZE];
-    memset(zero_block, 0, sizeof(zero_block));
-
-    // Zero out metadata and bitmaps on disk
+    // Zero all group metadata regions and journal in large 64KB batches
     for (uint32_t g = 0; g < group_count; g++) {
-        int64_t off1 = ((int64_t)part2_lba + groups[g].block_bitmap_block * 8) * SECTOR_SIZE;
-        lseek(fd, off1, SEEK_SET);
-        write(fd, zero_block, KYROFS_BLOCK_SIZE);
-
-        int64_t off2 = ((int64_t)part2_lba + groups[g].inode_bitmap_block * 8) * SECTOR_SIZE;
-        lseek(fd, off2, SEEK_SET);
-        write(fd, zero_block, KYROFS_BLOCK_SIZE);
-
-        for (uint64_t i = 0; i < inode_table_blocks_per_group; i++) {
-            int64_t off3 = ((int64_t)part2_lba + (groups[g].inode_table_block + i) * 8) * SECTOR_SIZE;
-            lseek(fd, off3, SEEK_SET);
-            write(fd, zero_block, KYROFS_BLOCK_SIZE);
+        if (write_zero_blocks(fd, part2_lba, groups[g].block_bitmap_block,
+                              2 + inode_table_blocks_per_group) != 0) {
+            free(groups);
+            return -1;
         }
     }
-
-    // Zero out journal blocks
-    for (uint64_t i = 0; i < sb.journal_blocks; i++) {
-        int64_t j_off = ((int64_t)part2_lba + (sb.journal_start + i) * 8) * SECTOR_SIZE;
-        lseek(fd, j_off, SEEK_SET);
-        write(fd, zero_block, KYROFS_BLOCK_SIZE);
+    if (write_zero_blocks(fd, part2_lba, sb.journal_start, sb.journal_blocks) != 0) {
+        free(groups);
+        return -1;
     }
 
     // Allocate root inode (bit 0 in inode bitmap)
     uint8_t inode_bm[KYROFS_BLOCK_SIZE];
     memset(inode_bm, 0, sizeof(inode_bm));
-    inode_bm[0] |= 1; // Bit 0
-    lseek(fd, ((int64_t)part2_lba + groups[0].inode_bitmap_block * 8) * SECTOR_SIZE, SEEK_SET);
-    write(fd, inode_bm, KYROFS_BLOCK_SIZE);
+    inode_bm[0] |= 1;
+    write_exact_at(fd, ((int64_t)part2_lba + (int64_t)groups[0].inode_bitmap_block * 8) * SECTOR_SIZE,
+                   inode_bm, KYROFS_BLOCK_SIZE);
     groups[0].free_inodes_in_group--;
     sb.free_inodes--;
 
     // Allocate root data block (bit 0 in block bitmap)
     uint8_t block_bm[KYROFS_BLOCK_SIZE];
     memset(block_bm, 0, sizeof(block_bm));
-    block_bm[0] |= 1; // Bit 0
-    lseek(fd, ((int64_t)part2_lba + groups[0].block_bitmap_block * 8) * SECTOR_SIZE, SEEK_SET);
-    write(fd, block_bm, KYROFS_BLOCK_SIZE);
+    block_bm[0] |= 1;
+    write_exact_at(fd, ((int64_t)part2_lba + (int64_t)groups[0].block_bitmap_block * 8) * SECTOR_SIZE,
+                   block_bm, KYROFS_BLOCK_SIZE);
     groups[0].free_blocks_in_group--;
     sb.free_blocks--;
 
@@ -525,18 +601,18 @@ static int format_kyrofs_partition(int fd, uint32_t part2_lba, uint32_t part2_se
     de1->inode = 1;
     de1->rec_len = sizeof(kyrofs_dirent_t);
     de1->name_len = 1;
-    de1->file_type = 2; // dir
+    de1->file_type = 2;
     strcpy(de1->name, ".");
 
     kyrofs_dirent_t *de2 = (kyrofs_dirent_t *)(dir_buf + sizeof(kyrofs_dirent_t));
     de2->inode = 1;
     de2->rec_len = sizeof(kyrofs_dirent_t);
     de2->name_len = 2;
-    de2->file_type = 2; // dir
+    de2->file_type = 2;
     strcpy(de2->name, "..");
 
-    lseek(fd, ((int64_t)part2_lba + root_data_blk * 8) * SECTOR_SIZE, SEEK_SET);
-    write(fd, dir_buf, KYROFS_BLOCK_SIZE);
+    write_exact_at(fd, ((int64_t)part2_lba + (int64_t)root_data_blk * 8) * SECTOR_SIZE,
+                   dir_buf, KYROFS_BLOCK_SIZE);
 
     // Write root inode in Inode Table
     uint8_t inotbl_buf[KYROFS_BLOCK_SIZE];
@@ -554,16 +630,22 @@ static int format_kyrofs_partition(int fd, uint32_t part2_lba, uint32_t part2_se
     r_ino->extent_count = 1;
     r_ino->extents[0].start_block = root_data_blk;
     r_ino->extents[0].length = 1;
+    r_ino->crc32 = 0;
+    r_ino->crc32 = kyrofs_crc32(r_ino, sizeof(*r_ino));
 
-    lseek(fd, ((int64_t)part2_lba + groups[0].inode_table_block * 8) * SECTOR_SIZE, SEEK_SET);
-    write(fd, inotbl_buf, KYROFS_BLOCK_SIZE);
+    write_exact_at(fd, ((int64_t)part2_lba + (int64_t)groups[0].inode_table_block * 8) * SECTOR_SIZE,
+                   inotbl_buf, KYROFS_BLOCK_SIZE);
 
-    // Write group descriptors
+    // Write group descriptors (fits safely in 1 block because group_count <= max_groups)
     uint8_t gd_buf[KYROFS_BLOCK_SIZE];
     memset(gd_buf, 0, sizeof(gd_buf));
+    for (uint32_t g = 0; g < group_count; g++) {
+        groups[g].crc32 = 0;
+        groups[g].crc32 = kyrofs_crc32(&groups[g], sizeof(kyrofs_group_desc_t));
+    }
     memcpy(gd_buf, groups, sizeof(kyrofs_group_desc_t) * group_count);
-    lseek(fd, ((int64_t)part2_lba + sb.group_desc_block * 8) * SECTOR_SIZE, SEEK_SET);
-    write(fd, gd_buf, KYROFS_BLOCK_SIZE);
+    write_exact_at(fd, ((int64_t)part2_lba + (int64_t)sb.group_desc_block * 8) * SECTOR_SIZE,
+                   gd_buf, KYROFS_BLOCK_SIZE);
 
     // Compute Superblock CRC32 and write Superblock to block 0
     uint8_t sb_buf[KYROFS_BLOCK_SIZE];
@@ -571,24 +653,28 @@ static int format_kyrofs_partition(int fd, uint32_t part2_lba, uint32_t part2_se
     sb.crc32 = 0;
     sb.crc32 = kyrofs_crc32(&sb, sizeof(sb));
     memcpy(sb_buf, &sb, sizeof(sb));
-    lseek(fd, (int64_t)part2_lba * SECTOR_SIZE, SEEK_SET);
-    write(fd, sb_buf, KYROFS_BLOCK_SIZE);
+    write_exact_at(fd, (int64_t)part2_lba * SECTOR_SIZE, sb_buf, KYROFS_BLOCK_SIZE);
 
     free(groups);
     return 0;
 }
 
 int main(int argc, char *argv[]) {
-    if (argc > 1 && (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0)) {
-        print("Usage: installer\n");
-        print("KyroOS System Installation Wizard for partitioning, KyroFS formatting, and Limine setup.\n");
-        print_flush();
-        return 0;
+    bool auto_yes = false;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            print("Usage: installer [--yes]\n");
+            print("KyroOS System Installation Wizard for partitioning, KyroFS formatting, and Limine setup.\n");
+            print_flush();
+            return 0;
+        } else if (strcmp(argv[i], "--yes") == 0 || strcmp(argv[i], "-y") == 0) {
+            auto_yes = true;
+        }
     }
 
     print("\033[2J\033[H");
     print("\033[1;36m============================================================\033[0m\n");
-    print("\033[1;32m         KyroOS System Installation Wizard v3.0            \033[0m\n");
+    print("\033[1;32m         KyroOS System Installation Wizard v3.1            \033[0m\n");
     print("\033[1;36m============================================================\033[0m\n\n");
     print("Welcome! This installer will partition your drive, install\n");
     print("the native KyroFS filesystem, copy system binaries, and configure\n");
@@ -598,13 +684,24 @@ int main(int argc, char *argv[]) {
     // Scan for available target drive
     const char *candidate_drives[] = {"/dev/sda", "/dev/sdb", "/dev/hda", NULL};
     const char *target_drive = NULL;
-    uint64_t target_size = 0;
+    uint64_t target_sectors = 0;
 
     for (int i = 0; candidate_drives[i]; i++) {
         struct stat st;
         if (stat(candidate_drives[i], &st) == 0) {
             target_drive = candidate_drives[i];
-            target_size = st.st_size;
+            int probe_fd = open(target_drive, O_RDONLY);
+            if (probe_fd >= 0) {
+                inst_disk_info_t dinfo;
+                memset(&dinfo, 0, sizeof(dinfo));
+                if (ioctl(probe_fd, IDE_IOCTL_GET_DISK_INFO, &dinfo) == 0 && dinfo.total_sectors > 0) {
+                    target_sectors = dinfo.total_sectors;
+                }
+                close(probe_fd);
+            }
+            if (target_sectors == 0 && st.st_size > 0) {
+                target_sectors = st.st_size / SECTOR_SIZE;
+            }
             break;
         }
     }
@@ -616,31 +713,35 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    uint64_t size_mb = target_size / (1024 * 1024);
-    if (size_mb == 0) size_mb = 4095; // Default 4GB estimate if size unbounded
+    if (target_sectors == 0) target_sectors = 524288; // 256 MB fallback
+    uint64_t size_mb = (target_sectors * SECTOR_SIZE) / (1024ULL * 1024ULL);
 
     print("Detected primary storage drive:\n");
-    printf("  Device: \033[1;33m%s\033[0m (~%u MB)\n\n", target_drive, (uint32_t)size_mb);
-    printf("Do you want to install KyroOS to \033[1;33m%s\033[0m? [Y/n]: ", target_drive);
-    print_flush();
+    printf("  Device: \033[1;33m%s\033[0m (~%u MB, %u sectors)\n\n",
+           target_drive, (uint32_t)size_mb, (uint32_t)target_sectors);
 
-    char ans[16];
-    read_input(ans, sizeof(ans));
-    if (ans[0] == 'n' || ans[0] == 'N') {
-        print("Installation canceled by user.\n");
+    if (!auto_yes) {
+        printf("Do you want to install KyroOS to \033[1;33m%s\033[0m? [Y/n]: ", target_drive);
         print_flush();
-        return 0;
-    }
 
-    printf("\n\033[1;31m[WARNING] All existing partitions on %s will be ERASED!\033[0m\n", target_drive);
-    print("Are you sure you want to proceed? [yes/NO]: ");
-    print_flush();
+        char ans[16];
+        read_input(ans, sizeof(ans));
+        if (ans[0] == 'n' || ans[0] == 'N') {
+            print("Installation canceled by user.\n");
+            print_flush();
+            return 0;
+        }
 
-    read_input(ans, sizeof(ans));
-    if (strcmp(ans, "yes") != 0 && strcmp(ans, "y") != 0 && strcmp(ans, "YES") != 0) {
-        print("Aborted. No changes were made.\n");
+        printf("\n\033[1;31m[WARNING] All existing partitions on %s will be ERASED!\033[0m\n", target_drive);
+        print("Are you sure you want to proceed? [yes/NO]: ");
         print_flush();
-        return 0;
+
+        read_input(ans, sizeof(ans));
+        if (strcmp(ans, "yes") != 0 && strcmp(ans, "y") != 0 && strcmp(ans, "YES") != 0) {
+            print("Aborted. No changes were made.\n");
+            print_flush();
+            return 0;
+        }
     }
 
     g_dfd = open(target_drive, O_RDWR);
@@ -650,12 +751,18 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    uint32_t total_sectors = (uint32_t)(target_size / SECTOR_SIZE);
-    if (total_sectors <= 133120) total_sectors = 8388608; // 4GB fallback
-
+    uint32_t total_sectors = (target_sectors > 0xFFFFFFFFULL) ? 0xFFFFFFFFU : (uint32_t)target_sectors;
     g_part1_lba = 2048;
-    g_part1_sectors = 131072; // 64 MB Bootloader ESP/BIOS partition
-    g_part2_lba = g_part1_lba + g_part1_sectors; // LBA 133120
+    if (total_sectors > 160000) {
+        g_part1_sectors = 131072; // 64 MB FAT32 boot partition (128,992 clusters >= 65,525)
+    } else if (total_sectors > 80000) {
+        g_part1_sectors = 72000;  // ~35 MB FAT32 boot partition (69,920 clusters >= 65,525)
+    } else {
+        printf("\033[1;31mError: Disk too small (%u MB), need at least 48 MB.\033[0m\n", (uint32_t)size_mb);
+        close(g_dfd);
+        return 1;
+    }
+    g_part2_lba = g_part1_lba + g_part1_sectors;
     g_part2_sectors = total_sectors - g_part2_lba;
 
     print("\n\033[1;34m[1/5]\033[0m Writing Master Boot Record (MBR) and Partition Table...\n");
@@ -670,29 +777,24 @@ int main(int argc, char *argv[]) {
     uint64_t stage2_loc = 512;
     memcpy(mbr_sec + 0x1A4, &stage2_loc, sizeof(uint64_t));
 
-    // Partition 1: Boot Partition (64MB, Active Bootable, Type 0x0C)
+    // Set non-zero MBR disk ID
+    mbr_sec[0x1B8] = 0x4B; mbr_sec[0x1B9] = 0x59; mbr_sec[0x1BA] = 0x52; mbr_sec[0x1BB] = 0x4F;
+
+    // Partition 1: Boot Partition (Active Bootable, Type 0x0C FAT32 LBA)
     mbr_partition_t *part1 = (mbr_partition_t *)(mbr_sec + 446);
     part1->boot_indicator = 0x80; // Active bootable
-    part1->start_head = 1;
-    part1->start_sector = 1;
-    part1->start_cylinder = 0;
+    lba_to_chs(g_part1_lba, &part1->start_head, &part1->start_sector, &part1->start_cylinder);
     part1->partition_type = 0x0C; // FAT32 LBA Boot partition
-    part1->end_head = 254;
-    part1->end_sector = 63;
-    part1->end_cylinder = 15;
+    lba_to_chs(g_part1_lba + g_part1_sectors - 1, &part1->end_head, &part1->end_sector, &part1->end_cylinder);
     part1->start_lba = g_part1_lba;
     part1->sector_count = g_part1_sectors;
 
     // Partition 2: KyroFS System Partition (Type 0x83 = Linux / KyroFS native)
     mbr_partition_t *part2 = (mbr_partition_t *)(mbr_sec + 446 + 16);
     part2->boot_indicator = 0x00;
-    part2->start_head = 0;
-    part2->start_sector = 1;
-    part2->start_cylinder = 16;
+    lba_to_chs(g_part2_lba, &part2->start_head, &part2->start_sector, &part2->start_cylinder);
     part2->partition_type = 0x83; // Linux / KyroFS Native
-    part2->end_head = 254;
-    part2->end_sector = 63;
-    part2->end_cylinder = 255;
+    lba_to_chs(g_part2_lba + g_part2_sectors - 1, &part2->end_head, &part2->end_sector, &part2->end_cylinder);
     part2->start_lba = g_part2_lba;
     part2->sector_count = g_part2_sectors;
 
@@ -700,8 +802,11 @@ int main(int argc, char *argv[]) {
     mbr_sec[510] = 0x55;
     mbr_sec[511] = 0xAA;
 
-    lseek(g_dfd, 0, SEEK_SET);
-    write(g_dfd, mbr_sec, SECTOR_SIZE);
+    if (write_exact_at(g_dfd, 0, mbr_sec, SECTOR_SIZE) != 0) {
+        print("\033[1;31mError: Failed to write MBR to disk!\033[0m\n");
+        close(g_dfd);
+        return 1;
+    }
 
     // 2. Write Limine Stage 2 into post-MBR gap (Sectors 1..44)
     size_t stage2_size = sizeof(binary_limine_hdd_bin_data) - 512;
@@ -709,15 +814,34 @@ int main(int argc, char *argv[]) {
     uint8_t *stage2_buf = (uint8_t *)calloc(stage2_sectors, 512);
     if (!stage2_buf) {
         printf("\033[1;31mError: Out of memory allocating stage2 buffer!\033[0m\n");
+        close(g_dfd);
         return 1;
     }
     memcpy(stage2_buf, &binary_limine_hdd_bin_data[512], stage2_size);
-    lseek(g_dfd, 512, SEEK_SET);
-    write(g_dfd, stage2_buf, stage2_sectors * 512);
+    if (write_exact_at(g_dfd, 512, stage2_buf, stage2_sectors * 512) != 0) {
+        free(stage2_buf);
+        print("\033[1;31mError: Failed to write Limine Stage 2!\033[0m\n");
+        close(g_dfd);
+        return 1;
+    }
+
+    // Verify MBR and Stage 2 readback
+    uint8_t verify_buf[1024];
+    memset(verify_buf, 0, sizeof(verify_buf));
+    lseek(g_dfd, 0, SEEK_SET);
+    read(g_dfd, verify_buf, sizeof(verify_buf));
+    if (verify_buf[510] != 0x55 || verify_buf[511] != 0xAA ||
+        memcmp(verify_buf + 512, stage2_buf, 512) != 0) {
+        free(stage2_buf);
+        print("\033[1;31mError: MBR / Stage 2 verification readback failed!\033[0m\n");
+        close(g_dfd);
+        return 1;
+    }
     free(stage2_buf);
 
-    print("\033[1;32m      Limine MBR Stage 1 and Stage 2 successfully written to drive.\033[0m\n");
-    printf("\033[1;32m      Partition 1 (/dev/sda1): Bootloader ESP/BIOS (64 MB)\033[0m\n");
+    print("\033[1;32m      Limine MBR Stage 1 and Stage 2 written and verified.\033[0m\n");
+    printf("\033[1;32m      Partition 1 (/dev/sda1): Bootloader ESP/BIOS (%u MB)\033[0m\n",
+           (uint32_t)(g_part1_sectors / 2048));
     printf("\033[1;32m      Partition 2 (/dev/sda2): KyroFS System Partition (~%u MB, Type 0x83)\033[0m\n",
            (uint32_t)(g_part2_sectors / 2048));
     print_flush();
@@ -730,16 +854,15 @@ int main(int argc, char *argv[]) {
 
     if (format_kyrofs_partition(g_dfd, g_part2_lba, g_part2_sectors) == 0) {
         print("\033[1;32m      KyroFS filesystem (KYROFS02) formatted successfully.\033[0m\n");
-        print("      Created Superblock, 64 Journal Slots, Inode Extents & Root Directory.\n");
     } else {
         print("\033[1;31m      Warning: KyroFS format encountered an error!\033[0m\n");
     }
     print_flush();
 
     // ------------------------------------------------------------------------
-    // Step 3: Setup Bootloader Partition and Directory Hierarchy
+    // Step 3: Setup FAT32 Bootloader Partition and Directory Hierarchy
     // ------------------------------------------------------------------------
-    print("\033[1;34m[3/5]\033[0m Preparing directory hierarchy on KyroFS and Boot partition...\n");
+    print("\033[1;34m[3/5]\033[0m Formatting FAT32 boot partition and directory hierarchy...\n");
     print_flush();
 
     g_sectors_per_fat = 1024;
@@ -748,7 +871,7 @@ int main(int argc, char *argv[]) {
     g_data_lba = g_fat2_lba + g_sectors_per_fat;
     g_next_cluster = 3;
 
-    // Boot partition BPB
+    // Boot partition BPB (512-byte clusters -> >= 65525 clusters -> valid FAT32)
     uint8_t vbr[SECTOR_SIZE];
     memset(vbr, 0, sizeof(vbr));
     vbr[0] = 0xEB; vbr[1] = 0x58; vbr[2] = 0x90;
@@ -773,10 +896,8 @@ int main(int argc, char *argv[]) {
     memcpy(vbr + 82, "FAT32   ", 8);
     vbr[510] = 0x55; vbr[511] = 0xAA;
 
-    lseek(g_dfd, (int64_t)g_part1_lba * SECTOR_SIZE, SEEK_SET);
-    write(g_dfd, vbr, SECTOR_SIZE);
-    lseek(g_dfd, (int64_t)(g_part1_lba + 6) * SECTOR_SIZE, SEEK_SET);
-    write(g_dfd, vbr, SECTOR_SIZE);
+    write_exact_at(g_dfd, (int64_t)g_part1_lba * SECTOR_SIZE, vbr, SECTOR_SIZE);
+    write_exact_at(g_dfd, (int64_t)(g_part1_lba + 6) * SECTOR_SIZE, vbr, SECTOR_SIZE);
 
     uint8_t fsinfo[SECTOR_SIZE];
     memset(fsinfo, 0, sizeof(fsinfo));
@@ -785,8 +906,7 @@ int main(int argc, char *argv[]) {
     *(uint32_t *)(fsinfo + 488) = 0xFFFFFFFF;
     *(uint32_t *)(fsinfo + 492) = 3;
     *(uint32_t *)(fsinfo + 508) = 0xAA550000;
-    lseek(g_dfd, (int64_t)(g_part1_lba + 1) * SECTOR_SIZE, SEEK_SET);
-    write(g_dfd, fsinfo, SECTOR_SIZE);
+    write_exact_at(g_dfd, (int64_t)(g_part1_lba + 1) * SECTOR_SIZE, fsinfo, SECTOR_SIZE);
 
     memset(g_fat_table, 0, sizeof(g_fat_table));
     g_fat_table[0] = 0x0FFFFFF8;
@@ -860,38 +980,23 @@ int main(int argc, char *argv[]) {
     print_flush();
 
     // ------------------------------------------------------------------------
-    // Step 4: Installing system files
+    // Step 4: Installing kernel, Limine stage files, and system binaries
     // ------------------------------------------------------------------------
-    print("\033[1;34m[4/5]\033[0m Installing system binaries and configuration files...\n");
+    print("\033[1;34m[4/5]\033[0m Installing kernel, Limine stage files, and system binaries...\n");
     print_flush();
 
-    print("      Installing kernel & Limine stage files...\n");
-    print_flush();
-    install_file_to_fat("/boot/kernel.elf", &g_dir_boot, "kernel.elf");
-    install_file_to_fat("/boot/kernel.elf", &g_dir_root, "kernel.elf");
-    install_file_to_fat("/boot/limine/limine-bios.sys", &g_dir_limine, "limine-bios.sys");
+    if (install_file_to_fat("/boot/kernel.elf", &g_dir_boot, "kernel.elf") != 0) {
+        print("\033[1;31m      Warning: /boot/kernel.elf not found on live media!\033[0m\n");
+    }
+    if (install_file_to_fat("/boot/limine/limine-bios.sys", &g_dir_limine, "limine-bios.sys") != 0) {
+        print("\033[1;31m      Warning: /boot/limine/limine-bios.sys not found on live media!\033[0m\n");
+    }
     install_file_to_fat("/boot/limine/limine-bios.sys", &g_dir_root, "limine-bios.sys");
     install_file_to_fat("/boot/limine/BOOTX64.EFI", &g_dir_limine, "BOOTX64.EFI");
     install_file_to_fat("/boot/limine/BOOTX64.EFI", &g_dir_efi_boot, "BOOTX64.EFI");
-    install_file_to_fat("/boot/limine/BOOTX64.EFI", &g_dir_root, "BOOTX64.EFI");
     install_file_to_fat("/boot/limine/limine-bios-cd.bin", &g_dir_limine, "limine-bios-cd.bin");
 
-    // Copy core system binaries
-    const char *system_binaries[] = {
-        "alias", "cat", "chmod", "chown", "clear", "cp", "curl", "cursor_test",
-        "date", "debugmode", "df", "doom", "du", "echo", "env", "export",
-        "false", "fdisk", "find", "free", "game", "gears", "gpuinfo", "gradient_demo",
-        "grep", "groupadd", "groupdel", "groups", "halt", "head", "hello", "history",
-        "hostname", "httpd", "id", "ifconfig", "init", "insmod", "installer", "kill", "killall",
-        "kpm", "kyro", "ln", "ls", "lsblk", "lsmod", "lua", "mkdir", "mkfs", "mount", "mv",
-        "nice", "passwd", "poweroff", "pwd", "reboot", "renice", "reset", "rm",
-        "rmdir", "rmmod", "sh", "sleep", "sort", "su", "sync", "sysmon",
-        "tail", "test", "time", "touch", "true", "umount", "unalias", "uname",
-        "uniq", "unset", "uptime", "useradd", "userdel", "users", "vkcube", "wc",
-        "wget", "whoami", "yes", NULL
-    };
-
-    char limine_conf_buf[8192];
+    static char limine_conf_buf[16384];
     int conf_len = snprintf(limine_conf_buf, sizeof(limine_conf_buf),
         "timeout: 3\n\n"
         "/KyroOS Carbon\n"
@@ -900,14 +1005,23 @@ int main(int argc, char *argv[]) {
     );
 
     int installed_count = 0;
-    for (int i = 0; system_binaries[i]; i++) {
-        char src[64];
-        snprintf(src, sizeof(src), "/bin/%s", system_binaries[i]);
-        if (install_file_to_fat(src, &g_dir_bin, system_binaries[i]) == 0) {
-            installed_count++;
-            conf_len += snprintf(limine_conf_buf + conf_len, sizeof(limine_conf_buf) - conf_len,
-                "    module_path: boot():/bin/%s\n", system_binaries[i]);
+    int bin_fd = open("/bin", O_RDONLY);
+    if (bin_fd >= 0) {
+        struct dirent ent;
+        int idx = 0;
+        while (readdir(bin_fd, idx++, &ent) > 0) {
+            if (ent.name[0] == '\0' || strcmp(ent.name, ".") == 0 || strcmp(ent.name, "..") == 0) continue;
+            char src[128];
+            snprintf(src, sizeof(src), "/bin/%s", ent.name);
+            if (install_file_to_fat(src, &g_dir_bin, ent.name) == 0) {
+                installed_count++;
+                if (conf_len < (int)sizeof(limine_conf_buf) - 160) {
+                    conf_len += snprintf(limine_conf_buf + conf_len, sizeof(limine_conf_buf) - conf_len,
+                        "    module_path: boot():/bin/%s\n", ent.name);
+                }
+            }
         }
+        close(bin_fd);
     }
     printf("      Installed %d system binaries to /bin.\n", installed_count);
     print_flush();
@@ -936,27 +1050,29 @@ int main(int argc, char *argv[]) {
 
     const char *etc_files[] = {"os-release", "issue", "hostname", "passwd", "shadow", "group", "resolv.conf", NULL};
     for (int i = 0; etc_files[i]; i++) {
-        conf_len += snprintf(limine_conf_buf + conf_len, sizeof(limine_conf_buf) - conf_len,
-            "    module_path: boot():/etc/%s\n", etc_files[i]);
+        if (conf_len < (int)sizeof(limine_conf_buf) - 128) {
+            conf_len += snprintf(limine_conf_buf + conf_len, sizeof(limine_conf_buf) - conf_len,
+                "    module_path: boot():/etc/%s\n", etc_files[i]);
+        }
     }
 
-    // Kernel modules
     if (install_file_to_fat("/lib/modules/hello.ko", &g_dir_modules, "hello.ko") == 0) {
-        conf_len += snprintf(limine_conf_buf + conf_len, sizeof(limine_conf_buf) - conf_len,
-            "    module_path: boot():/lib/modules/hello.ko\n");
+        if (conf_len < (int)sizeof(limine_conf_buf) - 128) {
+            conf_len += snprintf(limine_conf_buf + conf_len, sizeof(limine_conf_buf) - conf_len,
+                "    module_path: boot():/lib/modules/hello.ko\n");
+        }
     }
 
-    // Write final limine.conf into /boot/limine/limine.conf and /limine.conf on target disk
-    install_buffer_to_fat(limine_conf_buf, strlen(limine_conf_buf), &g_dir_limine, "limine.conf");
-    install_buffer_to_fat(limine_conf_buf, strlen(limine_conf_buf), &g_dir_root, "limine.conf");
+    install_buffer_to_fat(limine_conf_buf, (uint32_t)conf_len, &g_dir_limine, "limine.conf");
+    install_buffer_to_fat(limine_conf_buf, (uint32_t)conf_len, &g_dir_root, "limine.conf");
 
-    print("\033[1;32m      System files installed successfully to KyroFS.\033[0m\n");
+    print("\033[1;32m      System files and limine.conf written.\033[0m\n");
     print_flush();
 
     // ------------------------------------------------------------------------
-    // Step 5: Finalizing bootloader configuration
+    // Step 5: Finalizing directories and FAT32 tables
     // ------------------------------------------------------------------------
-    print("\033[1;34m[5/5]\033[0m Finalizing Limine bootloader configuration...\n");
+    print("\033[1;34m[5/5]\033[0m Flushing FAT32 directories and allocation tables...\n");
     print_flush();
 
     flush_fat_dir(&g_dir_root);
@@ -975,11 +1091,8 @@ int main(int argc, char *argv[]) {
     flush_fat_dir(&g_dir_dev);
     flush_fat_dir(&g_dir_proc);
 
-    lseek(g_dfd, (int64_t)g_fat1_lba * SECTOR_SIZE, SEEK_SET);
-    write(g_dfd, g_fat_table, sizeof(g_fat_table));
-
-    lseek(g_dfd, (int64_t)g_fat2_lba * SECTOR_SIZE, SEEK_SET);
-    write(g_dfd, g_fat_table, sizeof(g_fat_table));
+    write_exact_at(g_dfd, (int64_t)g_fat1_lba * SECTOR_SIZE, g_fat_table, sizeof(g_fat_table));
+    write_exact_at(g_dfd, (int64_t)g_fat2_lba * SECTOR_SIZE, g_fat_table, sizeof(g_fat_table));
 
     close(g_dfd);
 

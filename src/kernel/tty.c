@@ -39,6 +39,11 @@ uint32_t tty_read(vfs_node_t *node, uint64_t offset, uint32_t size,
       return 0;
     }
 
+    if (console_focus && console_focus != cur) {
+      thread_sleep(1);
+      continue;
+    }
+
     if (event_pop(&ev)) {
       if (ev.type == EVENT_KEY_DOWN) {
         char c = (char)ev.data1;

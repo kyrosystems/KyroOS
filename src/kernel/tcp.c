@@ -130,8 +130,15 @@ int tcp_connect_tcb(tcp_tcb_t *tcb, uint32_t remote_ip, uint16_t remote_port) {
 
 int tcp_send_tcb(tcp_tcb_t *tcb, const void *buf, size_t len) {
     if (!tcb || tcb->state != TCP_STATE_ESTABLISHED) return -1;
-    tcp_send_packet(tcb, TCP_FLAG_ACK | TCP_FLAG_PSH, buf, len);
-    tcb->snd_nxt += len;
+    const uint8_t *p = (const uint8_t *)buf;
+    size_t off = 0;
+    while (off < len) {
+        size_t chunk = len - off;
+        if (chunk > 1400) chunk = 1400;
+        tcp_send_packet(tcb, TCP_FLAG_ACK | TCP_FLAG_PSH, p + off, chunk);
+        tcb->snd_nxt += (uint32_t)chunk;
+        off += chunk;
+    }
     return (int)len;
 }
 
@@ -191,19 +198,28 @@ void tcp_handle_packet(net_dev_t *net_dev, const ipv4_header_t *ip_hdr,
                 size_t payload_len = size - hlen;
 
                 if (payload_len > 0) {
-                    uint8_t *payload   = (uint8_t *)packet + hlen;
-                    size_t   write_idx = (tcb->recv_read_idx + tcb->recv_data_len)
-                                         % tcb->recv_buffer_size;
-                    for (size_t i = 0; i < payload_len; i++) {
-                        if (tcb->recv_data_len >= tcb->recv_buffer_size) break;
-                        tcb->recv_buffer[write_idx] = payload[i];
-                        write_idx = (write_idx + 1) % tcb->recv_buffer_size;
-                        tcb->recv_data_len++;
+                    int32_t rel = (int32_t)(tcb->rcv_nxt - seq);
+                    if (rel >= 0 && (size_t)rel < payload_len) {
+                        uint8_t *payload   = (uint8_t *)packet + hlen + (size_t)rel;
+                        size_t   new_len   = payload_len - (size_t)rel;
+                        size_t   write_idx = (tcb->recv_read_idx + tcb->recv_data_len)
+                                             % tcb->recv_buffer_size;
+                        size_t   copied = 0;
+                        for (size_t i = 0; i < new_len; i++) {
+                            if (tcb->recv_data_len >= tcb->recv_buffer_size) break;
+                            tcb->recv_buffer[write_idx] = payload[i];
+                            write_idx = (write_idx + 1) % tcb->recv_buffer_size;
+                            tcb->recv_data_len++;
+                            copied++;
+                        }
+                        tcb->rcv_nxt += (uint32_t)copied;
+                        tcp_send_packet(tcb, TCP_FLAG_ACK, NULL, 0);
+                        /* Wake up tcp_recv_tcb */
+                        waitqueue_wakeup_all(&tcb->recv_wq);
+                    } else if (rel > 0) {
+                        /* Duplicate packet already acknowledged; re-ACK */
+                        tcp_send_packet(tcb, TCP_FLAG_ACK, NULL, 0);
                     }
-                    tcb->rcv_nxt += payload_len;
-                    tcp_send_packet(tcb, TCP_FLAG_ACK, NULL, 0);
-                    /* Wake up tcp_recv_tcb */
-                    waitqueue_wakeup_all(&tcb->recv_wq);
                 }
 
                 if (hdr->flags & TCP_FLAG_FIN) {

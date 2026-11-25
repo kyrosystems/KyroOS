@@ -146,11 +146,13 @@ int main(int argc, char **argv) {
     gfx_event_t drain_ev;
     while (gfx_poll_event(&drain_ev)) {}
 
+    bool dirty = true;
     while (running) {
         // Poll input events
         gfx_event_t ev;
         memset(&ev, 0, sizeof(ev));
         while (gfx_poll_event(&ev)) {
+            dirty = true;
             if (ev.type == GFX_EVENT_KEY_DOWN) {
                 char c = (char)ev.data1;
                 if (c == 'q' || c == 'Q' || c == 27 || ev.data1 == 27 || c == 3) {
@@ -213,6 +215,12 @@ int main(int argc, char **argv) {
             }
         }
         if (!running) break;
+
+        if (!dirty && !auto_spin) {
+            sleep_ms(10);
+            continue;
+        }
+        dirty = false;
 
         // Auto-spin if enabled
         if (auto_spin) {

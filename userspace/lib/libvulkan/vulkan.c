@@ -93,35 +93,45 @@ void vkRasterizeTriangle(const VkVertex3D *v0, const VkVertex3D *v1, const VkVer
     if (min_y < 0) min_y = 0;
     if (max_x >= (int)w) max_x = (int)w - 1;
     if (max_y >= (int)h) max_y = (int)h - 1;
+    if (min_x > max_x || min_y > max_y) return;
 
     uint32_t color = v0->color;
+    float start_px = (float)min_x + 0.5f;
+    float start_py = (float)min_y + 0.5f;
+
+    float w0_dx = (y2 - y1), w0_dy = -(x2 - x1);
+    float w1_dx = (y0 - y2), w1_dy = -(x0 - x2);
+    float w2_dx = (y1 - y0), w2_dy = -(x1 - x0);
+
+    float w0_row = edge_cross(x1, y1, x2, y2, start_px, start_py);
+    float w1_row = edge_cross(x2, y2, x0, y0, start_px, start_py);
+    float w2_row = edge_cross(x0, y0, x1, y1, start_px, start_py);
+
+    float z_dx = (w0_dx * z0 + w1_dx * z1 + w2_dx * z2) * inv_area;
 
     for (int y = min_y; y <= max_y; y++) {
-        float py = (float)y + 0.5f;
-        uint32_t row_offset = y * w;
+        float w0 = w0_row;
+        float w1 = w1_row;
+        float w2 = w2_row;
+        float z = (w0 * z0 + w1 * z1 + w2 * z2) * inv_area;
+        uint32_t row_offset = (uint32_t)y * w;
         for (int x = min_x; x <= max_x; x++) {
-            float px = (float)x + 0.5f;
-
-            float w0 = edge_cross(x1, y1, x2, y2, px, py);
-            float w1 = edge_cross(x2, y2, x0, y0, px, py);
-            float w2 = edge_cross(x0, y0, x1, y1, px, py);
-
-            if (w0 >= 0.0f && w1 >= 0.0f && w2 >= 0.0f) {
-                float b0 = w0 * inv_area;
-                float b1 = w1 * inv_area;
-                float b2 = w2 * inv_area;
-
-                float z = b0 * z0 + b1 * z1 + b2 * z2;
-                if (z < 0.0f) continue;
+            if (w0 >= 0.0f && w1 >= 0.0f && w2 >= 0.0f && z >= 0.0f) {
                 uint32_t iz = (uint32_t)(z * 65536.0f);
-
-                uint32_t idx = row_offset + x;
+                uint32_t idx = row_offset + (uint32_t)x;
                 if (iz < g_depth_buffer[idx]) {
                     g_depth_buffer[idx] = iz;
                     fb[idx] = color;
                 }
             }
+            w0 += w0_dx;
+            w1 += w1_dx;
+            w2 += w2_dx;
+            z  += z_dx;
         }
+        w0_row += w0_dy;
+        w1_row += w1_dy;
+        w2_row += w2_dy;
     }
 }
 

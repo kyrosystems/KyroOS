@@ -5,11 +5,15 @@
 #include <stddef.h>
 #include <stdbool.h>
 
+#define TLS_CIPHER_AES_128_GCM_SHA256        0x1301
+#define TLS_CIPHER_CHACHA20_POLY1305_SHA256  0x1303
+
 typedef struct tls_session tls_session_t;
 
 struct tls_session {
     int sockfd;
     char hostname[256];
+    uint16_t cipher_suite;
     uint8_t client_random[32];
     uint8_t server_random[32];
     uint8_t client_private_key[32];
@@ -23,6 +27,10 @@ struct tls_session {
     uint64_t client_seq;
     uint64_t server_seq;
     bool is_established;
+    bool eof;
+    uint8_t app_buf[18432];
+    size_t app_pos;
+    size_t app_len;
 };
 
 tls_session_t *tls_create_session(int sockfd, const char *hostname);

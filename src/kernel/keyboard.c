@@ -80,6 +80,10 @@ static void push_vt100_seq(const char *s, uint8_t scancode) {
 static void keyboard_handler(struct registers *regs) {
   (void)regs; // Suppress unused parameter warning
 
+  uint8_t kbc_status = inb(0x64);
+  if (!(kbc_status & 0x01)) return;
+  if (kbc_status & 0x20) return; // Auxiliary (mouse) byte belongs to IRQ12
+
   uint8_t scancode = inb(0x60);
   if (scancode == 0xE0) { extended_key = true; return; }
   bool extended = extended_key;

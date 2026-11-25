@@ -168,7 +168,7 @@ socket_t *sock_create(int domain, int type, int protocol) {
 
     sock->domain   = domain;
     sock->type     = type;
-    sock->protocol = protocol;
+    sock->protocol = is_tcp ? IPPROTO_TCP : (is_udp ? IPPROTO_UDP : protocol);
     sock->state    = SOCK_STATE_CREATED;
     waitqueue_init(&sock->waiting_threads);
 
