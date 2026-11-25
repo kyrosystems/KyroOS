@@ -2,57 +2,71 @@
 #define PCI_H
 
 #include <stdint.h>
-#include "driver.h" // For device_t
+#include <stddef.h>
 
-#define PCI_CONFIG_ADDRESS 0xCF8
-#define PCI_CONFIG_DATA    0xCFC
+#define PCI_COMMAND 0x04
+#define PCI_STATUS 0x06
+#define PCI_CLASS_REVISION 0x08
+#define PCI_BIST_HEADER_TYPE 0x0C
+#define PCI_BAR0 0x10
+#define PCI_BAR1 0x14
+#define PCI_BAR2 0x18
+#define PCI_BAR3 0x1C
+#define PCI_BAR4 0x20
+#define PCI_BAR5 0x24
+#define PCI_CAPABILITY_LIST 0x34
+#define PCI_INTERRUPT_LINE 0x3C
 
-// PCI Configuration Space Register Offsets
-#define PCI_VENDOR_ID         0x00
-#define PCI_DEVICE_ID         0x02
-#define PCI_COMMAND           0x04
-#define PCI_STATUS            0x06
-#define PCI_REVISION_ID       0x08
-#define PCI_PROG_IF           0x09
-#define PCI_SUBCLASS          0x0A
-#define PCI_CLASS             0x0B
-#define PCI_CACHE_LINE_SIZE   0x0C
-#define PCI_LATENCY_TIMER     0x0D
-#define PCI_HEADER_TYPE       0x0E
-#define PCI_BIST              0x0F
+typedef struct {
+    uint16_t vendor_id;
+    uint16_t device_id;
+    uint8_t bus;
+    uint8_t device;
+    uint8_t func;
+    uint8_t class_code;
+    uint8_t subclass;
+    uint8_t prog_if;
+    struct {
+        uint64_t base;
+        uint64_t size;
+        uint8_t type;
+    } bars[6];
+} pci_device_t;
 
-// PCI Base Address Registers (BARs)
-#define PCI_BAR0              0x10
-#define PCI_BAR1              0x14
-#define PCI_BAR2              0x18
-#define PCI_BAR3              0x1C
-#define PCI_BAR4              0x20
-#define PCI_BAR5              0x24
+typedef struct pci_device_node {
+    pci_device_t device;
+    struct pci_device_node *next;
+} pci_device_node_t;
 
-#define PCI_INTERRUPT_LINE    0x3C
+extern pci_device_node_t *pci_devices;
 
+typedef struct pci_driver {
+    const char *name;
+    uint16_t vendor_id;
+    uint16_t device_id;
+    uint8_t class_code;
+    uint8_t subclass;
+    void (*init)(pci_device_t *dev);
+    struct pci_driver *next;
+} pci_driver_t;
 
-void pci_init(); // Initializes the PCI bus scanning
-void pci_check_all_buses();
+void pci_init();
+void pci_register_driver(pci_driver_t *driver);
+void pci_enumerate();
 
-// Helper to construct PCI address
-uint32_t pci_get_addr(uint8_t bus, uint8_t device, uint8_t func, uint8_t offset);
+uint16_t pci_config_read_word(uint8_t b, uint8_t s, uint8_t f, uint8_t o);
+void pci_config_write_word(uint8_t b, uint8_t s, uint8_t f, uint8_t o, uint16_t d);
+uint32_t pci_config_read_dword(uint8_t b, uint8_t s, uint8_t f, uint8_t o);
+void pci_config_write_dword(uint8_t b, uint8_t s, uint8_t f, uint8_t o, uint32_t d);
+uint8_t pci_config_read_byte(uint8_t b, uint8_t s, uint8_t f, uint8_t o);
 
-// Read from PCI configuration space
-uint32_t pci_read_config_dword(uint8_t bus, uint8_t device, uint8_t func, uint8_t offset);
-uint16_t pci_read_config_word(uint8_t bus, uint8_t device, uint8_t func, uint8_t offset);
-uint8_t pci_read_config_byte(uint8_t bus, uint8_t device, uint8_t func, uint8_t offset);
+#define pci_read_config_word pci_config_read_word
+#define pci_write_config_word pci_config_write_word
+#define pci_read_config_dword pci_config_read_dword
+#define pci_write_config_dword pci_config_write_dword
+#define pci_read_config_byte pci_config_read_byte
 
-// Write to PCI configuration space
-void pci_write_config_dword(uint8_t bus, uint8_t device, uint8_t func, uint8_t offset, uint32_t val);
-void pci_write_config_word(uint8_t bus, uint8_t device, uint8_t func, uint8_t offset, uint16_t val);
-void pci_write_config_byte(uint8_t bus, uint8_t device, uint8_t func, uint8_t offset, uint8_t val);
+static inline uint8_t pci_get_class(uint8_t b, uint8_t s, uint8_t f) { return (pci_config_read_dword(b, s, f, 0x08) >> 24) & 0xFF; }
+static inline uint8_t pci_get_subclass(uint8_t b, uint8_t s, uint8_t f) { return (pci_config_read_dword(b, s, f, 0x08) >> 16) & 0xFF; }
 
-
-// Get PCI device info (for example driver to use)
-uint16_t pci_get_vendor_id(uint8_t bus, uint8_t device, uint8_t func);
-uint16_t pci_get_device_id(uint8_t bus, uint8_t device, uint8_t func);
-uint8_t pci_get_class(uint8_t bus, uint8_t device, uint8_t func);
-uint8_t pci_get_subclass(uint8_t bus, uint8_t device, uint8_t func);
-
-#endif // PCI_H
+#endif

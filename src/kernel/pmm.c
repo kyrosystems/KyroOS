@@ -1,9 +1,12 @@
 #include "pmm.h"
 #include "kstring.h"
 #include "log.h"
+#include "spinlock.h"
 // #include "stivale2.h"
 
+static spinlock_t pmm_lock;
 static uint8_t *pmm_bitmap = NULL;
+static uint16_t *pmm_page_refcount = NULL;
 static uint64_t pmm_total_pages = 0;
 static uint64_t pmm_usable_pages = 0;
 static uint64_t pmm_allocated_pages = 0; // NEW: track actual allocations
@@ -43,22 +46,26 @@ static int pmm_bitmap_test(uint64_t page_index) {
 }
 
 void pmm_init(struct limine_memmap_response *mmap_response, uint64_t offset) {
+  spinlock_init(&pmm_lock);
   pmm_hhdm_offset = offset;
   uint64_t highest_addr = 0;
   for (uint64_t i = 0; i < mmap_response->entry_count; i++) {
     struct limine_memmap_entry *entry = mmap_response->entries[i];
-    if (entry->base + entry->length > highest_addr) {
+    if (entry->type == LIMINE_MEMMAP_USABLE && entry->base + entry->length > highest_addr) {
       highest_addr = entry->base + entry->length;
     }
   }
   pmm_total_pages = highest_addr / PAGE_SIZE;
-  uint64_t bitmap_size = ALIGN_UP(pmm_total_pages / 8, PAGE_SIZE);
+  uint64_t bitmap_size = ALIGN_UP((pmm_total_pages + 7) / 8, PAGE_SIZE);
+  uint64_t refcount_size = ALIGN_UP(pmm_total_pages * sizeof(uint16_t), PAGE_SIZE);
+  uint64_t total_meta_size = bitmap_size + refcount_size;
 
-  // Find a large enough spot for the bitmap itself
+  // Find a large enough spot for the bitmap and refcount array
   for (uint64_t i = 0; i < mmap_response->entry_count; i++) {
     struct limine_memmap_entry *entry = mmap_response->entries[i];
-    if (entry->type == LIMINE_MEMMAP_USABLE && entry->length >= bitmap_size) {
+    if (entry->type == LIMINE_MEMMAP_USABLE && entry->length >= total_meta_size) {
       pmm_bitmap = (uint8_t *)entry->base;
+      pmm_page_refcount = (uint16_t *)((uint64_t)entry->base + bitmap_size);
       break;
     }
   }
@@ -70,6 +77,7 @@ void pmm_init(struct limine_memmap_response *mmap_response, uint64_t offset) {
 
   // Mark all memory as used initially
   memset(p_to_v(pmm_bitmap), 0xff, bitmap_size);
+  memset(p_to_v(pmm_page_refcount), 0, refcount_size);
 
   // Mark usable memory as free
   for (uint64_t i = 0; i < mmap_response->entry_count; i++) {
@@ -86,37 +94,56 @@ void pmm_init(struct limine_memmap_response *mmap_response, uint64_t offset) {
   // Redundant kernel marking was removed as type 6 entry covers it.
   // The kernel's physical range is not type 0 (USABLE), so it remains set.
 
-  // Mark the bitmap itself as used
-  uint64_t bitmap_pages = bitmap_size / PAGE_SIZE;
-  for (uint64_t i = 0; i < bitmap_pages; i++) {
+  pmm_bitmap_set(0); // Physical page zero is never a successful allocation
+
+  // Mark the metadata pages itself as used
+  uint64_t meta_pages = total_meta_size / PAGE_SIZE;
+  for (uint64_t i = 0; i < meta_pages; i++) {
     pmm_bitmap_set(((uint64_t)pmm_bitmap / PAGE_SIZE) + i);
   }
 
-  klog(LOG_INFO, "PMM initialized.");
+  klog(LOG_INFO, "PMM initialized with COW refcounts.");
 }
 
-void *pmm_alloc_page() {
+static void *_pmm_alloc_page_unlocked(void) {
   for (uint64_t i = pmm_last_free_page; i < pmm_total_pages; i++) {
     if (!pmm_bitmap_test(i)) {
       pmm_bitmap_set(i);
       pmm_allocated_pages++; // Track allocation
       pmm_last_free_page = i + 1;
+      if (pmm_page_refcount) {
+        uint16_t *rc = (uint16_t *)p_to_v(pmm_page_refcount);
+        rc[i] = 1;
+      }
       return (void *)(i * PAGE_SIZE);
     }
   }
 
   // Wrap around
-  for (uint64_t i = 0; i < pmm_last_free_page; i++) {
+  for (uint64_t i = 1; i < pmm_last_free_page; i++) {
     if (!pmm_bitmap_test(i)) {
       pmm_bitmap_set(i);
       pmm_allocated_pages++; // Track allocation
       pmm_last_free_page = i + 1;
+      if (pmm_page_refcount) {
+        uint16_t *rc = (uint16_t *)p_to_v(pmm_page_refcount);
+        rc[i] = 1;
+      }
       return (void *)(i * PAGE_SIZE);
     }
   }
 
-  klog(LOG_WARN, "PMM: Out of physical memory!");
   return NULL;
+}
+
+void *pmm_alloc_page() {
+  uint64_t iflags = spinlock_acquire_irqsave(&pmm_lock);
+  void *page = _pmm_alloc_page_unlocked();
+  spinlock_release_irqrestore(&pmm_lock, iflags);
+  if (!page) {
+    klog(LOG_WARN, "PMM: Out of physical memory!");
+  }
+  return page;
 }
 
 void *pmm_alloc_pages(size_t count) {
@@ -125,7 +152,13 @@ void *pmm_alloc_pages(size_t count) {
   if (count == 1)
     return pmm_alloc_page();
 
-  for (uint64_t i = 0; i <= pmm_total_pages - count; i++) {
+  uint64_t iflags = spinlock_acquire_irqsave(&pmm_lock);
+  if (count > pmm_total_pages) {
+    spinlock_release_irqrestore(&pmm_lock, iflags);
+    return NULL;
+  }
+
+  for (uint64_t i = 1; i <= pmm_total_pages - count; i++) {
     int found = 1;
     for (uint64_t j = 0; j < count; j++) {
       if (pmm_bitmap_test(i + j)) {
@@ -136,21 +169,38 @@ void *pmm_alloc_pages(size_t count) {
     }
 
     if (found) {
+      uint16_t *rc = pmm_page_refcount ? (uint16_t *)p_to_v(pmm_page_refcount) : NULL;
       for (uint64_t j = 0; j < count; j++) {
         pmm_bitmap_set(i + j);
+        if (rc) rc[i + j] = 1;
       }
       pmm_allocated_pages += count; // Track allocations
+      spinlock_release_irqrestore(&pmm_lock, iflags);
       return (void *)(i * PAGE_SIZE);
     }
   }
 
+  spinlock_release_irqrestore(&pmm_lock, iflags);
   klog(LOG_WARN, "PMM: Out of contiguous physical memory!");
   return NULL;
 }
 
 void pmm_free_page(void *p) {
+  if (!p || (uint64_t)p < PAGE_SIZE)
+    return;
+
+  uint64_t iflags = spinlock_acquire_irqsave(&pmm_lock);
   uint64_t page_index = (uint64_t)p / PAGE_SIZE;
   if (page_index < pmm_total_pages) {
+    if (pmm_page_refcount) {
+      uint16_t *rc = (uint16_t *)p_to_v(pmm_page_refcount);
+      if (rc[page_index] > 1) {
+        rc[page_index]--;
+        spinlock_release_irqrestore(&pmm_lock, iflags);
+        return; // Page still in use by other processes
+      }
+      rc[page_index] = 0;
+    }
     if (pmm_bitmap_test(page_index)) { // Only decrement if it was allocated
       pmm_bitmap_unset(page_index);
       pmm_allocated_pages--; // Track deallocation
@@ -158,11 +208,52 @@ void pmm_free_page(void *p) {
         pmm_last_free_page = page_index;
       }
     }
+    spinlock_release_irqrestore(&pmm_lock, iflags);
   } else {
+    spinlock_release_irqrestore(&pmm_lock, iflags);
     klog(LOG_WARN, "PMM: Attempted to free an invalid physical page.");
   }
 }
 
+void pmm_page_ref(void *p) {
+  if (!p || (uint64_t)p < PAGE_SIZE)
+    return;
+
+  uint64_t iflags = spinlock_acquire_irqsave(&pmm_lock);
+  uint64_t page_index = (uint64_t)p / PAGE_SIZE;
+  if (page_index < pmm_total_pages && pmm_page_refcount) {
+    uint16_t *rc = (uint16_t *)p_to_v(pmm_page_refcount);
+    if (rc[page_index] < 0xFFFF) {
+      rc[page_index]++;
+    }
+  }
+  spinlock_release_irqrestore(&pmm_lock, iflags);
+}
+
+void pmm_page_unref(void *p) {
+  pmm_free_page(p);
+}
+
+uint16_t pmm_page_get_ref(void *p) {
+  if (!p || (uint64_t)p < PAGE_SIZE)
+    return 0;
+
+  uint64_t iflags = spinlock_acquire_irqsave(&pmm_lock);
+  uint16_t ref = 0;
+  uint64_t page_index = (uint64_t)p / PAGE_SIZE;
+  if (page_index < pmm_total_pages && pmm_page_refcount) {
+    uint16_t *rc = (uint16_t *)p_to_v(pmm_page_refcount);
+    ref = rc[page_index];
+  }
+  spinlock_release_irqrestore(&pmm_lock, iflags);
+  return ref;
+}
+
 uint64_t pmm_get_total_memory(void) { return pmm_usable_pages * PAGE_SIZE; }
 
-uint64_t pmm_get_used_memory(void) { return pmm_allocated_pages * PAGE_SIZE; }
+uint64_t pmm_get_used_memory(void) {
+  uint64_t iflags = spinlock_acquire_irqsave(&pmm_lock);
+  uint64_t used = pmm_allocated_pages * PAGE_SIZE;
+  spinlock_release_irqrestore(&pmm_lock, iflags);
+  return used;
+}

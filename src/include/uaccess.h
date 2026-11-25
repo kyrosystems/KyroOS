@@ -6,6 +6,8 @@
 
 // Userspace memory access functions
 int validate_user_pointer(const void *ptr, size_t size);
+int validate_user_write(void *ptr, size_t size);
+int copy_user_string(char *dest, const char *src, size_t capacity);
 int copy_from_user(void *kernel_dst, const void *user_src, size_t size);
 int copy_to_user(void *user_dst, const void *kernel_src, size_t size);
 

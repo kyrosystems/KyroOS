@@ -48,9 +48,11 @@ typedef struct {
     uint32_t partition_size;
 } ide_ioctl_format_t;
 
+void ide_init(void);
 void ide_driver_init();
 uint32_t ide_read_sectors(uint8_t drive, uint32_t lba, uint8_t num_sectors, uint16_t* buffer);
 uint32_t ide_write_sectors(uint8_t drive, uint32_t lba, uint8_t num_sectors, const uint16_t* buffer);
 void ide_test_read();
+uint64_t ide_get_primary_capacity(void);
 
 #endif // IDE_H

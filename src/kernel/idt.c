@@ -34,15 +34,25 @@ static void idt_set_gate(uint8_t num, uint64_t base, uint16_t sel,
 
 static void pic_remap(void) {
   outb(PIC1_COMMAND, 0x11);
+  io_wait();
   outb(PIC2_COMMAND, 0x11);
-  outb(PIC1_DATA, 0x20);
-  outb(PIC2_DATA, 0x28);
+  io_wait();
+  outb(PIC1_DATA, 0x20); // Master PIC IRQ 0..7 -> Vectors 32..39
+  io_wait();
+  outb(PIC2_DATA, 0x28); // Slave PIC IRQ 8..15 -> Vectors 40..47
+  io_wait();
   outb(PIC1_DATA, 0x04);
+  io_wait();
   outb(PIC2_DATA, 0x02);
+  io_wait();
   outb(PIC1_DATA, 0x01);
+  io_wait();
   outb(PIC2_DATA, 0x01);
+  io_wait();
   outb(PIC1_DATA, 0x0);
+  io_wait();
   outb(PIC2_DATA, 0x0);
+  io_wait();
 }
 
 void idt_init() {
@@ -91,6 +101,9 @@ void idt_init() {
   idt_set_gate(30, (uint64_t)isr30, KERNEL_CS, KERNEL_GATE_FLAGS);
   idt_set_gate(31, (uint64_t)isr31, KERNEL_CS, KERNEL_GATE_FLAGS);
 
+  idt_entries[8].ist = 1; // Double fault: never reuse a damaged kernel stack
+  idt_entries[2].ist = 2; // NMI has a separate emergency stack
+
   pic_remap();
 
   idt_set_gate(32, (uint64_t)irq0, KERNEL_CS, KERNEL_GATE_FLAGS);
@@ -114,4 +127,8 @@ void idt_init() {
 
   __asm__ __volatile__("lidt %0" : : "m"(idt_ptr));
   klog(LOG_INFO, "IDT: Loaded successfully.");
+}
+
+void idt_load_ap(void) {
+  __asm__ __volatile__("lidt %0" : : "m"(idt_ptr));
 }

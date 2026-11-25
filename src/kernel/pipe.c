@@ -39,16 +39,35 @@ long pipe_read(pipe_t *pipe, void *buf, size_t count) {
   if (!pipe || !buf) {
     return -EINVAL;
   }
+  if (count == 0) {
+    return 0;
+  }
 
   spinlock_acquire(&pipe->lock);
 
   // Wait while pipe is empty and write end is still open
-  while (pipe->data_size == 0 && !pipe->write_closed) {
+  while (pipe->data_size == 0 && !pipe->write_closed && !pipe->read_closed) {
     thread_t *current = get_current_thread();
+    if (!current || current->state == THREAD_DEAD ||
+        (current->sig_pending & ~current->sig_mask)) {
+      spinlock_release(&pipe->lock);
+      return -EINTR;
+    }
     waitqueue_add(&pipe->read_queue, current);
     spinlock_release(&pipe->lock);
     schedule(); // Block until data available
     spinlock_acquire(&pipe->lock);
+    current = get_current_thread();
+    if (!current || current->state == THREAD_DEAD ||
+        (current->sig_pending & ~current->sig_mask)) {
+      spinlock_release(&pipe->lock);
+      return -EINTR;
+    }
+  }
+
+  if (pipe->read_closed) {
+    spinlock_release(&pipe->lock);
+    return -EBADF;
   }
 
   // Check if pipe is empty and write end closed (EOF)
@@ -92,16 +111,27 @@ long pipe_write(pipe_t *pipe, const void *buf, size_t count) {
 
   while (bytes_written < (long)count) {
     // Wait while pipe is full
-    while (pipe->data_size >= PIPE_BUF_SIZE && !pipe->read_closed) {
+    while (pipe->data_size >= PIPE_BUF_SIZE && !pipe->read_closed && !pipe->write_closed) {
       thread_t *current = get_current_thread();
+      if (!current || current->state == THREAD_DEAD ||
+          (current->sig_pending & ~current->sig_mask)) {
+        spinlock_release(&pipe->lock);
+        return bytes_written > 0 ? bytes_written : -EINTR;
+      }
       waitqueue_add(&pipe->write_queue, current);
       spinlock_release(&pipe->lock);
       schedule(); // Block until space available
       spinlock_acquire(&pipe->lock);
+      current = get_current_thread();
+      if (!current || current->state == THREAD_DEAD ||
+          (current->sig_pending & ~current->sig_mask)) {
+        spinlock_release(&pipe->lock);
+        return bytes_written > 0 ? bytes_written : -EINTR;
+      }
     }
 
-    // Check if read end closed
-    if (pipe->read_closed) {
+    // Check if read or write end closed
+    if (pipe->read_closed || pipe->write_closed) {
       spinlock_release(&pipe->lock);
       return bytes_written > 0 ? bytes_written : (long)-EPIPE;
     }
@@ -144,3 +174,32 @@ void pipe_close_write(pipe_t *pipe) {
 
   spinlock_release(&pipe->lock);
 }
+
+void pipe_close_end(pipe_t *pipe, int is_write) {
+  if (!pipe)
+    return;
+  int should_destroy = 0;
+  spinlock_acquire(&pipe->lock);
+  if (is_write) {
+    if (!pipe->write_closed) {
+      pipe->write_closed = 1;
+      waitqueue_wakeup_all(&pipe->read_queue);
+      if (pipe->read_closed) {
+        should_destroy = 1;
+      }
+    }
+  } else {
+    if (!pipe->read_closed) {
+      pipe->read_closed = 1;
+      waitqueue_wakeup_all(&pipe->write_queue);
+      if (pipe->write_closed) {
+        should_destroy = 1;
+      }
+    }
+  }
+  spinlock_release(&pipe->lock);
+  if (should_destroy) {
+    pipe_destroy(pipe);
+  }
+}
+

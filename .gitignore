@@ -6,7 +6,6 @@
 /.vscode/
 
 # Limine bootloader
-/limine/
 /limine.zip
 
 # Node.js
@@ -25,3 +24,13 @@ panic_reasons.txt.idea/
 *.o
 t.txt
 /.idea/
+panic_reasons.txt
+panic_quotes.txt
+/limine-latest/
+
+AGENTS.md
+IDENTITY.md
+SOUL.md
+USER.md
+/memory/
+.aider*

@@ -1,13 +1,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-size_t strlen(const char *s) {
-  size_t len = 0;
-  while (s[len])
-    len++;
-  return len;
-}
-
 int strcmp(const char *s1, const char *s2) {
   while (*s1 && (*s1 == *s2)) {
     s1++;
@@ -116,4 +109,15 @@ void *memset(void *s, int c, size_t n) {
   while (n--)
     *p++ = (uint8_t)c;
   return s;
+}
+
+void *memmove(void *dest, const void *source, size_t count) {
+    unsigned char *d = dest;
+    const unsigned char *s = source;
+    if ((uintptr_t)d < (uintptr_t)s) {
+        for (size_t i = 0; i < count; i++) d[i] = s[i];
+    } else if (d != s) {
+        while (count) { count--; d[count] = s[count]; }
+    }
+    return dest;
 }

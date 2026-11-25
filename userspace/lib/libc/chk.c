@@ -1,4 +1,4 @@
-#include <kyroolib.h> // for print, panic equivalent
+#include "kyroolib.h" // for print, panic equivalent
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
@@ -34,6 +34,13 @@ char *__strcat_chk(char *dest, const char *src, size_t dest_len) {
     __chk_fail();
   }
   return strcat(dest, src);
+}
+
+char *__strncpy_chk(char *dest, const char *src, size_t n, size_t dest_len) {
+  if (n > dest_len) {
+    __chk_fail();
+  }
+  return strncpy(dest, src, n);
 }
 
 // We might need others like __sprintf_chk, etc. eventually

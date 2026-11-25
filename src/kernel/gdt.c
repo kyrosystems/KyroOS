@@ -18,7 +18,7 @@ extern void gdt_flush(uint64_t gdt_ptr_addr);
 // Standard BSS definition (volatile to prevent optimization)
 // Align to 4096 to ensure it's on its own page and aligned
 static volatile uint64_t gdt[GDT_ENTRIES] __attribute__((aligned(4096)));
-static struct gdt_ptr_struct gdt_ptr;
+struct gdt_ptr_struct gdt_ptr;
 
 // Function to set a GDT entry
 static void gdt_set_entry(int index, uint32_t base, uint32_t limit,
@@ -33,7 +33,7 @@ static void gdt_set_entry(int index, uint32_t base, uint32_t limit,
 // Function to set the TSS entry in the GDT
 void gdt_set_tss(void *tss_base) {
   uint64_t base = (uint64_t)tss_base;
-  uint32_t limit = sizeof(struct tss_entry_struct);
+  uint32_t limit = sizeof(struct tss_entry_struct) - 1;
 
   // Let's use a proper system segment descriptor structure
   struct gdt_system_entry_bits *tss_desc =
@@ -78,4 +78,8 @@ void gdt_init() {
   klog(LOG_INFO, "GDT: Flushing...");
   gdt_flush((uint64_t)&gdt_ptr);
   klog(LOG_INFO, "GDT: Flushed successfully.");
+}
+
+void gdt_load_ap(void) {
+  gdt_flush((uint64_t)&gdt_ptr);
 }

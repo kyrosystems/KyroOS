@@ -2,25 +2,21 @@ ENTRY(_start)
 
 SECTIONS
 {
-    . = 0x0; /* Userspace programs typically loaded at a fixed low address */
+    . = 0x400000;  /* Moved away from NULL page. Rebuild all userspace apps after changing this. */
 
-    .text :
-    {
+    .text : {
         *(.text)
     }
 
-    .data :
-    {
+    .rodata : {
+        *(.rodata)
+    }
+
+    .data : {
         *(.data)
     }
 
-    .bss :
-    {
+    .bss : {
         *(.bss)
-    }
-
-    .rodata :
-    {
-        *(.rodata)
     }
 }

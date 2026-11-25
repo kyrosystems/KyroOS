@@ -1,5 +1,5 @@
 #include <errno.h>
-#include <kyroolib.h> // For print and ksprintf
+#include "kyroolib.h" // For print and ksprintf
 #include <string.h>
 
 int errno = 0; // Global errno variable

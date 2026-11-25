@@ -17,19 +17,25 @@ typedef struct {
     uint32_t version;
     uint32_t total_blocks;
     uint32_t free_blocks;
-    uint32_t next_free_block; // For simple allocation
+    uint32_t block_bitmap_start;
+    uint32_t block_bitmap_blocks;
     uint32_t file_table_start_block;
     uint32_t file_table_num_blocks;
-    uint8_t  padding[FS_BLOCK_SIZE - (7 * sizeof(uint32_t))]; // Fill to block size
+    uint32_t data_start_block;
+    uint8_t  padding[FS_BLOCK_SIZE - (9 * sizeof(uint32_t))]; // Fill to block size
 } __attribute__((packed)) fs_superblock_t;
 
-// File Entry structure (for the file table)
+#define FS_DIRECT_BLOCKS 64
+
+// File Entry structure (for the file table / inode)
 typedef struct {
     char     filename[FS_MAX_FILENAME_LEN];
-    uint32_t start_block;   // First data block
     uint32_t size_bytes;    // Size of the file in bytes
     uint32_t flags;         // E.g., is_directory, is_file
-    uint8_t  padding[FS_BLOCK_SIZE - (FS_MAX_FILENAME_LEN + 3 * sizeof(uint32_t))]; // Fill to block size
+    uint32_t block_count;   // Number of data blocks
+    uint32_t direct_blocks[FS_DIRECT_BLOCKS]; // Pointers to direct blocks
+    uint32_t indirect_block; // Pointer to single-indirect block
+    uint8_t  padding[FS_BLOCK_SIZE - (FS_MAX_FILENAME_LEN + (4 + FS_DIRECT_BLOCKS) * sizeof(uint32_t))]; // Fill to block size
 } __attribute__((packed)) fs_file_entry_t;
 
 // File Entry flags

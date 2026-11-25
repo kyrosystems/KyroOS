@@ -1,30 +1,33 @@
 #ifndef INSTALLER_H
 #define INSTALLER_H
 
-#include "ide.h" // For IDE IOCTL requests and structs
+#include "ide.h" 
 #include <stdint.h>
-#include <stddef.h> // For size_t
+#include <stddef.h> 
 
 // MBR Partition Entry Structure
 typedef struct {
-    uint8_t boot_flag;      // 0x80 for bootable, 0x00 otherwise
-    uint8_t starting_chs[3]; // Cylinder, Head, Sector (legacy)
-    uint8_t type_code;      // Partition type (e.g., 0x0C for FAT32 LBA)
-    uint8_t ending_chs[3];   // Cylinder, Head, Sector (legacy)
-    uint32_t starting_lba;   // Starting LBA address
-    uint32_t size_in_sectors; // Size of partition in sectors
+    uint8_t boot_flag;      
+    uint8_t starting_chs[3]; 
+    uint8_t type_code;      
+    uint8_t ending_chs[3];   
+    uint32_t starting_lba;   
+    uint32_t size_in_sectors; 
 } __attribute__((packed)) mbr_partition_entry_t;
 
 // Master Boot Record Structure
 typedef struct {
-    uint8_t boot_code[440]; // Bootstrap code area
-    uint32_t signature;     // Optional disk signature
-    uint16_t reserved;      // Reserved (usually 0x0000)
-    mbr_partition_entry_t partitions[4]; // Four primary partition entries
-    uint16_t boot_signature; // MBR signature (0xAA55)
+    uint8_t boot_code[440]; 
+    uint32_t signature;     
+    uint16_t reserved;      
+    mbr_partition_entry_t partitions[4]; 
+    uint16_t boot_signature; 
 } __attribute__((packed)) mbr_t;
 
-// Function declarations for the installer components
+// Kernel function
+void installer_start();
+
+// Userspace tool functions (for compatibility)
 void installer_disk_detection();
 void installer_partition_selection();
 void installer_filesystem_formatting();

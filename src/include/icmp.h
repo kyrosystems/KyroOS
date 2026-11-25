@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 #include "net.h" // For net_dev_t
 #include "ip.h"  // For ipv4_header_t
 
@@ -25,5 +26,6 @@ typedef struct icmp_header {
 void icmp_init();
 void icmp_handle_packet(net_dev_t* net_dev, const ipv4_header_t* ip_hdr, const uint8_t* payload, size_t payload_size);
 void icmp_send_echo_request(net_dev_t* net_dev, uint32_t dest_ip, uint16_t id, uint16_t sequence, const uint8_t* data, size_t data_size);
+bool icmp_ping(uint32_t dest_ip, uint32_t timeout_ms);
 
 #endif // ICMP_H

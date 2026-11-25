@@ -1,7 +1,10 @@
 #include "isr.h"
+#include "fb.h"
 #include "log.h"
 #include "port_io.h"
 #include "scheduler.h"
+#include "panic_screen.h"
+#include "kstring.h"
 
 extern void
 syscall_handler(struct registers *regs); // Declare syscall_handler here
@@ -44,10 +47,13 @@ static const char *exception_messages[] = {"Division By Zero",
                                            "Reserved"};
 
 static uint64_t ticks = 0;
+uint64_t g_cpu_idle_ticks = 0;
+uint64_t g_cpu_busy_ticks = 0;
 
 uint64_t timer_get_ticks() { return ticks; }
 
 void timer_init(uint32_t frequency) {
+  if (frequency == 0) frequency = 100;
   uint32_t divisor = 1193180 / frequency;
 
   // Send the command byte.
@@ -63,7 +69,53 @@ void timer_init(uint32_t frequency) {
 }
 
 void isr_handler(struct registers *regs) {
+  if (regs->int_no == 8) {
+    // Avoid heap, framebuffer and locks on the emergency fault path
+    serial_print("\nDOUBLE FAULT: RIP=");
+    serial_print_hex(regs->rip);
+    serial_print(" RSP=");
+    serial_print_hex(regs->rsp);
+    serial_print("\n");
+    for (;;) __asm__ volatile("cli; hlt");
+  }
+  if (regs->int_no == 14) {
+    uint64_t cr2;
+    __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
+    extern bool vmm_handle_page_fault(uint64_t fault_addr, uint64_t err_code);
+    if (vmm_handle_page_fault(cr2, regs->err_code)) {
+      return; // Handled Copy-on-Write #PF successfully!
+    }
+  }
+
   if (regs->int_no < 32) { // CPU Exceptions
+    // If the fault occurred in Ring 3 (userspace), terminate the faulted process
+    if ((regs->cs & 3) == 3) {
+      extern thread_t *current_thread;
+      extern thread_t *console_focus;
+      const char *exc_name = exception_messages[regs->int_no];
+      const char *pname = (current_thread && current_thread->name[0]) ? current_thread->name : "process";
+      uint32_t pid = current_thread ? current_thread->id : 0;
+
+      klog(LOG_WARN, "Userspace process '%s' [PID %u] terminated by exception: %s (#%d) at RIP %p, ERR: %lx",
+           pname, pid, exc_name, regs->int_no, (void *)regs->rip, regs->err_code);
+
+      serial_print("\n[Userspace crash] Process '");
+      serial_print(pname);
+      serial_print("' crashed: ");
+      serial_print(exc_name);
+      serial_print("\n");
+
+      char msg[128];
+      ksprintf(msg, "\n[%s: %s (core dumped)]\n", pname, exc_name);
+      klog_print_str(msg, false);
+
+      if (console_focus == current_thread) {
+        console_focus = NULL;
+      }
+      thread_exit();
+      return;
+    }
+
     klog(LOG_ERROR, "EXCEPTION: %s (#%d) at RIP: %p, Error Code: %lx",
          exception_messages[regs->int_no], regs->int_no, (void *)regs->rip,
          regs->err_code);
@@ -95,12 +147,32 @@ void isr_handler(struct registers *regs) {
     klog(LOG_ERROR,
          "Registers: RAX=%lx, RBX=%lx, RCX=%lx, RDX=%lx, RSP=%lx, RFLAGS=%lx",
          regs->rax, regs->rbx, regs->rcx, regs->rdx, regs->rsp, regs->rflags);
-    panic(exception_messages[regs->int_no], regs);
+    fb_set_graphics_owner(0);
+    panic_screen_show(exception_messages[regs->int_no], regs);
+    for (;;) __asm__ volatile("cli; hlt");
   } else if (regs->int_no >= 32 && regs->int_no <= 47) { // IRQs
     uint8_t irq_num = regs->int_no - 32;
 
     if (irq_num == 0) {
       ticks++;
+      extern uint64_t g_cpu_idle_ticks;
+      extern uint64_t g_cpu_busy_ticks;
+      extern thread_t *current_thread;
+      if (current_thread) {
+        current_thread->cpu_ticks++;
+        if ((regs->cs & 3) != 0) {
+          g_cpu_busy_ticks++;
+        } else if (current_thread->id == 0) {
+          g_cpu_idle_ticks++;
+        } else {
+          g_cpu_busy_ticks++;
+        }
+      } else {
+        g_cpu_idle_ticks++;
+      }
+
+      static uint32_t flush_phase = 0;
+      if (++flush_phase >= 2) { flush_phase = 0; fb_flush_dirty(); }
     }
 
     if (irq_handlers[irq_num] != 0) {

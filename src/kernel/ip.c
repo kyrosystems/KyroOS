@@ -1,166 +1,192 @@
 #include "ip.h"
 #include "arp.h"
 #include "heap.h"
-#include "icmp.h"    // Include ICMP header
-#include "kstring.h" // For memcpy, memset
+#include "icmp.h"
+#include "kstring.h"
 #include "log.h"
 #include "net.h"
-#include "socket.h" // For sock_handle_incoming_packet
-void sock_handle_incoming_packet(net_dev_t *net_dev, const ipv4_header_t *ip_hdr, const uint8_t *payload, size_t payload_size, uint8_t protocol); // Temporary explicit prototype
+#include "socket.h"
 
-// Our local IP address
-static uint32_t local_ip;
-static uint32_t subnet_mask;
-static uint32_t default_gateway;
+void sock_handle_incoming_packet(net_dev_t *net_dev, const ipv4_header_t *ip_hdr,
+                                 const uint8_t *payload, size_t payload_size,
+                                 uint8_t protocol);
 
-void ip_set_local_ip(uint32_t ip) {
-    local_ip = ip;
-}
+static uint32_t local_ip       = 0;
+static uint32_t subnet_mask    = 0;
+static uint32_t default_gateway = 0;
 
-void ip_set_subnet_mask(uint32_t mask) {
-    subnet_mask = mask;
-}
+void     ip_set_local_ip(uint32_t ip)          { local_ip        = ip; }
+void     ip_set_subnet_mask(uint32_t mask)      { subnet_mask     = mask; }
+void     ip_set_default_gateway(uint32_t gw)   { default_gateway = gw; }
+uint32_t ip_get_local_ip()                      { return local_ip; }
+uint32_t ip_get_subnet_mask()                   { return subnet_mask; }
+uint32_t ip_get_default_gateway()               { return default_gateway; }
 
-void ip_set_default_gateway(uint32_t gateway) {
-    default_gateway = gateway;
-}
-
-// Protocol handlers (indexed by IP protocol number)
 static ip_protocol_handler_t ip_protocol_handlers[256] = {0};
 
 void ip_init() {
-  memset(ip_protocol_handlers, 0, sizeof(ip_protocol_handlers));
-  // Only register ICMP here, UDP and TCP will be handled by the socket layer
-  ip_register_protocol_handler(IP_PROTOCOL_ICMP, icmp_handle_packet); 
-  klog(LOG_INFO, "IP layer initialized.");
+    memset(ip_protocol_handlers, 0, sizeof(ip_protocol_handlers));
+    ip_register_protocol_handler(IP_PROTOCOL_ICMP, icmp_handle_packet);
+    klog(LOG_INFO, "IP layer initialized.");
 }
 
-uint32_t ip_get_local_ip() { return local_ip; }
-
-void ip_register_protocol_handler(uint8_t protocol,
-                                  ip_protocol_handler_t handler) {
-  ip_protocol_handlers[protocol] = handler;
+void ip_register_protocol_handler(uint8_t protocol, ip_protocol_handler_t handler) {
+    ip_protocol_handlers[protocol] = handler;
 }
 
-// Simple IP checksum calculation (RFC 1071)
 static uint16_t ip_checksum(const void *data, size_t len) {
-  const uint16_t *u16_buf = (const uint16_t *)data;
-  uint32_t sum = 0;
-  while (len > 1) {
-    sum += *u16_buf++;
-    len -= 2;
-  }
-  if (len == 1) {
-    sum += *(const uint8_t *)u16_buf;
-  }
-  while (sum >> 16) {
-    sum = (sum & 0xFFFF) + (sum >> 16);
-  }
-  return (uint16_t)~sum;
+    const uint16_t *u16 = (const uint16_t *)data;
+    uint32_t sum = 0;
+    while (len > 1) { sum += *u16++; len -= 2; }
+    if (len == 1) sum += *(const uint8_t *)u16;
+    while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
+    return (uint16_t)~sum;
 }
 
 void ip_send_packet(net_dev_t *net_dev, uint32_t dest_ip, uint8_t protocol,
                     const uint8_t *payload, size_t payload_size) {
-  uint8_t *dest_mac;
-  uint8_t broadcast_mac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    if (payload_size > 65535 - sizeof(ipv4_header_t)) return;
+    if (!payload && payload_size > 0) return;
 
-  if (dest_ip == 0xFFFFFFFF) {
-    dest_mac = broadcast_mac;
-  } else {
-    dest_mac = arp_lookup_mac(dest_ip);
-    if (!dest_mac) {
-      klog(LOG_WARN, "IP: MAC address not found for destination IP, sending ARP request.");
-      arp_send_request(dest_ip);
-      return; // Cannot send packet without MAC
+    /* Loopback traffic (127.0.0.0/8): build a full Ethernet+IP frame and
+       hand it to the lo device, which loops it back into the RX path. */
+    if ((dest_ip & 0xFF000000) == 0x7F000000) {
+        extern net_dev_t *net_get_loopback(void);
+        net_dev_t *lo = net_get_loopback();
+        if (!lo) return;
+        size_t ip_size  = sizeof(ipv4_header_t) + payload_size;
+        size_t eth_size = sizeof(ethernet_header_t) + ip_size;
+        uint8_t *buf = (uint8_t *)kmalloc(eth_size);
+        if (!buf) return;
+        memset(buf, 0, eth_size);
+        ethernet_header_t *eth = (ethernet_header_t *)buf;
+        ipv4_header_t     *ip  = (ipv4_header_t *)(buf + sizeof(ethernet_header_t));
+        uint8_t           *pld = buf + sizeof(ethernet_header_t) + sizeof(ipv4_header_t);
+        memcpy(eth->src_mac, lo->mac_addr, 6);
+        memcpy(eth->dest_mac, lo->mac_addr, 6);
+        eth->ether_type = __builtin_bswap16(0x0800);
+        ip->version        = 4;
+        ip->ihl            = 5;
+        ip->total_length   = __builtin_bswap16(ip_size);
+        ip->time_to_live   = 64;
+        ip->protocol       = protocol;
+        ip->src_ip         = __builtin_bswap32(0x7F000001);
+        ip->dest_ip        = __builtin_bswap32(dest_ip);
+        ip->header_checksum = 0;
+        ip->header_checksum = ip_checksum(ip, sizeof(ipv4_header_t));
+        memcpy(pld, payload, payload_size);
+        lo->send_packet(lo, buf, eth_size);
+        kfree(buf);
+        return;
     }
-  }
+    if (!net_dev) net_dev = network_devices;
+    if (!net_dev) return;
 
-  size_t ip_packet_size = sizeof(ipv4_header_t) + payload_size;
-  size_t eth_packet_size = sizeof(ethernet_header_t) + ip_packet_size;
+    uint8_t *dest_mac;
+    uint8_t  broadcast_mac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
-  uint8_t *packet_buffer = (uint8_t *)kmalloc(eth_packet_size);
-  if (!packet_buffer) {
-    klog(LOG_ERROR, "IP: Failed to allocate packet buffer.");
-    return;
-  }
-  memset(packet_buffer, 0, eth_packet_size);
+    if (dest_ip == 0xFFFFFFFF) {
+        dest_mac = broadcast_mac;
+    } else {
+        /* Route through gateway if not on-link */
+        uint32_t next_hop = dest_ip;
+        if (subnet_mask && default_gateway &&
+            (dest_ip & subnet_mask) != (local_ip & subnet_mask)) {
+            next_hop = default_gateway;
+        }
+        dest_mac = arp_lookup_mac(next_hop);
+        if (!dest_mac) {
+            /* Build the full Ethernet+IP frame first, then queue it */
+            size_t  eth_size = sizeof(ethernet_header_t) + sizeof(ipv4_header_t) + payload_size;
+            uint8_t *buf     = (uint8_t *)kmalloc(eth_size);
+            if (!buf) return;
+            memset(buf, 0, eth_size);
 
-  ethernet_header_t *eth_hdr = (ethernet_header_t *)packet_buffer;
-  ipv4_header_t *ip_hdr =
-      (ipv4_header_t *)(packet_buffer + sizeof(ethernet_header_t));
-  uint8_t *ip_payload =
-      packet_buffer + sizeof(ethernet_header_t) + sizeof(ipv4_header_t);
+            ethernet_header_t *eth = (ethernet_header_t *)buf;
+            ipv4_header_t     *ip  = (ipv4_header_t *)(buf + sizeof(ethernet_header_t));
+            uint8_t           *pld = buf + sizeof(ethernet_header_t) + sizeof(ipv4_header_t);
 
-  // Ethernet Header
-  memcpy(eth_hdr->dest_mac, dest_mac, 6);
-  memcpy(eth_hdr->src_mac, net_dev->mac_addr, 6);
-  eth_hdr->ether_type = __builtin_bswap16(0x0800); // IPv4 EtherType
+            memcpy(eth->src_mac, net_dev->mac_addr, 6);
+            eth->ether_type = __builtin_bswap16(0x0800);
 
-  // IPv4 Header
-  ip_hdr->version = 4;
-  ip_hdr->ihl = sizeof(ipv4_header_t) / 4;
-  ip_hdr->dscp = 0;
-  ip_hdr->ecn = 0;
-  ip_hdr->total_length = __builtin_bswap16(ip_packet_size);
-  ip_hdr->identification = __builtin_bswap16(0x0001); // Simple ID
-  ip_hdr->flags = 0x0;
-  ip_hdr->fragment_offset = 0;
-  ip_hdr->time_to_live = 64;
-  ip_hdr->protocol = protocol;
-  ip_hdr->src_ip = __builtin_bswap32(local_ip);
-  ip_hdr->dest_ip = __builtin_bswap32(dest_ip);
-  ip_hdr->header_checksum = 0; // Calculate after filling everything
-  ip_hdr->header_checksum = ip_checksum(ip_hdr, sizeof(ipv4_header_t));
+            ip->version        = 4;
+            ip->ihl            = 5;
+            ip->total_length   = __builtin_bswap16(sizeof(ipv4_header_t) + payload_size);
+            ip->time_to_live   = 64;
+            ip->protocol       = protocol;
+            ip->src_ip         = __builtin_bswap32(local_ip);
+            ip->dest_ip        = __builtin_bswap32(dest_ip);
+            ip->header_checksum = 0;
+            ip->header_checksum = ip_checksum(ip, sizeof(ipv4_header_t));
+            memcpy(pld, payload, payload_size);
 
-  // Payload
-  memcpy(ip_payload, payload, payload_size);
+            /* Queue the raw frame; dest MAC will be patched when reply arrives */
+            arp_queue_packet(next_hop, buf, eth_size);
+            kfree(buf);
+            arp_send_request(next_hop);
+            return;
+        }
+    }
 
-  net_dev->send_packet(net_dev, packet_buffer, eth_packet_size);
-  // klog(LOG_INFO, "IP: Sent packet.");
-  kfree(packet_buffer);
+    size_t  ip_size  = sizeof(ipv4_header_t) + payload_size;
+    size_t  eth_size = sizeof(ethernet_header_t) + ip_size;
+    uint8_t *buf     = (uint8_t *)kmalloc(eth_size);
+    if (!buf) return;
+    memset(buf, 0, eth_size);
+
+    ethernet_header_t *eth = (ethernet_header_t *)buf;
+    ipv4_header_t     *ip  = (ipv4_header_t *)(buf + sizeof(ethernet_header_t));
+    uint8_t           *pld = buf + sizeof(ethernet_header_t) + sizeof(ipv4_header_t);
+
+    memcpy(eth->dest_mac, dest_mac, 6);
+    memcpy(eth->src_mac,  net_dev->mac_addr, 6);
+    eth->ether_type = __builtin_bswap16(0x0800);
+
+    ip->version        = 4;
+    ip->ihl            = 5;
+    ip->total_length   = __builtin_bswap16(ip_size);
+    ip->time_to_live   = 64;
+    ip->protocol       = protocol;
+    ip->src_ip         = __builtin_bswap32(local_ip);
+    ip->dest_ip        = __builtin_bswap32(dest_ip);
+    ip->header_checksum = 0;
+    ip->header_checksum = ip_checksum(ip, sizeof(ipv4_header_t));
+    memcpy(pld, payload, payload_size);
+
+    net_dev->send_packet(net_dev, buf, eth_size);
+    kfree(buf);
 }
 
 void ip_handle_packet(net_dev_t *net_dev, const uint8_t *packet, size_t size) {
-  if (size < sizeof(ipv4_header_t)) {
-    klog(LOG_WARN, "IP: Packet too small.");
-    return;
-  }
+    if (!packet || size < sizeof(ipv4_header_t)) return;
+    const ipv4_header_t *ip = (const ipv4_header_t *)packet;
+    if (ip->version != 4) return;
 
-  const ipv4_header_t *ip_hdr = (const ipv4_header_t *)packet;
-  size_t ip_hdr_len = ip_hdr->ihl * 4; // Declare once at the beginning
+    size_t   hlen    = (size_t)ip->ihl * 4;
+    if (hlen < sizeof(ipv4_header_t) || hlen > size) return;
+    uint16_t tot_len = __builtin_bswap16(ip->total_length);
+    if (tot_len < hlen || tot_len > size) return;
+    const uint8_t *payload = packet + hlen;
+    size_t         psize   = (size_t)tot_len - hlen;
 
-  // Check IP version and IHL
-  if (ip_hdr->version != 4) {
-    klog(LOG_WARN, "IP: Not IPv4 packet.");
-    return;
-  }
-  if (ip_hdr->ihl < 5) { // Minimum header length is 5 DWORDS = 20 bytes
-    klog(LOG_WARN, "IP: IP header too short.");
-    return;
-  }
+    // DHCP packets (ports 67/68) must always be delivered regardless of local IP configuration
+    if (ip->protocol == IP_PROTOCOL_UDP && psize >= sizeof(udp_header_t)) {
+        const udp_header_t *udp = (const udp_header_t *)payload;
+        uint16_t dport = __builtin_bswap16(udp->dest_port);
+        if (dport == 67 || dport == 68) {
+            sock_handle_incoming_packet(net_dev, ip, payload, psize, ip->protocol);
+            return;
+        }
+    }
 
-  // Check checksum
-  if (ip_checksum(ip_hdr, ip_hdr_len) != 0) {
-    klog(LOG_WARN, "IP: Invalid header checksum.");
-    return;
-  }
+    uint32_t dip = __builtin_bswap32(ip->dest_ip);
+    if (dip != 0x7F000001 &&
+        local_ip != 0 && dip != local_ip && dip != 0xFFFFFFFF) return;
 
-  uint32_t dest_ip = __builtin_bswap32(ip_hdr->dest_ip);
-  if (dest_ip != local_ip &&
-      dest_ip != 0xFFFFFFFF) { // Not for us and not broadcast
-    return;                    // Silently drop packets not for us
-  }
-
-  uint8_t protocol = ip_hdr->protocol;
-  const uint8_t *payload = packet + ip_hdr_len;
-  size_t payload_size = __builtin_bswap16(ip_hdr->total_length) - ip_hdr_len;
-
-  // Forward to socket layer for processing (UDP/TCP) or specialized handler (ICMP)
-  if (protocol == IP_PROTOCOL_ICMP) {
-      ip_protocol_handlers[protocol](net_dev, ip_hdr, payload, payload_size);
-  } else if (protocol == IPPROTO_UDP || protocol == IPPROTO_TCP) {
-      sock_handle_incoming_packet(net_dev, ip_hdr, payload, payload_size, protocol);
-  } else {
-      klog(LOG_WARN, "IP: No handler for protocol %d.", protocol);
-  }
+    if (ip->protocol == IP_PROTOCOL_ICMP) {
+        if (ip_protocol_handlers[ip->protocol])
+            ip_protocol_handlers[ip->protocol](net_dev, ip, payload, psize);
+    } else if (ip->protocol == IP_PROTOCOL_UDP || ip->protocol == IP_PROTOCOL_TCP) {
+        sock_handle_incoming_packet(net_dev, ip, payload, psize, ip->protocol);
+    }
 }

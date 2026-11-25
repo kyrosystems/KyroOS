@@ -75,5 +75,5 @@ clean:
 
 To run your application on KyroOS, you will typically place the compiled executable into the `userspace/` directory within the KyroOS source tree. The KyroOS build process will then include it in the final ISO.
 
-For more advanced examples and to understand how system utilities are built, explore the existing applications in the [KyroOS repository's `userspace/` directory](https://github.com/pon4ikisdonut/KyroOS/tree/main/userspace). 
+For more advanced examples and to understand how system utilities are built, explore the existing applications in the [KyroOS repository's `userspace/` directory](https://github.com/kyrosystems/KyroOS/tree/main/userspace). 
 The core system components like `init` and `shell` are excellent resources for learning how to interact with the KyroOS kernel and its libraries.

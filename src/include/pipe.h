@@ -27,5 +27,6 @@ long pipe_read(pipe_t *pipe, void *buf, size_t count);
 long pipe_write(pipe_t *pipe, const void *buf, size_t count);
 void pipe_close_read(pipe_t *pipe);
 void pipe_close_write(pipe_t *pipe);
+void pipe_close_end(pipe_t *pipe, int is_write);
 
 #endif // PIPE_H

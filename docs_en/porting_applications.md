@@ -35,4 +35,4 @@ KyroOS aims for simplicity and efficiency. Key aspects to consider:
 
 ## Example
 
-For examples of userspace applications, examine the `userspace/` directory in the [KyroOS repository](https://github.com/pon4ikisdonut/KyroOS). Applications like `init` and `shell` provide good starting points for understanding the build process and interaction with the kernel.
+For examples of userspace applications, examine the `userspace/` directory in the [KyroOS repository](https://github.com/kyrosystems/KyroOS). Applications like `init` and `shell` provide good starting points for understanding the build process and interaction with the kernel.

@@ -1,0 +1,102 @@
+# KyroOS System Call ABI Registry
+#
+# This file is the SINGLE SOURCE OF TRUTH for the KyroOS syscall ABI
+# (mechanism: int 0x80, number in RAX, args in RDI,RSI,RDX,R10,R8,R9,
+#  result in RAX).
+#
+# Error contract: kernel returns (uint64_t)-errno on failure (RAX < 0
+# interpreted as signed), or a non-negative value on success. The libc
+# wrapper normalizes: sets errno and returns -1 to the caller.
+#
+# Fields (pipe-separated):
+#   num  : ABI syscall number. 0-31 are FROZEN (compatibility with
+#          existing userspace). Never reuse or renumber.
+#   name : ABI name (snake_case).
+#   ret  : return type in RAX.
+#   args : C-like argument list, in ABI register order
+#          (arg1=RDI arg2=RSI arg3=RDX arg4=R10 arg5=R8 arg6=R9).
+#   caps : capability/permission requirements. "-" = none, "root" = euid 0.
+#   impl : yes | partial | no  (implementation status; "no" numbers are
+#          RESERVED for planned work and must never be reallocated).
+#   desc : human-readable description.
+#
+# POSIX does NOT assign syscall numbers; this registry defines the
+# KyroOS ABI. POSIX API -> syscall/libc mapping lives in abi/posix_matrix.md.
+
+0|exit|void|int status|-|yes|Terminate calling thread/process
+1|write|ssize_t|int fd, const void* buf, size_t count|-|partial|Write to file or socket fd; fd 1/2 = console
+2|open|int|const char* path, int flags|-|yes|Open file, O_CREAT|O_APPEND etc
+3|close|int|int fd|-|yes|Close fd
+4|read|ssize_t|int fd, void* buf, size_t count|-|yes|Read from file or socket fd
+5|stat|int|const char* path, struct stat* st|-|yes|File status (st_size, st_mode, st_ino, st_uid, st_gid)
+6|mkdir|int|const char* path|-|yes|Create directory
+7|readdir|int|int fd, uint32_t index, struct dirent* out|-|yes|Read directory entry by index (1=ok, 0=end)
+8|unlink|int|const char* path|-|yes|Remove file
+9|rmdir|int|const char* path|-|yes|Remove empty directory
+10|socket|int|int domain, int type, int protocol|-|yes|AF_INET, SOCK_STREAM/SOCK_DGRAM/SOCK_RAW
+11|connect|int|int fd, const struct sockaddr_in* addr, socklen_t addrlen|-|yes|Connect socket
+12|send|ssize_t|int fd, const void* buf, size_t len, int flags|-|yes|Send on socket (aliases sys_write path)
+13|recv|ssize_t|int fd, void* buf, size_t len, int flags|-|yes|Receive on socket
+14|bind|int|int fd, const struct sockaddr_in* addr, socklen_t addrlen|-|yes|Bind socket
+15|listen|int|int fd, int backlog|-|yes|Listen on socket
+16|accept|int|int fd, struct sockaddr_in* addr, socklen_t* addrlen|-|yes|Accept connection
+17|get_ticks|uint64_t|void|-|yes|Timer ticks (100 Hz); libc converts to ms
+18|sha256|int|const void* data, size_t len, void* hash_out|-|yes|SHA-256 digest (used by password store)
+19|malloc|void*|size_t size|-|yes|Kernel-heap allocation for userspace
+20|free|int|void* ptr|-|yes|Free kernel-heap allocation
+21|ioctl|int|int fd, int request, void* argp|-|yes|Device control
+22|mount|int|const char* mntpnt, const char* devnode, const char* fstype|root|yes|Mount filesystem
+23|unmount|int|const char* mntpnt|root|yes|Unmount filesystem
+24|exec|int|const char* path, char** argv, int argc|-|partial|Replace process image (argv pass-through partial)
+25|gfx_get_fb_info|int|struct user_fb_info* out|-|yes|Map framebuffer into address space
+26|input_poll_event|int|struct event* out|-|yes|Poll input event queue
+27|sbrk|void*|intptr_t increment|-|yes|Program break control
+28|sendto|ssize_t|int fd, const void* buf, size_t len, int flags, const struct sockaddr_in* dest, socklen_t addrlen|-|yes|Send datagram / raw ICMP echo
+29|recvfrom|ssize_t|int fd, void* buf, size_t len, int flags, struct sockaddr_in* src, socklen_t* addrlen|-|yes|Receive datagram with source address
+30|setsockopt|int|int fd, int level, int optname, const void* optval, socklen_t optlen|-|partial|SO_RCVTIMEO/SO_SNDTIMEO implemented, others EINVAL
+31|dns_resolve|uint32_t|const char* hostname|-|yes|Resolve hostname to IPv4 (0 = failure)
+32|debugmode_get|int|void|-|yes|Read global debug flag (epstein)
+33|debugmode_set|int|int mode|root|yes|Atomically set global debug flag; EPERM if euid != 0
+34|getuid|uint32_t|void|-|yes|Real UID
+35|geteuid|uint32_t|void|-|yes|Effective UID
+36|getgid|uint32_t|void|-|yes|Real GID
+37|getegid|uint32_t|void|-|yes|Effective GID
+38|umask|uint32_t|uint32_t new_mask|-|yes|Set/query file creation mask
+39|chmod|int|const char* path, uint32_t mode|owner|yes|Change file mode bits
+40|fchmod|int|int fd, uint32_t mode|owner|yes|Change mode of open fd
+41|chown|int|const char* path, uint32_t uid, uint32_t gid|root|yes|Change file ownership (root only; no setuid binaries yet)
+42|fchown|int|int fd, uint32_t uid, uint32_t gid|root|yes|Change ownership of open fd
+43|setuid|int|uint32_t uid|root|yes|Set real+effective UID (full setreuid model pending)
+44|setgid|int|uint32_t gid|root|yes|Set real+effective GID
+45|seteuid|int|uint32_t euid|-|yes|Set effective UID (drop to euid, restore requires saved-uid; simplified)
+46|setegid|int|uint32_t egid|-|yes|Set effective GID (simplified)
+47|getcwd|int|char* buf, size_t size|-|yes|Get current working directory
+48|chdir|int|const char* path|-|yes|Change current working directory
+49|getpid|uint32_t|void|-|yes|Current thread/process id
+50|kill|int|uint32_t pid, int sig|owner|partial|Terminate another thread; no POSIX signal handlers or process-group semantics
+51|dup|int|int fd|-|yes|Duplicate fd to lowest free slot
+52|dup2|int|int fd, int fd2|-|yes|Duplicate fd onto fd2
+53|lseek|int64_t|int fd, int64_t offset, int whence|-|yes|Reposition file offset
+54|fstat|int|int fd, struct stat* st|-|yes|Status of open fd
+55|proc_list|int|struct procinfo* buf, size_t max_entries|-|yes|Enumerate processes (KyroOS-specific, used by sysmon/ps)
+56|sysinfo|int|struct sysinfo_k* out|-|yes|Memory/uptime/net stats (KyroOS-specific, used by sysmon/free)
+57|net_ifconf|int|struct ifinfo* buf, size_t max_entries|-|yes|Per-interface info + counters (KyroOS-specific, used by ifconfig/sysmon)
+58|sock_shutdown|int|int fd, int how|-|yes|Shut down socket send/receive
+59|getsockname|int|int fd, struct sockaddr_in* addr, socklen_t* addrlen|-|yes|Local socket address
+# ---- RESERVED / PLANNED (impl=no; numbers reserved, DO NOT REALLOCATE) ----
+60|fork|uint32_t|void|-|no|Address-space+fd-table copy (needs COW or eager copy)
+61|waitpid|int32_t|int32_t pid, int* status, int options|-|partial|Parent-only child wait; pid -1/0/positive, WNOHANG, encoded normal exit status; no process groups
+62|execve|int|const char* path, char** argv, char** envp|-|partial|Spawn new process with inherited descriptors; NOT POSIX image replacement; envp unsupported
+63|pipe|int|int fds[2]|-|yes|Create unidirectional data channel (pipe pair)
+64|mmap|void*|void* addr, size_t len, int prot, int flags, int fd, int64_t off|-|partial|Private anonymous mappings; file-backed/shared unsupported
+65|munmap|int|void* addr, size_t len|-|partial|Unmap private anonymous mmap arena; cannot unmap kernel, ELF, heap or framebuffer
+66|mprotect|int|void* addr, size_t len, int prot|-|partial|Page protection for anonymous mmap arena; x86 write implies read
+67|gethostname|int|char* name, size_t len|-|yes|Query system hostname
+68|sethostname|int|const char* name, size_t len|root|yes|Set system hostname
+69|sigaction|int|int sig, const struct sigaction* act, struct sigaction* old|-|no|Full signal model (currently only terminate-on-kill)
+70|sigprocmask|int|int how, const sigset_t* set, sigset_t* old|-|no|Signal mask
+71|get_gpu_info|int|struct gpu_info* out|-|yes|Query GPU hardware model and VRAM aperture
+72|display_ctl|int|uint64_t op, void* data, uint64_t arg|-|partial|Software window surfaces and compositor-routed input; same-user session only
+73|sleep|int|uint32_t ms|-|yes|Sleep current thread for milliseconds
+74|pci_list|int|struct pci_dev_info* buf, size_t max_entries|-|yes|Enumerate PCI devices
+

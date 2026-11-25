@@ -2,11 +2,10 @@
 #define ELF_H
 
 #include <stdint.h>
-#include "vmm.h" // For pml4_t
+#include "vmm.h"
 
 #define EI_NIDENT 16
 
-// ELF Header
 typedef struct {
     unsigned char e_ident[EI_NIDENT];
     uint16_t      e_type;
@@ -24,7 +23,6 @@ typedef struct {
     uint16_t      e_shstrndx;
 } Elf64_Ehdr;
 
-// Program Header
 typedef struct {
     uint32_t p_type;
     uint32_t p_flags;
@@ -36,40 +34,107 @@ typedef struct {
     uint64_t p_align;
 } Elf64_Phdr;
 
-// e_ident[] indexes
-#define EI_MAG0       0
-#define EI_MAG1       1
-#define EI_MAG2       2
-#define EI_MAG3       3
-#define EI_CLASS      4
-#define EI_DATA       5
-#define EI_VERSION    6
+#define EI_MAG0        0
+#define EI_MAG1        1
+#define EI_MAG2        2
+#define EI_MAG3        3
+#define EI_CLASS       4
+#define EI_DATA        5
+#define EI_VERSION     6
 
-// e_ident[] values
-#define ELFMAG0       0x7f
-#define ELFMAG1       'E'
-#define ELFMAG2       'L'
-#define ELFMAG3       'F'
-#define ELFCLASS64    2
+#define ELFMAG0        0x7f
+#define ELFMAG1        'E'
+#define ELFMAG2        'L'
+#define ELFMAG3        'F'
+#define ELFCLASS64     2
 
-// e_type values
-#define ET_EXEC       2
-#define ET_REL        1
+#define ET_EXEC        2
+#define ET_REL         1
 
-// p_type values
-#define PT_LOAD       1
+#define PT_LOAD        1
 
-// p_flags values
-#define PF_X          1 // Execute
-#define PF_W          2 // Write
-#define PF_R          4 // Read
+#define PF_X           1
+#define PF_W           2
+#define PF_R           4
+
+#define SHT_NULL       0
+#define SHT_PROGBITS   1
+#define SHT_SYMTAB     2
+#define SHT_STRTAB     3
+#define SHT_RELA       4
+#define SHT_HASH       5
+#define SHT_DYNAMIC    6
+#define SHT_NOTE       7
+#define SHT_NOBITS     8
+#define SHT_REL        9
+#define SHT_SHLIB      10
+#define SHT_DYNSYM     11
+
+#define SHF_WRITE      (1 << 0)
+#define SHF_ALLOC      (1 << 1)
+#define SHF_EXECINSTR  (1 << 2)
+
+#define R_X86_64_NONE      0
+#define R_X86_64_64        1
+#define R_X86_64_PC32      2
+#define R_X86_64_GOT32     3
+#define R_X86_64_PLT32     4
+#define R_X86_64_COPY      5
+#define R_X86_64_GLOB_DAT  6
+#define R_X86_64_JUMP_SLOT 7
+#define R_X86_64_RELATIVE  8
+#define R_X86_64_GOTPCREL  9
+#define R_X86_64_32        10
+#define R_X86_64_32S       11
+#define R_X86_64_16        12
+#define R_X86_64_PC16      13
+#define R_X86_64_8         14
+#define R_X86_64_PC8       15
+
+typedef struct {
+    uint32_t sh_name;
+    uint32_t sh_type;
+    uint64_t sh_flags;
+    uint64_t sh_addr;
+    uint64_t sh_offset;
+    uint64_t sh_size;
+    uint32_t sh_link;
+    uint32_t sh_info;
+    uint64_t sh_addralign;
+    uint64_t sh_entsize;
+} Elf64_Shdr;
+
+typedef struct {
+    uint32_t st_name;
+    uint8_t  st_info;
+    uint8_t  st_other;
+    uint16_t st_shndx;
+    uint64_t st_value;
+    uint64_t st_size;
+} Elf64_Sym;
+
+typedef struct {
+    uint64_t r_offset;
+    uint64_t r_info;
+    int64_t  r_addend;
+} Elf64_Rela;
+
+#define ELF64_R_SYM(info)  ((info) >> 32)
+#define ELF64_R_TYPE(info) ((info) & 0xFFFFFFFF)
+
+#define R_X86_64_64        1
+#define R_X86_64_PC32      2
+#define R_X86_64_32        10
+#define R_X86_64_32S       11
 
 typedef struct {
     uint64_t entry_point;
     uint64_t program_break;
+    int      success;
 } elf_load_result_t;
 
 elf_load_result_t elf_load(pml4_t* pml4, const uint8_t* elf_data);
 int elf_exec_as_thread(const char* path, int argc, char* argv[]);
+struct thread *elf_exec_as_thread_handle(const char* path, int argc, char* argv[]);
 
-#endif // ELF_H
+#endif

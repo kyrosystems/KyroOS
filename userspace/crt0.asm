@@ -1,19 +1,24 @@
-; Userspace Entry Point Stub
 bits 64
 extern main
+extern print_flush
 global _start
 
 section .text
 _start:
-    ; The stack expects argc and argv to be passed in registers RDI and RSI
-    ; which are preserved/set by the kernel's iretq frame or trampoline.
-    
+    ; thread.c stores argc at [rsp] and argv pointer at [rsp+16].
+    mov rdi, [rsp]
+    mov rsi, [rsp+16]
+    and rsp, -16
     call main
-    
-    ; Exit syscall (0 for KyroOS)
+
+    push rax
+    call print_flush
+    pop rdi
     mov rax, 0
-    mov rdi, 0
     int 0x80
-    
-    ; Should not reach here
+
+.hang:
     hlt
+    jmp .hang
+
+section .note.GNU-stack noalloc noexec nowrite progbits

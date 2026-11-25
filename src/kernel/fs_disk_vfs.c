@@ -13,29 +13,41 @@ static int fs_disk_vfs_stat(vfs_node_t *node, struct stat *stat_buf); // Forward
 static int fs_disk_vfs_readdir(vfs_node_t *node, uint32_t index, struct dirent *dir_entry); // Forward declaration
 
 static uint32_t fs_disk_vfs_read(vfs_node_t *node, uint64_t offset, uint32_t size, uint8_t *buffer) {
-    if (node->flags & VFS_DIRECTORY) {
-        return (uint32_t)-1; // Cannot read a directory as a file
-    }
-    // For simple flat FS_DISK, path is actually node->name
-
-    if (offset != 0) {
-        klog(LOG_WARN, "FS_DISK_VFS: Offset not supported for read yet.");
-        return (uint32_t)-1;
-    }
-    return fs_read_file(node->name, buffer, size);
+    if (!node || (node->flags & VFS_DIRECTORY)) return (uint32_t)-1;
+    fs_file_entry_t info;
+    if (fs_get_file_info(node->name, &info) != 0) return (uint32_t)-1;
+    if (offset >= info.size_bytes) return 0;
+    size_t avail = info.size_bytes - offset;
+    size_t to_read = (size < avail) ? size : avail;
+    uint8_t *temp = (uint8_t *)kmalloc(info.size_bytes);
+    if (!temp) return (uint32_t)-1;
+    int r = fs_read_file(node->name, temp, info.size_bytes);
+    if (r < 0) { kfree(temp); return (uint32_t)-1; }
+    memcpy(buffer, temp + offset, to_read);
+    kfree(temp);
+    return (uint32_t)to_read;
 }
 
 static uint32_t fs_disk_vfs_write(vfs_node_t *node, uint64_t offset, uint32_t size, uint8_t *buffer) {
-    if (node->flags & VFS_DIRECTORY) {
-        return (uint32_t)-1; // Cannot write a directory as a file
+    if (!node || (node->flags & VFS_DIRECTORY)) return (uint32_t)-1;
+    fs_file_entry_t info;
+    size_t old_size = 0;
+    if (fs_get_file_info(node->name, &info) == 0) {
+        old_size = info.size_bytes;
     }
-    // For simple flat FS_DISK, path is actually node->name
-
-    if (offset != 0) {
-        klog(LOG_WARN, "FS_DISK_VFS: Offset not supported for write yet.");
-        return (uint32_t)-1;
+    size_t new_size = (offset + size > old_size) ? (offset + size) : old_size;
+    uint8_t *temp = (uint8_t *)kmalloc(new_size);
+    if (!temp) return (uint32_t)-1;
+    memset(temp, 0, new_size);
+    if (old_size > 0) {
+        fs_read_file(node->name, temp, old_size);
     }
-    return fs_write_file(node->name, buffer, size);
+    memcpy(temp + offset, buffer, size);
+    int w = fs_write_file(node->name, temp, new_size);
+    kfree(temp);
+    if (w < 0) return (uint32_t)-1;
+    node->length = new_size;
+    return size;
 }
 
 static void fs_disk_vfs_open(vfs_node_t *node, int flags) {

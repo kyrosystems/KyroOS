@@ -15,8 +15,9 @@ struct dirent {
 struct stat {
     uint32_t st_size; // size of file in bytes
     uint32_t st_mode; // protection (file type and permission)
-    uint32_t st_ino;  // inode number - FIXED TYPO uint33_t to uint32_t
-    // More fields could be added as needed (e.g., st_atime, st_mtime, st_ctime)
+    uint32_t st_ino;  // inode number
+    uint32_t st_uid;  // owner user id
+    uint32_t st_gid;  // owner group id
 };
 
 struct vfs_node; // Forward declaration
@@ -53,6 +54,11 @@ typedef struct vfs_node {
   uint32_t inode;
   void *ptr; // Used by mounted filesystems
 
+  // Ownership + mode bits (POSIX-style). Defaults: root:root 0755.
+  uint32_t uid;
+  uint32_t gid;
+  uint16_t mode; // low 12 bits: type-independent rwxrwxrwx (+ sticky reserved)
+
   // Function pointers for file operations
   read_vfs_t read;
   write_vfs_t write;
@@ -76,11 +82,37 @@ typedef struct vfs_node {
 #define S_ISDIR(m)  (((m) & S_IFMT) == S_IFDIR)  // test for directory
 #define S_ISREG(m)  (((m) & S_IFMT) == S_IFREG)  // test for regular file
 
+// Permission bits (mode field of vfs_node_t, POSIX-style)
+#define S_IRUSR 0400
+#define S_IWUSR 0200
+#define S_IXUSR 0100
+#define S_IRGRP 0040
+#define S_IWGRP 0020
+#define S_IXGRP 0010
+#define S_IROTH 0004
+#define S_IWOTH 0002
+#define S_IXOTH 0001
+#define S_IRWXU (S_IRUSR|S_IWUSR|S_IXUSR)
+#define S_IRWXG (S_IRGRP|S_IWGRP|S_IXGRP)
+#define S_IRWXO (S_IROTH|S_IWOTH|S_IXOTH)
+#define DEFAULT_DIR_MODE  0755
+#define DEFAULT_FILE_MODE 0644
+
+// VFS access checks (implemented in vfs.c; use effective credentials of
+// the current thread). Return 0 on allow, -errno on deny.
+int vfs_check_access(vfs_node_t *node, int amode); // amode: bitmask of 4=R,2=W,1=X
+int vfs_check_parent_write(vfs_node_t *dir);       // may create/remove entries?
+int vfs_check_exec(vfs_node_t *node);              // execute permission
+void vfs_node_set_owner(vfs_node_t *node, uint32_t uid, uint32_t gid, uint16_t mode);
+struct thread;
+uint32_t vfs_default_mode_for(uint32_t flags, struct thread *t); // umask applied
+
 // Flags for VFS nodes
 #define VFS_FILE 0x01
 #define VFS_DIRECTORY 0x02
 #define VFS_MOUNTPOINT 0x04
 #define VFS_CHARDEVICE 0x08
+#define VFS_BLOCKDEVICE 0x10
 
 // Standard open flags (simplified from POSIX)
 #define O_RDONLY    0x0001 // Open for reading only
@@ -105,6 +137,7 @@ int vfs_mkdir(vfs_node_t *root, const char *path, uint16_t mode);
 int vfs_create(vfs_node_t *root, const char *path, uint16_t mode);
 int vfs_remove(vfs_node_t *root, const char *path);
 vfs_node_t *vfs_resolve_path(vfs_node_t *root, const char *path);
+uint32_t vfs_get_next_inode();
 int vfs_rmdir(vfs_node_t *root, const char *path, uint16_t mode); // New: for removing directories
 int vfs_stat(vfs_node_t *root, const char *path, struct stat *stat_buf); // New: for getting file/dir info
 int vfs_ioctl(vfs_node_t *node, int request, void* argp); // New: for device-specific control
@@ -113,5 +146,6 @@ int vfs_unmount(vfs_node_t *mount_point); // New: for unmounting filesystems
 void register_filesystem(struct filesystem_type *fs); // New: to register filesystem drivers
 
 int kernel_ioctl(int fd, int request, void* argp); // New: kernel-internal ioctl
+uint32_t vfs_get_next_inode(); // New: Function to get a unique inode number
 
 #endif // VFS_H

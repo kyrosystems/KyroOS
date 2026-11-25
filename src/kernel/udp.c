@@ -38,7 +38,7 @@ void udp_handle_packet(net_dev_t *net_dev, const ipv4_header_t *ip_hdr,
   uint16_t dest_port = __builtin_bswap16(udp_hdr->dest_port);
   uint16_t length = __builtin_bswap16(udp_hdr->length);
 
-  if (length > size) {
+  if (length < sizeof(udp_header_t) || length > size) {
     klog(LOG_WARN, "UDP: Invalid length field.");
     return;
   }

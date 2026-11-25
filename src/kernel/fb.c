@@ -1,158 +1,167 @@
 #include "fb.h"
-#include "font.h"
 #include "heap.h"
 #include "kstring.h"
-#include "limine.h"
-#include "log.h"
-#include "vmm.h"
-#include <stdbool.h>
 
-extern uint64_t kernel_hhdm_offset;
-extern pml4_t* kernel_pml4;
+static fb_info_t current_fb;
+static uint64_t mode_capacity;
+uint64_t fb_mode_capacity(void) { return mode_capacity; }
+static uint64_t graphics_owner = 0;
 
-static struct limine_framebuffer *fb_tag_global_ptr = NULL;
-static uint32_t *backbuffer = NULL;
-static size_t backbuffer_size = 0;
+void fb_set_graphics_owner(uint64_t pid) { graphics_owner = pid; }
+void fb_release_graphics_owner(uint64_t pid) {
+  if (graphics_owner == pid) {
+    graphics_owner = 0;
+    fb_flush();
+  }
+}
+static uint32_t *back_buffer = NULL;
+static bool back_buffer_ready = false;
 
-void fb_init(struct limine_framebuffer *fb_tag) {
-    fb_tag_global_ptr = fb_tag;
+static uint32_t dirty_top = 0, dirty_bottom = 0; 
+static bool     dirty_valid = false;
 
-    if (fb_tag_global_ptr) {
-        if (fb_tag_global_ptr->bpp < 24) {
-            klog(LOG_ERROR, "Framebuffer: BPP is less than 24. Skipping initialization.");
-            return;
-        }
-        klog(LOG_INFO, "Framebuffer: Original address: %p", fb_tag_global_ptr->address);
-        klog(LOG_INFO, "Framebuffer: HHDM offset: %p", (void*)kernel_hhdm_offset);
-        // The framebuffer's address provided by Limine is already a virtual address,
-        // so no need to add hhdm_offset.
-        // fb_tag_global_ptr->address = (void*)((uint64_t)fb_tag_global_ptr->address + hhdm_offset);
-        klog(LOG_INFO, "Framebuffer: Mapped address: %p", fb_tag_global_ptr->address);
-
-        // No VMM mapping for now, just to get a clean compile and test file writes.
-        // We will add this back once we confirm basic functionality.
-
-    } else {
-        klog(LOG_ERROR, "Framebuffer: fb_tag is NULL.");
-        return;
-    }
+static inline void fb_mark_dirty(uint32_t y0, uint32_t y1) {
+  if (!back_buffer_ready) return;
+  if (y0 > y1) { uint32_t t = y0; y0 = y1; y1 = t; }
+  if (y0 >= current_fb.height) return;
+  if (y1 > current_fb.height) y1 = current_fb.height;
+  if (!dirty_valid) {
+    dirty_top = y0; dirty_bottom = y1; dirty_valid = true;
+  } else {
+    if (y0 < dirty_top) dirty_top = y0;
+    if (y1 > dirty_bottom) dirty_bottom = y1;
+  }
 }
 
-void fb_init_backbuffer(void) {
-    if (!fb_tag_global_ptr)
-        return;
-    backbuffer_size = fb_tag_global_ptr->height * fb_tag_global_ptr->pitch;
-    backbuffer = (uint32_t *)kmalloc(backbuffer_size);
-    if (backbuffer) {
-        memcpy(backbuffer, fb_tag_global_ptr->address, backbuffer_size);
-        klog(LOG_INFO, "Framebuffer: Backbuffer enabled.");
-    }
+void fb_init(struct limine_framebuffer *fb) {
+  current_fb.address = (uint64_t)fb->address;
+  current_fb.width = fb->width;
+  current_fb.height = fb->height;
+  current_fb.pitch = fb->pitch;
+  current_fb.bpp = fb->bpp;
+  mode_capacity = fb->height * fb->pitch;
 }
 
-void fb_flush(void) {
-    if (backbuffer && fb_tag_global_ptr && fb_tag_global_ptr->address) {
-        memcpy(fb_tag_global_ptr->address, backbuffer, backbuffer_size);
-    }
+void fb_update_mode(uint32_t width, uint32_t height, uint32_t pitch) {
+  current_fb.width = width; current_fb.height = height; current_fb.pitch = pitch;
+  dirty_valid = false;
+  fb_clear(0);
 }
 
-void fb_put_pixel(int x, int y, uint32_t color) {
-    if (!backbuffer) return;
-
-    const fb_info_t *fb_info = fb_get_info();
-    if (x >= 0 && x < (int)fb_info->width && y >= 0 && y < (int)fb_info->height) {
-        // pitch is in bytes, but backbuffer is uint32_t*, so we divide by 4
-        uint64_t offset_pixels = (y * (fb_info->pitch / 4)) + x;
-        backbuffer[offset_pixels] = color;
-    }
+void fb_init_backbuffer() {
+  uint64_t size = current_fb.height * current_fb.pitch;
+  back_buffer = (uint32_t *)kmalloc(size);
+  if (back_buffer) {
+    memset(back_buffer, 0, size);
+    back_buffer_ready = true;
+  }
 }
 
-void fb_draw_pixel(uint32_t x, uint32_t y, uint32_t color) {
-    fb_put_pixel((int)x, (int)y, color);
+bool fb_is_backbuffer_initialized() { return back_buffer_ready; }
+
+void fb_set_pixel(uint32_t x, uint32_t y, uint32_t color) {
+  if (!back_buffer_ready || x >= current_fb.width || y >= current_fb.height) return;
+  back_buffer[y * (current_fb.pitch / 4) + x] = color;
+  if (!dirty_valid) { dirty_top = y; dirty_bottom = y + 1; dirty_valid = true; }
+  else {
+    if (y < dirty_top) dirty_top = y;
+    if (y + 1 > dirty_bottom) dirty_bottom = y + 1;
+  }
+}
+
+uint32_t fb_get_pixel(uint32_t x, uint32_t y) {
+  if (!back_buffer_ready || x >= current_fb.width || y >= current_fb.height) return 0;
+  return back_buffer[y * (current_fb.pitch / 4) + x];
 }
 
 void fb_clear(uint32_t color) {
-    const fb_info_t *fb_info = fb_get_info();
-    if (!fb_info) {
-        return;
-    }
-    fb_draw_rect(0, 0, fb_info->width, fb_info->height, color);
+  if (!back_buffer_ready) return;
+  // Faster clear for 32bpp using memset if color is 0, else loop
+  if (color == 0) {
+      memset(back_buffer, 0, current_fb.height * current_fb.pitch);
+  } else {
+      for (uint32_t y = 0; y < current_fb.height; y++)
+          for (uint32_t x = 0; x < current_fb.width; x++)
+              back_buffer[y * (current_fb.pitch / 4) + x] = color;
+  }
+  fb_mark_all_dirty();
 }
 
-void fb_draw_rect(int x, int y, int w, int h, uint32_t color) {
-    if (!backbuffer) return;
-
-    const fb_info_t *fb_info = fb_get_info();
-
-    for (int curr_y = y; curr_y < y + h; curr_y++) {
-        if (curr_y < 0 || curr_y >= (int)fb_info->height)
-            continue;
-        
-        // Pre-calculate line offset
-        uint32_t* line = backbuffer + (curr_y * (fb_info->pitch / 4));
-        int start_x = (x < 0) ? 0 : x;
-        int end_x = (x + w > (int)fb_info->width) ? (int)fb_info->width : x + w;
-
-        for (int curr_x = start_x; curr_x < end_x; curr_x++) {
-            line[curr_x] = color;
+void fb_draw_bitmap(int x, int y, const uint32_t *data, int w, int h) {
+    for (int row = 0; row < h; row++) {
+        for (int col = 0; col < w; col++) {
+            uint32_t pixel = data[row * w + col];
+            uint8_t a = (pixel >> 24) & 0xFF;
+            if (a > 128)  
+                fb_set_pixel(x + col, y + row, pixel & 0x00FFFFFF);
         }
     }
 }
 
-void fb_draw_char(char c, int x, int y, uint32_t fg, uint32_t bg) {
-    if (!backbuffer) return;
-
-    const fb_info_t *fb_info = fb_get_info();
-    const uint8_t *glyph = default_font[(uint8_t)c];
-
-    for (uint32_t cy = 0; cy < 16; cy++) {
-        if (y + (int)cy < 0 || y + (int)cy >= (int)fb_info->height) continue;
-        uint8_t row = glyph[cy];
-        uint32_t* line = backbuffer + ((y + cy) * (fb_info->pitch / 4));
-        for (uint32_t cx = 0; cx < 8; cx++) {
-            if (x + (int)cx < 0 || x + (int)cx >= (int)fb_info->width) continue;
-            uint32_t color = ((row >> (7 - cx)) & 1) ? fg : bg;
-            line[x + cx] = color;
-        }
+void fb_draw_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color) {
+  for (uint32_t i = 0; i < h; i++) {
+    for (uint32_t j = 0; j < w; j++) {
+      fb_set_pixel(x + j, y + i, color);
     }
+  }
 }
 
-void fb_copy_region(int src_y, int dest_y, int rows) {
-    if (!backbuffer) return;
+extern uint8_t font_bitmap[256][16];
+#define FONT_WIDTH 8
+#define FONT_HEIGHT 16
 
-    const fb_info_t *fb_info = fb_get_info();
-    uint64_t pitch_in_dwords = fb_info->pitch / 4;
-    uint32_t *dst_addr = backbuffer + (dest_y * pitch_in_dwords);
-    uint32_t *src_addr = backbuffer + (src_y * pitch_in_dwords);
-    size_t size_in_dwords = rows * pitch_in_dwords;
-    
-    // Use memmove because regions can overlap during scrolling
-    memmove(dst_addr, src_addr, size_in_dwords * 4);
-}
-
-const fb_info_t *fb_get_info(void) {
-    if (!fb_tag_global_ptr) {
+void fb_draw_char(char c, uint32_t x, uint32_t y, uint32_t fg, uint32_t bg) {
+  if (!back_buffer_ready || x + FONT_WIDTH > current_fb.width || y + FONT_HEIGHT > current_fb.height) return;
+  uint8_t *glyph = font_bitmap[(uint8_t)c];
+  uint32_t pitch_px = current_fb.pitch / 4;
+  for (int i = 0; i < FONT_HEIGHT; i++) {
+    uint32_t *row = back_buffer + (y + i) * pitch_px + x;
+    uint8_t bits = glyph[i];
+    for (int j = 0; j < FONT_WIDTH; j++) {
+      row[j] = (bits & (1 << (7 - j))) ? fg : bg;
     }
-    return fb_tag_global_ptr;
-}
-bool fb_is_backbuffer_initialized(void) {
-    return backbuffer != NULL;
+  }
+  if (!dirty_valid) {
+    dirty_top = y;
+    dirty_bottom = y + FONT_HEIGHT;
+    dirty_valid = true;
+  } else {
+    if (y < dirty_top) dirty_top = y;
+    if (y + FONT_HEIGHT > dirty_bottom) dirty_bottom = y + FONT_HEIGHT;
+  }
 }
 
-void fb_draw_image(const uint32_t* pixels, uint32_t width, uint32_t height, uint32_t x, uint32_t y) {
-    const fb_info_t *fb_info = fb_get_info();
-    if (!fb_info || !fb_info->address || !pixels)
-        return;
-    
-    for (uint32_t img_y = 0; img_y < height; img_y++) {
-        for (uint32_t img_x = 0; img_x < width; img_x++) {
-            uint32_t color = pixels[img_y * width + img_x];
-            int screen_x = x + img_x;
-            int screen_y = y + img_y;
-            
-            if (screen_x >= 0 && screen_x < (int)fb_info->width &&
-                screen_y >= 0 && screen_y < (int)fb_info->height) {
-                fb_put_pixel(screen_x, screen_y, color);
-            }
-        }
-    }
+void fb_flush() {
+  if (!back_buffer_ready || graphics_owner) return;
+  memcpy((void *)current_fb.address, back_buffer, current_fb.height * current_fb.pitch);
+  dirty_valid = false;
 }
+
+void fb_mark_all_dirty(void) {
+  if (!back_buffer_ready) return;
+  dirty_top = 0;
+  dirty_bottom = current_fb.height;
+  dirty_valid = true;
+}
+
+bool fb_flush_dirty(void) {
+  if (!back_buffer_ready || !dirty_valid || graphics_owner) return false;
+  if (dirty_bottom <= dirty_top) { dirty_valid = false; return false; }
+  uint64_t off_px  = (uint64_t)dirty_top * (current_fb.pitch / 4);
+  uint64_t off_byt = (uint64_t)dirty_top * current_fb.pitch;
+  uint64_t rows    = (uint64_t)(dirty_bottom - dirty_top);
+  memcpy((uint8_t *)current_fb.address + off_byt,
+         back_buffer + off_px, (size_t)(rows * current_fb.pitch));
+  dirty_valid = false;
+  return true;
+}
+
+void fb_copy_region(uint32_t src_y, uint32_t dst_y, uint32_t h) {
+  if (!back_buffer_ready) return;
+  uint32_t row_size = current_fb.pitch;
+  if (src_y + h > current_fb.height || dst_y + h > current_fb.height) return;
+  memcpy(back_buffer + (dst_y * row_size / 4), back_buffer + (src_y * row_size / 4), h * row_size);
+  fb_mark_all_dirty();
+}
+
+const fb_info_t *fb_get_info() { return &current_fb; }
